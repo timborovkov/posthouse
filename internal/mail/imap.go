@@ -23,6 +23,7 @@ type SearchOptions struct {
 	Limit               int
 	BeforeUID           uint32
 	ExpectedUIDValidity uint32
+	Mode                string
 }
 
 type SearchResult struct {
@@ -48,7 +49,7 @@ func Search(connection model.Connection, options SearchOptions) (SearchResult, e
 	if options.Folder == "" {
 		options.Folder = "INBOX"
 	}
-	secret, err := config.Secret(connection.Mail.SecretEnv)
+	secret, err := config.ResolveSecret(connection.Mail.Secret)
 	if err != nil {
 		return SearchResult{}, err
 	}
@@ -97,10 +98,29 @@ func Search(connection model.Connection, options SearchOptions) (SearchResult, e
 		uids = uids[len(uids)-options.Limit:]
 	}
 	set := imap.UIDSetNum(uids...)
-	previewSection := &imap.FetchItemBodySection{Specifier: imap.PartSpecifierText, Peek: true, Partial: &imap.SectionPartial{Size: 2048}}
-	fetched, err := client.Fetch(set, &imap.FetchOptions{UID: true, Envelope: true, Flags: true, InternalDate: true, BodySection: []*imap.FetchItemBodySection{previewSection}}).Collect()
+	fetched, err := client.Fetch(set, &imap.FetchOptions{UID: true, Envelope: true, Flags: true, InternalDate: true, RFC822Size: true}).Collect()
 	if err != nil {
 		return SearchResult{}, fmt.Errorf("fetch IMAP messages: %w", err)
+	}
+	// Partial BODY responses are implemented inconsistently by otherwise useful
+	// IMAP servers. Fetch complete messages only when RFC822.SIZE proves they are
+	// small, keeping list reads bounded while retaining useful snippets.
+	const previewFetchLimit = 64 << 10
+	var previewUIDs []imap.UID
+	for _, item := range fetched {
+		if item.RFC822Size >= 0 && item.RFC822Size <= previewFetchLimit {
+			previewUIDs = append(previewUIDs, item.UID)
+		}
+	}
+	previews := make(map[imap.UID]string, len(previewUIDs))
+	if len(previewUIDs) > 0 {
+		previewSection := &imap.FetchItemBodySection{Peek: true}
+		previewItems, previewErr := client.Fetch(imap.UIDSetNum(previewUIDs...), &imap.FetchOptions{UID: true, BodySection: []*imap.FetchItemBodySection{previewSection}}).Collect()
+		if previewErr == nil {
+			for _, item := range previewItems {
+				previews[item.UID] = messagePreview(item.FindBodySection(previewSection))
+			}
+		}
 	}
 	messages := make([]model.Message, 0, len(fetched))
 	for _, item := range fetched {
@@ -117,12 +137,21 @@ func Search(connection model.Connection, options SearchOptions) (SearchResult, e
 			Subject:      item.Envelope.Subject,
 			Date:         item.Envelope.Date,
 			ReceivedAt:   item.InternalDate,
-			Preview:      preview(item.FindBodySection(previewSection)),
+			Preview:      previews[item.UID],
 			Unread:       !slices.Contains(item.Flags, imap.FlagSeen),
 		})
 	}
 	sort.Slice(messages, func(i, j int) bool { return messages[i].UID > messages[j].UID })
 	return SearchResult{Messages: messages, UIDValidity: selected.UIDValidity, UIDNext: uint32(selected.UIDNext), HasMore: hasMore}, nil
+}
+
+func messagePreview(data []byte) string {
+	if index := strings.Index(string(data), "\r\n\r\n"); index >= 0 {
+		data = data[index+4:]
+	} else if index := strings.Index(string(data), "\n\n"); index >= 0 {
+		data = data[index+2:]
+	}
+	return preview(data)
 }
 
 func dialIMAP(settings model.IMAPConfig) (*imapclient.Client, error) {

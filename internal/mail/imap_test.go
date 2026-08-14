@@ -12,3 +12,10 @@ func TestPreviewCollapsesWhitespaceAndLimitsLength(t *testing.T) {
 		t.Fatalf("preview returned %q", got)
 	}
 }
+
+func TestMessagePreviewSkipsHeaders(t *testing.T) {
+	got := messagePreview([]byte("Subject: private\r\nContent-Type: text/plain\r\n\r\nHello from the body"))
+	if got != "Hello from the body" {
+		t.Fatalf("messagePreview returned %q", got)
+	}
+}

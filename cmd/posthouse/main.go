@@ -24,7 +24,9 @@ func main() {
 	}
 	ctx, cancel := cli.SignalContext()
 	defer cancel()
-	application := cli.New(service.New(store), os.Stdout, os.Stderr)
+	applicationService := service.New(store)
+	defer applicationService.Close()
+	application := cli.New(applicationService, os.Stdout, os.Stderr)
 	if err := application.Run(ctx, root.Args()); err != nil {
 		_, _ = fmt.Fprintln(os.Stderr, "posthouse:", err)
 		os.Exit(1)

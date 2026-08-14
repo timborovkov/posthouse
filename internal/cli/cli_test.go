@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"os"
 	"path/filepath"
 	"strings"
@@ -42,6 +43,18 @@ func TestCalendarICSWritesSecureFileAndRefusesOverwrite(t *testing.T) {
 	}
 	if err := application.Run(context.Background(), args); err == nil || !strings.Contains(err.Error(), "already exists") {
 		t.Fatalf("second Run returned %v", err)
+	}
+}
+
+func TestHeadlessCacheRekeyReportsEnvironmentRotation(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	t.Setenv("POSTHOUSE_CACHE_KEY_NEW", base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{1}, 32)))
+	application := testCLI(t, new(bytes.Buffer))
+	if err := application.Run(context.Background(), []string{"cache", "rekey"}); err != nil {
+		t.Fatal(err)
+	}
+	if output := application.stdout.(*bytes.Buffer).String(); !strings.Contains(output, "required_action") || !strings.Contains(output, "POSTHOUSE_CACHE_KEY") {
+		t.Fatalf("rekey output = %s", output)
 	}
 }
 

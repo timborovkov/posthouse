@@ -28,3 +28,29 @@ func TestMatchRejectsEmptyResult(t *testing.T) {
 		t.Fatal("Match returned nil error for an empty result")
 	}
 }
+
+func TestMatchIntersectsCalendarCollections(t *testing.T) {
+	connections := []model.Connection{
+		{ID: "work", Name: "Work", Calendar: &model.CalendarConfig{Kind: "caldav", Collections: []model.CalendarCollection{{ID: "team-id", Name: "Team"}}}},
+		{ID: "personal", Name: "Personal", Calendar: &model.CalendarConfig{Kind: "caldav", Collections: []model.CalendarCollection{{ID: "home-id", Name: "Home"}}}},
+		{ID: "holidays", Name: "Holidays", Calendar: &model.CalendarConfig{Kind: "feed"}},
+	}
+	matches, err := Match(connections, model.Selector{Collections: []string{"TEAM"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 1 || matches[0].ID != "work" {
+		t.Fatalf("collection selector returned %#v", matches)
+	}
+}
+
+func TestMatchGranularCapability(t *testing.T) {
+	connections := []model.Connection{
+		{ID: "read-only", Calendar: &model.CalendarConfig{}, Capabilities: []string{"calendar.read"}},
+		{ID: "writable", Calendar: &model.CalendarConfig{}, Capabilities: []string{"calendar.read", "calendar.write"}},
+	}
+	got, err := Match(connections, model.Selector{Capability: "calendar.write"})
+	if err != nil || len(got) != 1 || got[0].ID != "writable" {
+		t.Fatalf("Match returned %#v, %v", got, err)
+	}
+}

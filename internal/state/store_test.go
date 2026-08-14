@@ -1,0 +1,255 @@
+package state_test
+
+// These tests verify encrypted cache round trips and that provider content is
+// not left recoverable as plaintext in the SQLite file.
+
+import (
+	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/timborovkov/posthouse/internal/model"
+	"github.com/timborovkov/posthouse/internal/state"
+)
+
+func TestEncryptedCacheAndOperationRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	store, err := state.OpenWithKey(path, 2<<20, bytesOf(7, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	secretContent := []byte("Highly confidential subject and body")
+	if err := store.Put(context.Background(), state.CacheEntry{Namespace: "message_body", Key: "one", ConnectionID: "work", Kind: "message_body", ExpiresAt: time.Now().Add(time.Hour), Value: secretContent}); err != nil {
+		t.Fatal(err)
+	}
+	entry, ok, err := store.Get(context.Background(), "message_body", "one", false)
+	if err != nil || !ok || string(entry.Value) != string(secretContent) {
+		t.Fatalf("Get returned %q, %v, %v", entry.Value, ok, err)
+	}
+	prepared := model.PreparedOperation{Token: "opaque-token", Kind: "mail.send", ConnectionID: "work", CreatedAt: time.Now(), ExpiresAt: time.Now().Add(time.Minute), Status: "prepared"}
+	payload, _ := json.Marshal(map[string]string{"subject": "Secret operation subject"})
+	if err := store.PutOperation(context.Background(), state.OperationRecord{Public: prepared, Payload: payload, Digest: "digest"}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.GetOperation(context.Background(), prepared.Token)
+	if err != nil || got.Public.Kind != "mail.send" {
+		t.Fatalf("GetOperation: %#v %v", got, err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, plaintext := range []string{string(secretContent), "Secret operation subject", "opaque-token"} {
+		if strings.Contains(string(raw), plaintext) {
+			t.Fatalf("state database exposed plaintext %q", plaintext)
+		}
+	}
+}
+
+func TestLRUEvictsAttachmentsBeforeBodies(t *testing.T) {
+	store, err := state.OpenWithKey(filepath.Join(t.TempDir(), "state.db"), 10, bytesOf(9, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	if err := store.Put(ctx, state.CacheEntry{Namespace: "message_body", Key: "body", Kind: "message_body", Value: []byte("12345678")}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Put(ctx, state.CacheEntry{Namespace: "attachment", Key: "attachment", Kind: "attachment", Value: []byte("abcdefgh")}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, _ := store.Get(ctx, "attachment", "attachment", true); ok {
+		t.Fatal("attachment was not evicted first")
+	}
+	if _, ok, _ := store.Get(ctx, "message_body", "body", true); !ok {
+		t.Fatal("message body was evicted before attachment")
+	}
+}
+
+func TestUpdatingEntryDoesNotReplaceAnotherEntriesChunks(t *testing.T) {
+	store, err := state.OpenWithKey(filepath.Join(t.TempDir(), "state.db"), 2<<20, bytesOf(8, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	for _, entry := range []state.CacheEntry{
+		{Namespace: "message_body", Key: "one", Kind: "message_body", Value: []byte("first")},
+		{Namespace: "message_body", Key: "two", Kind: "message_body", Value: []byte("second")},
+		{Namespace: "message_body", Key: "one", Kind: "message_body", Value: []byte("updated")},
+	} {
+		if err := store.Put(ctx, entry); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for key, want := range map[string]string{"one": "updated", "two": "second"} {
+		entry, ok, err := store.Get(ctx, "message_body", key, false)
+		if err != nil || !ok || string(entry.Value) != want {
+			t.Fatalf("Get(%q) = %q, %v, %v; want %q", key, entry.Value, ok, err, want)
+		}
+	}
+}
+
+func TestRekeyPreservesCacheAndPreparedOperations(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", "managed-by-test")
+	path := filepath.Join(t.TempDir(), "state.db")
+	oldKey, newKey := bytesOf(3, 32), bytesOf(4, 32)
+	store, err := state.OpenWithKey(path, 2<<20, oldKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := store.Put(ctx, state.CacheEntry{Namespace: "event", Key: "one", Kind: "event", Value: []byte("private event")}); err != nil {
+		t.Fatal(err)
+	}
+	prepared := model.PreparedOperation{Token: "rekey-token", Kind: "calendar.update", ConnectionID: "work", CreatedAt: time.Now(), ExpiresAt: time.Now().Add(time.Minute), Status: "prepared"}
+	if err := store.PutOperation(ctx, state.OperationRecord{Public: prepared, Payload: []byte(`{"title":"private"}`), Digest: "digest"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Rekey(ctx, newKey); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := state.OpenWithKey(path, 2<<20, oldKey); err == nil || !strings.Contains(err.Error(), "cache key does not match") {
+		t.Fatalf("opening rekeyed state with old key returned %v", err)
+	}
+	reopened, err := state.OpenWithKey(path, 2<<20, newKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	entry, ok, err := reopened.Get(ctx, "event", "one", false)
+	if err != nil || !ok || string(entry.Value) != "private event" {
+		t.Fatalf("cache after rekey = %q, %v, %v", entry.Value, ok, err)
+	}
+	operation, err := reopened.GetOperation(ctx, prepared.Token)
+	if err != nil || string(operation.Payload) != `{"title":"private"}` {
+		t.Fatalf("operation after rekey = %#v, %v", operation, err)
+	}
+}
+
+func TestRekeyRejectsWritesFromStoreWithStaleKey(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", "managed-by-test")
+	path := filepath.Join(t.TempDir(), "state.db")
+	oldKey, newKey := bytesOf(7, 32), bytesOf(8, 32)
+	current, err := state.OpenWithKey(path, 2<<20, oldKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer current.Close()
+	stale, err := state.OpenWithKey(path, 2<<20, oldKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stale.Close()
+
+	if err := current.Rekey(context.Background(), newKey); err != nil {
+		t.Fatal(err)
+	}
+	err = stale.Put(context.Background(), state.CacheEntry{Namespace: "event", Key: "stale", Kind: "event", Value: []byte("old-key ciphertext")})
+	if err == nil || !strings.Contains(err.Error(), "cache key changed") {
+		t.Fatalf("stale Put returned %v", err)
+	}
+
+	reopened, err := state.OpenWithKey(path, 2<<20, newKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if _, found, err := reopened.Get(context.Background(), "event", "stale", true); err != nil || found {
+		t.Fatalf("stale cache entry found=%v, err=%v", found, err)
+	}
+}
+
+func TestPreparedOperationCanOnlyBeClaimedOnceAcrossStores(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	key := bytesOf(6, 32)
+	first, err := state.OpenWithKey(path, 2<<20, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	second, err := state.OpenWithKey(path, 2<<20, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	prepared := model.PreparedOperation{Token: "claim-once", Kind: "mail.send", ConnectionID: "work", CreatedAt: time.Now(), ExpiresAt: time.Now().Add(time.Minute), Status: "prepared"}
+	if err := first.PutOperation(context.Background(), state.OperationRecord{Public: prepared, Payload: []byte(`{}`), Digest: "digest"}); err != nil {
+		t.Fatal(err)
+	}
+	var wait sync.WaitGroup
+	results := make(chan bool, 2)
+	for _, store := range []*state.Store{first, second} {
+		wait.Add(1)
+		go func(store *state.Store) {
+			defer wait.Done()
+			_, claimed, err := store.ClaimOperation(context.Background(), prepared.Token)
+			if err != nil {
+				t.Errorf("ClaimOperation: %v", err)
+			}
+			results <- claimed
+		}(store)
+	}
+	wait.Wait()
+	close(results)
+	claimed := 0
+	for result := range results {
+		if result {
+			claimed++
+		}
+	}
+	if claimed != 1 {
+		t.Fatalf("claimed %d times; want exactly once", claimed)
+	}
+}
+
+func TestPreparedOperationsRespectStateLimit(t *testing.T) {
+	store, err := state.OpenWithKey(filepath.Join(t.TempDir(), "state.db"), 128, bytesOf(5, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	prepared := model.PreparedOperation{Token: "too-large", Kind: "mail.send", ConnectionID: "work", CreatedAt: time.Now(), ExpiresAt: time.Now().Add(time.Minute), Status: "prepared"}
+	err = store.PutOperation(context.Background(), state.OperationRecord{Public: prepared, Payload: []byte(`"` + strings.Repeat("private payload", 100) + `"`), Digest: "digest"})
+	if err == nil || !strings.Contains(err.Error(), "state exceeds") {
+		t.Fatalf("PutOperation returned %v", err)
+	}
+	stats, err := store.Stats(context.Background())
+	if err != nil || stats.Operations != 0 {
+		t.Fatalf("Stats after rejected operation = %#v, %v", stats, err)
+	}
+}
+
+func TestWrongKeyFailsWhenOpeningState(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	store, err := state.OpenWithKey(path, 2<<20, bytesOf(1, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := state.OpenWithKey(path, 2<<20, bytesOf(2, 32)); err == nil || !strings.Contains(err.Error(), "cache key does not match") {
+		t.Fatalf("OpenWithKey returned %v", err)
+	}
+}
+
+func bytesOf(value byte, count int) []byte {
+	result := make([]byte, count)
+	for i := range result {
+		result[i] = value
+	}
+	return result
+}

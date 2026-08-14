@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -14,6 +16,7 @@ import (
 	"github.com/timborovkov/posthouse/internal/config"
 	postmail "github.com/timborovkov/posthouse/internal/mail"
 	"github.com/timborovkov/posthouse/internal/model"
+	"github.com/timborovkov/posthouse/internal/state"
 )
 
 func TestListConnectionsCursorPagination(t *testing.T) {
@@ -57,6 +60,45 @@ func TestListEventsCursorPagination(t *testing.T) {
 	}
 	if _, err := application.ListEvents(context.Background(), model.Selector{}, start, end, "changed", 2, first.NextCursor); err == nil {
 		t.Fatal("ListEvents accepted a cursor with changed filters")
+	}
+}
+
+func TestListEventsDetectsSameKeyContentMutation(t *testing.T) {
+	application := serviceWithConnections(t, calendarConnection("calendar", "Calendar"))
+	title := "Original"
+	application.calendar = calendar.NewClient(&http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		feed := "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n" + eventFixture("one", "One", "20260814T090000Z") + eventFixture("two", title, "20260815T090000Z") + "END:VCALENDAR\r\n"
+		return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: make(http.Header), Body: io.NopCloser(strings.NewReader(feed))}, nil
+	})})
+	start, end := time.Date(2026, 8, 14, 0, 0, 0, 0, time.UTC), time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC)
+	first, err := application.ListEvents(context.Background(), model.Selector{}, start, end, "", 1, "")
+	if err != nil || first.NextCursor == "" {
+		t.Fatalf("first page = %#v, %v", first, err)
+	}
+	title = "Changed"
+	if _, err := application.ListEvents(context.Background(), model.Selector{}, start, end, "", 1, first.NextCursor); err == nil || !strings.Contains(err.Error(), "sources changed") {
+		t.Fatalf("changed source returned %v", err)
+	}
+}
+
+func TestListEventsUsesEmptyStaleCache(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	application := serviceWithConnections(t, calendarConnection("calendar", "Calendar"))
+	available := true
+	application.calendar = calendar.NewClient(&http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		if !available {
+			return nil, fmt.Errorf("offline")
+		}
+		return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: make(http.Header), Body: io.NopCloser(strings.NewReader("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nEND:VCALENDAR\r\n"))}, nil
+	})})
+	start, end := time.Date(2026, 8, 14, 0, 0, 0, 0, time.UTC), time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC)
+	if _, err := application.ListEvents(context.Background(), model.Selector{}, start, end, "", 10, ""); err != nil {
+		t.Fatal(err)
+	}
+	available = false
+	page, err := application.ListEvents(context.Background(), model.Selector{}, start, end, "", 10, "")
+	if err != nil || len(page.Events) != 0 || len(page.Errors) != 1 || !page.Errors[0].Stale {
+		t.Fatalf("stale empty page = %#v, %v", page, err)
 	}
 }
 
@@ -108,6 +150,205 @@ func TestSearchMessagesCompositeCursor(t *testing.T) {
 	changed.Query = "other"
 	if _, err := application.SearchMessages(selection, changed, 2, first.NextCursor); err == nil {
 		t.Fatal("SearchMessages accepted a cursor with changed filters")
+	}
+}
+
+func TestSearchMessagesOfflineCachePaginatesMergedLiveTraversal(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	application := serviceWithConnections(t, mailConnection("work"))
+	messages := []model.Message{
+		{ConnectionID: "work", Folder: "INBOX", UID: 3, ReceivedAt: instant(12)},
+		{ConnectionID: "work", Folder: "INBOX", UID: 2, ReceivedAt: instant(11)},
+		{ConnectionID: "work", Folder: "INBOX", UID: 1, ReceivedAt: instant(10)},
+	}
+	application.mailSearch = func(_ model.Connection, options postmail.SearchOptions) (postmail.SearchResult, error) {
+		var filtered []model.Message
+		for _, message := range messages {
+			if options.BeforeUID == 0 || message.UID < options.BeforeUID {
+				filtered = append(filtered, message)
+			}
+		}
+		hasMore := len(filtered) > options.Limit
+		if hasMore {
+			filtered = filtered[:options.Limit]
+		}
+		return postmail.SearchResult{Messages: filtered, UIDValidity: 7, UIDNext: 4, HasMore: hasMore}, nil
+	}
+
+	liveFirst, err := application.SearchMessages(model.Selector{}, postmail.SearchOptions{}, 1, "")
+	if err != nil || liveFirst.NextCursor == "" {
+		t.Fatalf("first live page = %#v, %v", liveFirst, err)
+	}
+	liveSecond, err := application.SearchMessages(model.Selector{}, postmail.SearchOptions{}, 1, liveFirst.NextCursor)
+	if err != nil || liveSecond.NextCursor == "" {
+		t.Fatalf("second live page = %#v, %v", liveSecond, err)
+	}
+	if _, err := application.SearchMessages(model.Selector{}, postmail.SearchOptions{}, 1, liveSecond.NextCursor); err != nil {
+		t.Fatal(err)
+	}
+
+	var cursor string
+	for wantUID := uint32(3); wantUID > 0; wantUID-- {
+		page, err := application.SearchMessages(model.Selector{}, postmail.SearchOptions{Mode: "offline"}, 1, cursor)
+		if err != nil || len(page.Messages) != 1 || page.Messages[0].UID != wantUID || !page.Messages[0].Stale {
+			t.Fatalf("offline UID %d page = %#v, %v", wantUID, page, err)
+		}
+		cursor = page.NextCursor
+	}
+	if cursor != "" {
+		t.Fatalf("offline traversal has unexpected cursor %q", cursor)
+	}
+}
+
+func TestPreparedOperationRejectsChangedConnection(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	connection := mailConnection("work")
+	connection.Identity = model.Identity{Email: "work@example.test"}
+	connection.Mail.SMTP = model.SMTPConfig{Address: "localhost:3025", Insecure: true}
+	application := serviceWithConnections(t, connection)
+	prepared, err := application.PrepareSend(context.Background(), model.SendMessage{ConnectionID: "work", To: []string{"person@example.test"}, Subject: "subject", Text: "body"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	connection.Mail.SMTP.Address = "localhost:4025"
+	if err := application.UpsertConnection(connection, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := application.ExecuteOperation(context.Background(), prepared.Token); err == nil || !strings.Contains(err.Error(), "preconditions changed") {
+		t.Fatalf("ExecuteOperation error = %v", err)
+	}
+}
+
+func TestOfflineMessageAndAttachmentReads(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	application := serviceWithConnections(t, mailConnection("work"))
+	ledger, err := application.ensureState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	detail := model.MessageDetail{Message: model.Message{ConnectionID: "work", Folder: "INBOX", UID: 7, Subject: "cached"}, Text: "offline body", Attachments: []model.Attachment{{ID: "file", Name: "file.txt", ContentType: "text/plain", Size: 7}}}
+	data, _ := json.Marshal(detail)
+	ctx := context.Background()
+	if err := ledger.Put(ctx, state.CacheEntry{Namespace: "message_body", Key: messageCacheKey("work", "INBOX", 7), Kind: "message_body", CachedAt: time.Now(), Value: data}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ledger.Put(ctx, state.CacheEntry{Namespace: "attachment", Key: messageCacheKey("work", "INBOX", 7) + "/file", Kind: "attachment", CachedAt: time.Now(), Value: []byte("content")}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := application.GetMessageMode("work", "INBOX", 7, "offline")
+	if err != nil || got.Text != "offline body" || !got.Stale || got.CachedAt.IsZero() {
+		t.Fatalf("offline message = %#v, %v", got, err)
+	}
+	attachment, content, err := application.GetAttachmentMode(ctx, "work", "INBOX", 7, "file", "offline")
+	if err != nil || attachment.Name != "file.txt" || !attachment.Stale || attachment.CachedAt.IsZero() || string(content) != "content" {
+		t.Fatalf("offline attachment = %#v %q, %v", attachment, content, err)
+	}
+}
+
+func TestPartialMailCursorKeepsFailedSourceSnapshot(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	application := serviceWithConnections(t, mailConnection("a"), mailConnection("b"))
+	bAvailable := false
+	application.mailSearch = func(connection model.Connection, options postmail.SearchOptions) (postmail.SearchResult, error) {
+		if connection.ID == "b" && !bAvailable {
+			return postmail.SearchResult{}, fmt.Errorf("temporary outage")
+		}
+		messages := []model.Message{{ConnectionID: connection.ID, UID: 2, ReceivedAt: instant(12)}, {ConnectionID: connection.ID, UID: 1, ReceivedAt: instant(10)}}
+		if connection.ID == "b" {
+			messages = []model.Message{{ConnectionID: "b", UID: 9, ReceivedAt: instant(13)}}
+		}
+		var filtered []model.Message
+		for _, message := range messages {
+			if options.BeforeUID == 0 || message.UID < options.BeforeUID {
+				filtered = append(filtered, message)
+			}
+		}
+		hasMore := len(filtered) > options.Limit
+		if hasMore {
+			filtered = filtered[:options.Limit]
+		}
+		return postmail.SearchResult{Messages: filtered, UIDValidity: 1, UIDNext: 10, HasMore: hasMore}, nil
+	}
+	first, err := application.SearchMessages(model.Selector{}, postmail.SearchOptions{}, 1, "")
+	if err != nil || len(first.Errors) != 1 || first.NextCursor == "" {
+		t.Fatalf("first partial page = %#v, %v", first, err)
+	}
+	bAvailable = true
+	continued, err := application.SearchMessages(model.Selector{}, postmail.SearchOptions{}, 1, first.NextCursor)
+	if err != nil || len(continued.Messages) != 1 || continued.Messages[0].ConnectionID != "a" || len(continued.Errors) != 1 {
+		t.Fatalf("continued partial page = %#v, %v", continued, err)
+	}
+	fresh, err := application.SearchMessages(model.Selector{}, postmail.SearchOptions{}, 1, "")
+	if err != nil || len(fresh.Messages) != 1 || fresh.Messages[0].ConnectionID != "b" {
+		t.Fatalf("fresh traversal = %#v, %v", fresh, err)
+	}
+}
+
+func TestPreparedOperationExpires(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	connection := mailConnection("work")
+	connection.Identity = model.Identity{Email: "work@example.test"}
+	connection.Mail.SMTP = model.SMTPConfig{Address: "localhost:3025", Insecure: true}
+	application := serviceWithConnections(t, connection)
+	prepared, err := application.PrepareSend(context.Background(), model.SendMessage{ConnectionID: "work", To: []string{"person@example.test"}, Subject: "subject"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	application.now = func() time.Time { return prepared.ExpiresAt.Add(time.Second) }
+	if _, err := application.ExecuteOperation(context.Background(), prepared.Token); err == nil || !strings.Contains(err.Error(), "expired") {
+		t.Fatalf("ExecuteOperation error = %v", err)
+	}
+}
+
+func TestInterruptedClaimBecomesUncertainWithoutRetry(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	connection := mailConnection("work")
+	connection.Identity = model.Identity{Email: "work@example.test"}
+	connection.Mail.SMTP = model.SMTPConfig{Address: "localhost:3025", Insecure: true}
+	application := serviceWithConnections(t, connection)
+	prepared, err := application.PrepareSend(context.Background(), model.SendMessage{ConnectionID: "work", To: []string{"person@example.test"}, Subject: "subject"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger, err := application.ensureState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, claimed, err := ledger.ClaimOperation(context.Background(), prepared.Token); err != nil || !claimed {
+		t.Fatalf("ClaimOperation claimed=%v err=%v", claimed, err)
+	}
+	application.now = func() time.Time { return prepared.ExpiresAt.Add(time.Second) }
+	result, err := application.ExecuteOperation(context.Background(), prepared.Token)
+	if err != nil || result.Status != "uncertain" {
+		t.Fatalf("ExecuteOperation result=%#v err=%v", result, err)
+	}
+}
+
+func TestSyncAcceptsGranularReadCapability(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	application := serviceWithConnections(t, mailConnection("work"))
+	calls := 0
+	application.mailSearch = func(connection model.Connection, _ postmail.SearchOptions) (postmail.SearchResult, error) {
+		calls++
+		return postmail.SearchResult{Messages: []model.Message{{ConnectionID: connection.ID, UID: 1}}, UIDValidity: 1, UIDNext: 2}, nil
+	}
+	result, err := application.Sync(context.Background(), model.Selector{Capability: "mail.read"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 || result["messages"] != 1 {
+		t.Fatalf("Sync returned %#v after %d calls", result, calls)
+	}
+	if _, err := application.Sync(context.Background(), model.Selector{Capability: "mail.send"}); err == nil {
+		t.Fatal("Sync accepted non-readable capability")
+	}
+}
+
+func TestReplyRecipientsPreferReplyTo(t *testing.T) {
+	original := model.MessageDetail{Message: model.Message{From: []model.Address{{Email: "from@example.test"}}}, ReplyTo: []model.Address{{Email: "reply@example.test"}}}
+	got := replyRecipients(original)
+	if len(got) != 1 || got[0] != "reply@example.test" {
+		t.Fatalf("replyRecipients returned %#v", got)
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -57,9 +58,183 @@ func TestClientFiltersFeed(t *testing.T) {
 	}
 }
 
+func TestClientDoesNotExposeProviderErrorBody(t *testing.T) {
+	client := NewClient(&http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return response(http.StatusBadGateway, "private calendar content and secret-token"), nil
+	})})
+	connection := model.Connection{ID: "work", Calendar: &model.CalendarConfig{Kind: "feed", URL: "http://localhost/calendar.ics"}}
+	_, err := client.List(context.Background(), connection, time.Now(), time.Now().Add(time.Hour), "")
+	if err == nil || strings.Contains(err.Error(), "private") || strings.Contains(err.Error(), "secret-token") {
+		t.Fatalf("error exposed provider body: %v", err)
+	}
+}
+
+func TestClientDoesNotExposeSecretFeedURLOnTransportError(t *testing.T) {
+	client := NewClient(&http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		return nil, &url.Error{Op: "Get", URL: request.URL.String(), Err: fmt.Errorf("dial failed")}
+	})})
+	connection := model.Connection{ID: "private", Calendar: &model.CalendarConfig{Kind: "feed", URL: "https://calendar.example.test/private.ics?token=sentinel-secret"}}
+	_, err := client.List(context.Background(), connection, time.Now(), time.Now().Add(time.Hour), "")
+	if err == nil || strings.Contains(err.Error(), "sentinel-secret") || strings.Contains(err.Error(), "calendar.example.test") {
+		t.Fatalf("transport error exposed private URL: %v", err)
+	}
+}
+
+func TestCalDAVHrefMustStayWithinConfiguredCollection(t *testing.T) {
+	connection := model.Connection{ID: "work", Calendar: &model.CalendarConfig{
+		Kind: "caldav", URL: "https://calendar.example.test/root/",
+		Collections: []model.CalendarCollection{{ID: "team", Path: "/root/team/"}},
+	}}
+	for _, href := range []string{"https://attacker.example/item.ics", "/root/personal/item.ics", "/root/team/../personal/item.ics"} {
+		if err := ValidateCalDAVHref(connection, "team", href); err == nil {
+			t.Fatalf("ValidateCalDAVHref accepted %q", href)
+		}
+	}
+	if err := ValidateCalDAVHref(connection, "team", "/root/team/item.ics"); err != nil {
+		t.Fatalf("ValidateCalDAVHref rejected collection object: %v", err)
+	}
+}
+
+func TestBasicAuthClientRejectsCrossOriginRequest(t *testing.T) {
+	origin, _ := url.Parse("https://calendar.example.test/")
+	called := false
+	client := &basicAuthClient{origin: origin, username: "work", password: "sentinel", client: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		called = true
+		return response(http.StatusOK, ""), nil
+	})}}
+	request, _ := http.NewRequest(http.MethodGet, "https://attacker.example/item.ics", nil)
+	if _, err := client.Do(request); err == nil || called {
+		t.Fatalf("cross-origin request returned err=%v called=%v", err, called)
+	}
+}
+
 func TestFilename(t *testing.T) {
 	if got := Filename(model.Event{Title: "Team Planning / Q3"}); got != "team-planning-q3.ics" {
 		t.Fatalf("Filename returned %q", got)
+	}
+}
+
+func TestParseRangeExpandsRecurrenceExceptionsAndOverrides(t *testing.T) {
+	data := `BEGIN:VCALENDAR
+VERSION:2.0
+BEGIN:VEVENT
+UID:series
+DTSTART;TZID=Europe/Tallinn:20260817T090000
+DTEND;TZID=Europe/Tallinn:20260817T100000
+RRULE:FREQ=DAILY;COUNT=4
+EXDATE;TZID=Europe/Tallinn:20260818T090000
+SUMMARY:Daily planning
+END:VEVENT
+BEGIN:VEVENT
+UID:series
+RECURRENCE-ID;TZID=Europe/Tallinn:20260819T090000
+DTSTART;TZID=Europe/Tallinn:20260819T110000
+DURATION:PT30M
+SUMMARY:Moved planning
+END:VEVENT
+END:VCALENDAR`
+	events, err := ParseRange([]byte(data), time.Date(2026, 8, 17, 0, 0, 0, 0, time.UTC), time.Date(2026, 8, 22, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 3 {
+		t.Fatalf("got %d events: %#v", len(events), events)
+	}
+	if events[1].Title != "Moved planning" || events[1].End.Sub(events[1].Start) != 30*time.Minute {
+		t.Fatalf("override was %#v", events[1])
+	}
+	if events[0].ID == events[2].ID || !strings.Contains(events[0].ID, "series#") {
+		t.Fatalf("occurrence IDs are not stable: %#v", events)
+	}
+}
+
+func TestParseRangeKeepsLocalTimeAcrossDST(t *testing.T) {
+	data := `BEGIN:VCALENDAR
+VERSION:2.0
+BEGIN:VEVENT
+UID:dst-series
+DTSTART;TZID=Europe/Tallinn:20260323T090000
+DTEND;TZID=Europe/Tallinn:20260323T100000
+RRULE:FREQ=WEEKLY;COUNT=3
+SUMMARY:DST-safe meeting
+END:VEVENT
+END:VCALENDAR`
+	events, err := ParseRange([]byte(data), time.Date(2026, 3, 20, 0, 0, 0, 0, time.UTC), time.Date(2026, 4, 10, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 3 {
+		t.Fatalf("got %d events: %#v", len(events), events)
+	}
+	for _, event := range events {
+		if event.Start.Hour() != 9 || event.Start.Location().String() != "Europe/Tallinn" {
+			t.Fatalf("occurrence shifted across DST: %v", event.Start)
+		}
+	}
+	if events[0].Start.UTC().Hour() == events[1].Start.UTC().Hour() {
+		t.Fatalf("UTC offset did not change across DST: %v, %v", events[0].Start, events[1].Start)
+	}
+}
+
+func TestParseRangeUsesEmbeddedTimezone(t *testing.T) {
+	data := `BEGIN:VCALENDAR
+VERSION:2.0
+BEGIN:VTIMEZONE
+TZID:Custom/Tallinn
+BEGIN:DAYLIGHT
+DTSTART:19700329T030000
+RRULE:FREQ=YEARLY;BYMONTH=3;BYDAY=-1SU
+TZOFFSETFROM:+0200
+TZOFFSETTO:+0300
+TZNAME:EEST
+END:DAYLIGHT
+BEGIN:STANDARD
+DTSTART:19701025T040000
+RRULE:FREQ=YEARLY;BYMONTH=10;BYDAY=-1SU
+TZOFFSETFROM:+0300
+TZOFFSETTO:+0200
+TZNAME:EET
+END:STANDARD
+END:VTIMEZONE
+BEGIN:VEVENT
+UID:embedded-zone
+DTSTART;TZID=Custom/Tallinn:20260323T090000
+DTEND;TZID=Custom/Tallinn:20260323T100000
+RRULE:FREQ=WEEKLY;COUNT=3
+SUMMARY:Embedded timezone
+END:VEVENT
+END:VCALENDAR`
+	events, err := ParseRange([]byte(data), time.Date(2026, 3, 20, 0, 0, 0, 0, time.UTC), time.Date(2026, 4, 10, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 3 {
+		t.Fatalf("got %d events: %#v", len(events), events)
+	}
+	for _, event := range events {
+		if event.Start.Hour() != 9 || event.Start.Location().String() != "Custom/Tallinn" {
+			t.Fatalf("embedded timezone occurrence = %v", event.Start)
+		}
+	}
+}
+
+func TestParseAllDayAndGenerateInvitation(t *testing.T) {
+	data := "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:all-day\r\nDTSTART;VALUE=DATE:20260820\r\nDURATION:P1D\r\nSUMMARY:Offsite\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+	events, err := ParseRange([]byte(data), time.Date(2026, 8, 19, 0, 0, 0, 0, time.UTC), time.Date(2026, 8, 22, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || !events[0].AllDay || events[0].End.Sub(events[0].Start) != 24*time.Hour {
+		t.Fatalf("all-day event: %#v", events)
+	}
+	_, invitation, err := GenerateInvitation(model.Event{ID: "invite", Title: "Planning", Start: time.Date(2026, 8, 20, 9, 0, 0, 0, time.UTC), End: time.Date(2026, 8, 20, 10, 0, 0, 0, time.UTC), Organizer: "owner@example.test", Attendees: []string{"guest@example.test"}, Sequence: 2}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"METHOD:REQUEST", "SEQUENCE:2", "ORGANIZER:mailto:owner@example.test", "ATTENDEE:mailto:guest@example.test"} {
+		if !strings.Contains(invitation, want) {
+			t.Fatalf("invitation missing %q:\n%s", want, invitation)
+		}
 	}
 }
 

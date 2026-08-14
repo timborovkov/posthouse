@@ -1,20 +1,30 @@
 package mail
 
 import (
+	"bytes"
 	"crypto/tls"
 	"fmt"
 	"io"
-	"mime"
 	"net"
 	stdmail "net/mail"
 	"net/smtp"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
 
+	gomail "github.com/emersion/go-message/mail"
 	"github.com/timborovkov/posthouse/internal/config"
 	"github.com/timborovkov/posthouse/internal/model"
 )
+
+type UncertainError struct{ Err error }
+
+func (e *UncertainError) Error() string {
+	return "SMTP delivery outcome is uncertain after DATA: " + e.Err.Error()
+}
+func (e *UncertainError) Unwrap() error { return e.Err }
 
 func Send(connection model.Connection, message model.SendMessage) error {
 	if connection.Mail == nil || connection.Mail.SMTP.Address == "" {
@@ -23,7 +33,10 @@ func Send(connection model.Connection, message model.SendMessage) error {
 	if len(message.To)+len(message.CC)+len(message.BCC) == 0 {
 		return fmt.Errorf("at least one recipient is required")
 	}
-	secret, err := config.Secret(connection.Mail.SecretEnv)
+	if err := validateMessage(message); err != nil {
+		return err
+	}
+	secret, err := config.ResolveSecret(connection.Mail.Secret)
 	if err != nil {
 		return err
 	}
@@ -64,16 +77,18 @@ func Send(connection model.Connection, message model.SendMessage) error {
 	if err != nil {
 		return fmt.Errorf("start SMTP body: %w", err)
 	}
-	if _, err := writer.Write(buildMessage(connection.Identity, from, message)); err != nil {
-		_ = writer.Close()
+	if err := writeMessage(writer, connection.Identity, from, message); err != nil {
+		// Do not close the DATA writer here: Close sends the SMTP terminator and
+		// could make the server accept a partial message. Closing the client
+		// connection causes the server to discard the incomplete transaction.
 		return fmt.Errorf("write SMTP body: %w", err)
 	}
 	if err := writer.Close(); err != nil {
-		return fmt.Errorf("finish SMTP body: %w", err)
+		return &UncertainError{Err: err}
 	}
-	if err := client.Quit(); err != nil {
-		return fmt.Errorf("finish SMTP session: %w", err)
-	}
+	// DATA has been accepted at this point. A failed QUIT must not invite a
+	// retry that could duplicate the message.
+	_ = client.Quit()
 	return nil
 }
 
@@ -107,30 +122,174 @@ func dialSMTP(settings model.SMTPConfig, host string) (*smtp.Client, error) {
 	return client, nil
 }
 
-func buildMessage(identity model.Identity, from string, message model.SendMessage) []byte {
-	fromAddress := (&stdmail.Address{Name: identity.Name, Address: from}).String()
-	var builder strings.Builder
-	writeHeader(&builder, "From", fromAddress)
-	writeHeader(&builder, "To", strings.Join(message.To, ", "))
-	if len(message.CC) > 0 {
-		writeHeader(&builder, "Cc", strings.Join(message.CC, ", "))
+func buildMessage(identity model.Identity, from string, message model.SendMessage) ([]byte, error) {
+	if err := validateMessage(message); err != nil {
+		return nil, err
+	}
+	var buffer bytes.Buffer
+	if err := writeMessage(&buffer, identity, from, message); err != nil {
+		return nil, err
+	}
+	return buffer.Bytes(), nil
+}
+
+func validateMessage(message model.SendMessage) error {
+	var header gomail.Header
+	for key, values := range map[string][]string{"To": message.To, "Cc": message.CC, "Bcc": message.BCC} {
+		if err := setAddresses(&header, key, values); err != nil {
+			return err
+		}
 	}
 	if message.ReplyTo != "" {
-		writeHeader(&builder, "Reply-To", message.ReplyTo)
+		if err := setAddresses(&header, "Reply-To", []string{message.ReplyTo}); err != nil {
+			return err
+		}
 	}
-	writeHeader(&builder, "Date", time.Now().Format(time.RFC1123Z))
-	writeHeader(&builder, "Subject", mime.QEncoding.Encode("utf-8", cleanHeader(message.Subject)))
-	writeHeader(&builder, "MIME-Version", "1.0")
-	writeHeader(&builder, "Content-Type", `text/plain; charset="utf-8"`)
-	writeHeader(&builder, "Content-Transfer-Encoding", "8bit")
-	builder.WriteString("\r\n")
-	body := strings.ReplaceAll(message.Text, "\r\n", "\n")
-	body = strings.ReplaceAll(body, "\r", "\n")
-	builder.WriteString(strings.ReplaceAll(body, "\n", "\r\n"))
-	if !strings.HasSuffix(builder.String(), "\r\n") {
-		builder.WriteString("\r\n")
+	for _, attachment := range message.Attachments {
+		name := attachment.Name
+		if name == "" && attachment.Path != "" {
+			name = filepath.Base(attachment.Path)
+		}
+		if name == "" {
+			return fmt.Errorf("attachment name is required")
+		}
+		if attachment.Path != "" {
+			file, err := os.Open(attachment.Path)
+			if err != nil {
+				return fmt.Errorf("open attachment %s: %w", name, err)
+			}
+			if err := file.Close(); err != nil {
+				return fmt.Errorf("close attachment %s: %w", name, err)
+			}
+		}
 	}
-	return []byte(builder.String())
+	return nil
+}
+
+func writeMessage(writer io.Writer, identity model.Identity, from string, message model.SendMessage) error {
+	var header gomail.Header
+	header.SetDate(time.Now())
+	header.SetAddressList("From", []*gomail.Address{{Name: identity.Name, Address: from}})
+	if err := setAddresses(&header, "To", message.To); err != nil {
+		return err
+	}
+	if err := setAddresses(&header, "Cc", message.CC); err != nil {
+		return err
+	}
+	if message.ReplyTo != "" {
+		if err := setAddresses(&header, "Reply-To", []string{message.ReplyTo}); err != nil {
+			return err
+		}
+	}
+	header.SetSubject(cleanHeader(message.Subject))
+	if message.InReplyTo != "" {
+		header.Set("In-Reply-To", cleanHeader(message.InReplyTo))
+	}
+	if len(message.References) > 0 {
+		header.Set("References", cleanHeader(strings.Join(message.References, " ")))
+	}
+	if err := header.GenerateMessageID(); err != nil {
+		return fmt.Errorf("generate message ID: %w", err)
+	}
+	if len(message.Attachments) == 0 {
+		var inline gomail.InlineHeader
+		inline.Set("Content-Type", `text/plain; charset="utf-8"`)
+		part, err := gomail.CreateSingleInlineWriter(writer, header)
+		if err != nil {
+			return fmt.Errorf("create message body: %w", err)
+		}
+		_, writeErr := io.WriteString(part, normalizeBody(message.Text))
+		closeErr := part.Close()
+		if writeErr != nil {
+			return writeErr
+		}
+		return closeErr
+	}
+	multipart, err := gomail.CreateWriter(writer, header)
+	if err != nil {
+		return fmt.Errorf("create multipart message: %w", err)
+	}
+	var inline gomail.InlineHeader
+	inline.Set("Content-Type", `text/plain; charset="utf-8"`)
+	body, err := multipart.CreateSingleInline(inline)
+	if err != nil {
+		_ = multipart.Close()
+		return fmt.Errorf("create message body: %w", err)
+	}
+	if _, err := io.WriteString(body, normalizeBody(message.Text)); err != nil {
+		_ = body.Close()
+		_ = multipart.Close()
+		return err
+	}
+	if err := body.Close(); err != nil {
+		_ = multipart.Close()
+		return err
+	}
+	for _, attachment := range message.Attachments {
+		name := attachment.Name
+		if name == "" && attachment.Path != "" {
+			name = filepath.Base(attachment.Path)
+		}
+		if name == "" {
+			return fmt.Errorf("attachment name is required")
+		}
+		contentType := attachment.ContentType
+		if contentType == "" {
+			contentType = "application/octet-stream"
+		}
+		var attachmentHeader gomail.AttachmentHeader
+		attachmentHeader.Set("Content-Type", contentType)
+		attachmentHeader.SetFilename(name)
+		part, err := multipart.CreateAttachment(attachmentHeader)
+		if err != nil {
+			return fmt.Errorf("create attachment %s: %w", name, err)
+		}
+		var source io.ReadCloser
+		if attachment.Path != "" {
+			source, err = os.Open(attachment.Path)
+			if err != nil {
+				_ = part.Close()
+				return fmt.Errorf("open attachment %s: %w", name, err)
+			}
+		} else {
+			source = io.NopCloser(bytes.NewReader(attachment.Data))
+		}
+		_, copyErr := io.Copy(part, source)
+		closeSourceErr := source.Close()
+		closePartErr := part.Close()
+		if copyErr != nil {
+			return fmt.Errorf("write attachment %s: %w", name, copyErr)
+		}
+		if closeSourceErr != nil {
+			return closeSourceErr
+		}
+		if closePartErr != nil {
+			return closePartErr
+		}
+	}
+	return multipart.Close()
+}
+
+func setAddresses(header *gomail.Header, key string, values []string) error {
+	if len(values) == 0 {
+		return nil
+	}
+	addresses := make([]*gomail.Address, 0, len(values))
+	for _, value := range values {
+		parsed, err := stdmail.ParseAddress(value)
+		if err != nil {
+			return fmt.Errorf("invalid %s address %q: %w", strings.ToLower(key), value, err)
+		}
+		addresses = append(addresses, &gomail.Address{Name: parsed.Name, Address: parsed.Address})
+	}
+	header.SetAddressList(key, addresses)
+	return nil
+}
+
+func normalizeBody(value string) string {
+	value = strings.ReplaceAll(value, "\r\n", "\n")
+	value = strings.ReplaceAll(value, "\r", "\n")
+	return value
 }
 
 func writeHeader(writer io.StringWriter, key string, value string) {

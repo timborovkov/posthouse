@@ -1,12 +1,44 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/timborovkov/posthouse/internal/model"
 )
+
+func TestLoadMigratesV1AtomicallyAndKeepsBackup(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	v1 := model.Config{Version: 1, Connections: []model.Connection{{ID: "work", Name: "Work", Mail: &model.MailConfig{Username: "work@example.test", SecretEnv: "WORK_PASSWORD", IMAP: model.IMAPConfig{Address: "localhost:3143", Insecure: true}}}}}
+	data, _ := json.Marshal(v1)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := New(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	migrated, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if migrated.Version != 2 || migrated.Connections[0].Mail.Secret.Env != "WORK_PASSWORD" || migrated.Connections[0].Mail.SecretEnv != "" {
+		t.Fatalf("migration returned %#v", migrated)
+	}
+	backup, err := os.ReadFile(path + ".v1.bak")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var original model.Config
+	if err := json.Unmarshal(backup, &original); err != nil {
+		t.Fatal(err)
+	}
+	if original.Version != 1 || original.Connections[0].Mail.SecretEnv != "WORK_PASSWORD" {
+		t.Fatalf("backup changed: %#v", original)
+	}
+}
 
 func TestStoreRoundTripAndPermissions(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "nested", "config.json")

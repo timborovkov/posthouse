@@ -7,10 +7,33 @@ import (
 	"github.com/timborovkov/posthouse/internal/model"
 )
 
+func TestBuildMessagePropagatesValidationErrors(t *testing.T) {
+	for _, message := range []model.SendMessage{
+		{To: []string{"not an address"}, Subject: "invalid"},
+		{To: []string{"person@example.test"}, Subject: "invalid attachment", Attachments: []model.AttachmentInput{{Data: []byte("body")}}},
+	} {
+		if _, err := buildMessage(model.Identity{Email: "sender@example.test"}, "sender@example.test", message); err == nil {
+			t.Fatalf("buildMessage accepted %#v", message)
+		}
+	}
+}
+
+func TestSendRejectsInvalidMIMEBeforeConnecting(t *testing.T) {
+	connection := model.Connection{ID: "work", Identity: model.Identity{Email: "sender@example.test"}, Mail: &model.MailConfig{Username: "sender@example.test", SMTP: model.SMTPConfig{Address: "unreachable.invalid:25", Insecure: true}}}
+	err := Send(connection, model.SendMessage{To: []string{"person@example.test"}, Attachments: []model.AttachmentInput{{Data: []byte("body")}}})
+	if err == nil || !strings.Contains(err.Error(), "attachment name is required") {
+		t.Fatalf("Send returned %v", err)
+	}
+}
+
 func TestBuildMessageDoesNotExposeBCCAndNormalizesHeaders(t *testing.T) {
-	data := string(buildMessage(model.Identity{Name: "Tim", Email: "tim@example.com"}, "tim@example.com", model.SendMessage{
+	encoded, err := buildMessage(model.Identity{Name: "Tim", Email: "tim@example.com"}, "tim@example.com", model.SendMessage{
 		To: []string{"one@example.com"}, BCC: []string{"hidden@example.com"}, Subject: "Hello\r\nBcc: attacker@example.com", Text: "line one\nline two",
-	}))
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := string(encoded)
 	if strings.Contains(data, "hidden@example.com") {
 		t.Fatal("message body exposed a Bcc recipient")
 	}

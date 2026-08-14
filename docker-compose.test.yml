@@ -1,0 +1,32 @@
+name: posthouse-test
+
+services:
+  greenmail:
+    image: greenmail/standalone:2.1.11
+    ports:
+      - "127.0.0.1:3025:3025"
+      - "127.0.0.1:3143:3143"
+      - "127.0.0.1:8080:8080"
+    environment:
+      GREENMAIL_OPTS: >-
+        -Dgreenmail.setup.test.smtp
+        -Dgreenmail.setup.test.imap
+        -Dgreenmail.hostname=0.0.0.0
+        -Dgreenmail.users=work:work-pass@work.test,personal:personal-pass@personal.test
+        -Dgreenmail.users.login=email
+  radicale:
+    image: ghcr.io/kozea/radicale:3.7.3
+    ports:
+      - "127.0.0.1:5232:5232"
+    volumes:
+      - ./testdata/radicale/config:/etc/radicale/config:ro
+      - ./testdata/radicale/users:/etc/radicale/users:ro
+      - radicale-data:/var/lib/radicale
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5232/.web')"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  radicale-data:

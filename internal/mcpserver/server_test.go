@@ -55,10 +55,13 @@ func TestServerListsAndCallsReadOnlyConnectionTool(t *testing.T) {
 	for _, tool := range listed.Tools {
 		names = append(names, tool.Name)
 	}
-	for _, want := range []string{"connections_list", "messages_search", "messages_send", "events_list", "event_ics_generate"} {
+	for _, want := range []string{"connections_list", "messages_search", "messages_get", "messages_send_prepare", "messages_reply_prepare", "messages_forward_prepare", "messages_draft_prepare", "messages_action_prepare", "events_list", "event_ics_generate", "event_create_prepare", "operation_execute", "connection_doctor", "sync", "cache_status"} {
 		if !slices.Contains(names, want) {
 			t.Fatalf("tools %v do not contain %s", names, want)
 		}
+	}
+	if slices.Contains(names, "messages_send") {
+		t.Fatal("direct messages_send tool bypasses the prepared-operation safety boundary")
 	}
 
 	result, err := clientSession.CallTool(context.Background(), &mcp.CallToolParams{Name: "connections_list", Arguments: map[string]any{"page_size": 1}})

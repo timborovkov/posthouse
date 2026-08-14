@@ -1,0 +1,11 @@
+{
+  "id": "holidays",
+  "name": "Company holidays",
+  "category": "work",
+  "labels": ["shared", "read-only"],
+  "identity": {},
+  "calendar": {
+    "kind": "feed",
+    "url_secret": {"env": "COMPANY_HOLIDAYS_ICS_URL"}
+  }
+}

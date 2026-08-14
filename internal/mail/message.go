@@ -1,0 +1,493 @@
+package mail
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/base64"
+	"errors"
+	"fmt"
+	"io"
+	"net/smtp"
+	"regexp"
+	"slices"
+	"strings"
+	"time"
+
+	"github.com/emersion/go-imap/v2"
+	"github.com/emersion/go-imap/v2/imapclient"
+	gomail "github.com/emersion/go-message/mail"
+
+	"github.com/timborovkov/posthouse/internal/config"
+	"github.com/timborovkov/posthouse/internal/model"
+)
+
+const maxMessageBytes = 64 << 20
+
+type FetchedMessage struct {
+	Detail      model.MessageDetail
+	Attachments map[string][]byte
+	Raw         []byte
+}
+
+type Discovery struct {
+	Capabilities []string           `json:"capabilities"`
+	Folders      model.FolderConfig `json:"folders"`
+}
+
+type MessagePrecondition struct {
+	UIDValidity uint32 `json:"uid_validity"`
+	ModSeq      uint64 `json:"modseq,omitempty"`
+}
+
+func Get(connection model.Connection, folder string, uid uint32) (FetchedMessage, error) {
+	if connection.Mail == nil || connection.Mail.IMAP.Address == "" {
+		return FetchedMessage{}, fmt.Errorf("connection %s has no IMAP capability", connection.ID)
+	}
+	if uid == 0 {
+		return FetchedMessage{}, fmt.Errorf("message UID is required")
+	}
+	if folder == "" {
+		folder = connection.Mail.Folders.Inbox
+	}
+	if folder == "" {
+		folder = "INBOX"
+	}
+	client, err := authenticatedIMAP(connection)
+	if err != nil {
+		return FetchedMessage{}, err
+	}
+	defer client.Close()
+	defer client.Logout()
+	if _, err := client.Select(folder, &imap.SelectOptions{ReadOnly: true}).Wait(); err != nil {
+		return FetchedMessage{}, fmt.Errorf("select IMAP folder %s: %w", folder, err)
+	}
+	section := &imap.FetchItemBodySection{Peek: true}
+	items, err := client.Fetch(imap.UIDSetNum(imap.UID(uid)), &imap.FetchOptions{
+		UID: true, Envelope: true, Flags: true, InternalDate: true,
+		BodySection: []*imap.FetchItemBodySection{section},
+	}).Collect()
+	if err != nil {
+		return FetchedMessage{}, fmt.Errorf("fetch IMAP message: %w", err)
+	}
+	if len(items) != 1 {
+		return FetchedMessage{}, fmt.Errorf("message %s/%d does not exist", folder, uid)
+	}
+	raw := items[0].FindBodySection(section)
+	if len(raw) > maxMessageBytes {
+		return FetchedMessage{}, fmt.Errorf("message exceeds 64 MiB read limit")
+	}
+	result, err := parseMessage(raw)
+	if err != nil {
+		return FetchedMessage{}, err
+	}
+	result.Raw = append([]byte(nil), raw...)
+	result.Detail.ConnectionID = connection.ID
+	result.Detail.Folder = folder
+	result.Detail.UID = uid
+	result.Detail.ReceivedAt = items[0].InternalDate
+	result.Detail.Unread = !slices.Contains(items[0].Flags, imap.FlagSeen)
+	result.Detail.Flagged = slices.Contains(items[0].Flags, imap.FlagFlagged)
+	result.Detail.HasAttachments = len(result.Detail.Attachments) > 0
+	return result, nil
+}
+
+func GetAttachment(connection model.Connection, folder string, uid uint32, attachmentID string) (model.Attachment, []byte, error) {
+	message, err := Get(connection, folder, uid)
+	if err != nil {
+		return model.Attachment{}, nil, err
+	}
+	for _, attachment := range message.Detail.Attachments {
+		if attachment.ID == attachmentID {
+			return attachment, message.Attachments[attachmentID], nil
+		}
+	}
+	return model.Attachment{}, nil, fmt.Errorf("attachment %q does not exist", attachmentID)
+}
+
+func parseMessage(raw []byte) (FetchedMessage, error) {
+	reader, err := gomail.CreateReader(bytes.NewReader(raw))
+	if err != nil && reader == nil {
+		return FetchedMessage{}, fmt.Errorf("parse MIME message: %w", err)
+	}
+	defer reader.Close()
+	result := FetchedMessage{Attachments: make(map[string][]byte)}
+	result.Detail.MessageID, _ = reader.Header.MessageID()
+	result.Detail.Subject, _ = reader.Header.Subject()
+	result.Detail.Date, _ = reader.Header.Date()
+	result.Detail.From = headerAddresses(reader.Header, "From")
+	result.Detail.To = headerAddresses(reader.Header, "To")
+	result.Detail.CC = headerAddresses(reader.Header, "Cc")
+	result.Detail.ReplyTo = headerAddresses(reader.Header, "Reply-To")
+	result.Detail.InReplyTo = strings.TrimSpace(reader.Header.Get("In-Reply-To"))
+	result.Detail.References = strings.Fields(reader.Header.Get("References"))
+	attachmentIndex := 0
+	for {
+		part, partErr := reader.NextPart()
+		if errors.Is(partErr, io.EOF) {
+			break
+		}
+		if partErr != nil && part == nil {
+			return FetchedMessage{}, fmt.Errorf("read MIME part: %w", partErr)
+		}
+		data, readErr := io.ReadAll(io.LimitReader(part.Body, maxMessageBytes+1))
+		if readErr != nil {
+			return FetchedMessage{}, fmt.Errorf("read MIME part: %w", readErr)
+		}
+		if len(data) > maxMessageBytes {
+			return FetchedMessage{}, fmt.Errorf("MIME part exceeds 64 MiB read limit")
+		}
+		switch header := part.Header.(type) {
+		case *gomail.InlineHeader:
+			contentType, _, _ := header.ContentType()
+			switch strings.ToLower(contentType) {
+			case "text/plain":
+				if result.Detail.Text == "" {
+					result.Detail.Text = string(data)
+				}
+			case "text/html":
+				if result.Detail.HTML == "" {
+					result.Detail.HTML = sanitizeHTML(string(data))
+				}
+			}
+		case *gomail.AttachmentHeader:
+			name, _ := header.Filename()
+			contentType, _, _ := header.ContentType()
+			digest := sha256.Sum256([]byte(fmt.Sprintf("%d\x00%s\x00%s", attachmentIndex, name, contentType)))
+			id := base64.RawURLEncoding.EncodeToString(digest[:12])
+			disposition := strings.ToLower(header.Get("Content-Disposition"))
+			attachment := model.Attachment{ID: id, Name: name, ContentType: contentType, Size: int64(len(data)), Inline: strings.HasPrefix(disposition, "inline"), ContentID: strings.Trim(header.Get("Content-ID"), "<>")}
+			result.Detail.Attachments = append(result.Detail.Attachments, attachment)
+			result.Attachments[id] = data
+			attachmentIndex++
+		}
+	}
+	if result.Detail.Text == "" && result.Detail.HTML != "" {
+		result.Detail.Text = htmlToText(result.Detail.HTML)
+	}
+	result.Detail.Preview = preview([]byte(result.Detail.Text))
+	return result, nil
+}
+
+func headerAddresses(header gomail.Header, key string) []model.Address {
+	values, err := header.AddressList(key)
+	if err != nil {
+		return nil
+	}
+	result := make([]model.Address, 0, len(values))
+	for _, value := range values {
+		result = append(result, model.Address{Name: value.Name, Email: value.Address})
+	}
+	return result
+}
+
+var (
+	dangerousHTML = regexp.MustCompile(`(?is)<(script|style|iframe|object|embed|form)[^>]*>.*?</(script|style|iframe|object|embed|form)\s*>|<(script|style|iframe|object|embed|form)[^>]*/?>`)
+	eventAttr     = regexp.MustCompile(`(?i)\s+on[a-z]+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)`)
+	javascriptURL = regexp.MustCompile(`(?i)(href|src)\s*=\s*("[[:space:]]*javascript:[^"]*"|'[[:space:]]*javascript:[^']*')`)
+	htmlTags      = regexp.MustCompile(`(?s)<[^>]+>`)
+)
+
+func sanitizeHTML(value string) string {
+	value = dangerousHTML.ReplaceAllString(value, "")
+	value = eventAttr.ReplaceAllString(value, "")
+	return javascriptURL.ReplaceAllString(value, `$1="#"`)
+}
+
+func htmlToText(value string) string {
+	value = regexp.MustCompile(`(?i)<br\s*/?>|</(p|div|li|tr|h[1-6])>`).ReplaceAllString(value, "\n")
+	value = htmlTags.ReplaceAllString(value, "")
+	return strings.TrimSpace(strings.NewReplacer("&nbsp;", " ", "&amp;", "&", "&lt;", "<", "&gt;", ">").Replace(value))
+}
+
+func Discover(connection model.Connection) (Discovery, error) {
+	client, err := authenticatedIMAP(connection)
+	if err != nil {
+		return Discovery{}, err
+	}
+	defer client.Close()
+	defer client.Logout()
+	caps := client.Caps()
+	result := Discovery{}
+	for capability := range caps {
+		result.Capabilities = append(result.Capabilities, string(capability))
+	}
+	slices.Sort(result.Capabilities)
+	options := &imap.ListOptions{}
+	if caps.Has(imap.CapSpecialUse) || caps.Has(imap.CapIMAP4rev2) {
+		options.ReturnSpecialUse = true
+	}
+	mailboxes, err := client.List("", "*", options).Collect()
+	if err != nil {
+		return Discovery{}, fmt.Errorf("list IMAP folders: %w", err)
+	}
+	for _, mailbox := range mailboxes {
+		if strings.EqualFold(mailbox.Mailbox, "INBOX") {
+			result.Folders.Inbox = mailbox.Mailbox
+		}
+		for _, attribute := range mailbox.Attrs {
+			switch attribute {
+			case imap.MailboxAttrSent:
+				result.Folders.Sent = mailbox.Mailbox
+			case imap.MailboxAttrDrafts:
+				result.Folders.Drafts = mailbox.Mailbox
+			case imap.MailboxAttrArchive:
+				result.Folders.Archive = mailbox.Mailbox
+			case imap.MailboxAttrTrash:
+				result.Folders.Trash = mailbox.Mailbox
+			case imap.MailboxAttrJunk:
+				result.Folders.Junk = mailbox.Mailbox
+			}
+		}
+	}
+	if result.Folders.Inbox == "" {
+		result.Folders.Inbox = "INBOX"
+	}
+	return result, nil
+}
+
+func SnapshotMessage(connection model.Connection, folder string, uid uint32) (MessagePrecondition, error) {
+	client, err := authenticatedIMAP(connection)
+	if err != nil {
+		return MessagePrecondition{}, err
+	}
+	defer client.Close()
+	defer client.Logout()
+	folder = defaultFolder(connection, folder)
+	selected, err := client.Select(folder, &imap.SelectOptions{ReadOnly: true, CondStore: client.Caps().Has(imap.CapCondStore)}).Wait()
+	if err != nil {
+		return MessagePrecondition{}, fmt.Errorf("select IMAP folder %s: %w", folder, err)
+	}
+	precondition := MessagePrecondition{UIDValidity: selected.UIDValidity}
+	options := &imap.FetchOptions{UID: true}
+	if client.Caps().Has(imap.CapCondStore) {
+		options.ModSeq = true
+	}
+	items, err := client.Fetch(imap.UIDSetNum(imap.UID(uid)), options).Collect()
+	if err != nil {
+		return MessagePrecondition{}, fmt.Errorf("fetch IMAP message precondition: %w", err)
+	}
+	if len(items) != 1 || uint32(items[0].UID) != uid {
+		return MessagePrecondition{}, fmt.Errorf("message %s/%d does not exist", folder, uid)
+	}
+	precondition.ModSeq = items[0].ModSeq
+	return precondition, nil
+}
+
+func SetFlags(connection model.Connection, folder string, uid uint32, seen, flagged *bool, expected MessagePrecondition) error {
+	client, err := authenticatedIMAP(connection)
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+	defer client.Logout()
+	folder = defaultFolder(connection, folder)
+	selected, err := client.Select(folder, &imap.SelectOptions{CondStore: expected.ModSeq != 0}).Wait()
+	if err != nil {
+		return fmt.Errorf("select IMAP folder %s: %w", folder, err)
+	}
+	if err := validateSelectedMessage(client, folder, uid, selected.UIDValidity, expected); err != nil {
+		return err
+	}
+	set := imap.UIDSetNum(imap.UID(uid))
+	changes := []struct {
+		flag  imap.Flag
+		value *bool
+	}{{imap.FlagSeen, seen}, {imap.FlagFlagged, flagged}}
+	modSeq := expected.ModSeq
+	for index, change := range changes {
+		flag, value := change.flag, change.value
+		if value == nil {
+			continue
+		}
+		op := imap.StoreFlagsDel
+		if *value {
+			op = imap.StoreFlagsAdd
+		}
+		storeOptions := &imap.StoreOptions{UnchangedSince: modSeq}
+		if modSeq == 0 {
+			storeOptions = nil
+		}
+		if err := client.Store(set, &imap.StoreFlags{Op: op, Silent: true, Flags: []imap.Flag{flag}}, storeOptions).Close(); err != nil {
+			return fmt.Errorf("update IMAP flags: %w", err)
+		}
+		if modSeq != 0 && index < len(changes)-1 {
+			items, err := client.Fetch(set, &imap.FetchOptions{UID: true, ModSeq: true}).Collect()
+			if err != nil || len(items) != 1 {
+				return fmt.Errorf("refresh IMAP message precondition after flag update")
+			}
+			modSeq = items[0].ModSeq
+		}
+	}
+	return nil
+}
+
+func Move(connection model.Connection, folder string, uid uint32, destination string, expected MessagePrecondition) error {
+	if destination == "" {
+		return fmt.Errorf("destination folder is required")
+	}
+	client, err := authenticatedIMAP(connection)
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+	defer client.Logout()
+	folder = defaultFolder(connection, folder)
+	selected, err := client.Select(folder, &imap.SelectOptions{CondStore: expected.ModSeq != 0}).Wait()
+	if err != nil {
+		return fmt.Errorf("select IMAP folder %s: %w", folder, err)
+	}
+	if err := validateSelectedMessage(client, folder, uid, selected.UIDValidity, expected); err != nil {
+		return err
+	}
+	if !client.Caps().Has(imap.CapMove) {
+		return fmt.Errorf("IMAP server does not advertise MOVE; refusing unsafe COPY/EXPUNGE fallback")
+	}
+	if _, err := client.Move(imap.UIDSetNum(imap.UID(uid)), destination).Wait(); err != nil {
+		return fmt.Errorf("move IMAP message: %w", err)
+	}
+	return nil
+}
+
+func Append(connection model.Connection, folder string, message model.SendMessage, flags []imap.Flag) (uint32, error) {
+	if folder == "" {
+		return 0, fmt.Errorf("append folder is required")
+	}
+	from := connection.Identity.Email
+	if from == "" && connection.Mail != nil {
+		from = connection.Mail.Username
+	}
+	data, err := buildMessage(connection.Identity, from, message)
+	if err != nil {
+		return 0, fmt.Errorf("build IMAP message: %w", err)
+	}
+	client, err := authenticatedIMAP(connection)
+	if err != nil {
+		return 0, err
+	}
+	defer client.Close()
+	defer client.Logout()
+	command := client.Append(folder, int64(len(data)), &imap.AppendOptions{Flags: flags, Time: time.Now()})
+	if _, err := command.Write(data); err != nil {
+		_ = command.Close()
+		return 0, fmt.Errorf("write IMAP append: %w", err)
+	}
+	if err := command.Close(); err != nil {
+		return 0, fmt.Errorf("close IMAP append: %w", err)
+	}
+	result, err := command.Wait()
+	if err != nil {
+		return 0, fmt.Errorf("append IMAP message: %w", err)
+	}
+	return uint32(result.UID), nil
+}
+
+func MarkDeleted(connection model.Connection, folder string, uid uint32, expected MessagePrecondition) error {
+	client, err := authenticatedIMAP(connection)
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+	defer client.Logout()
+	selected, err := client.Select(folder, &imap.SelectOptions{CondStore: expected.ModSeq != 0}).Wait()
+	if err != nil {
+		return fmt.Errorf("select IMAP folder %s: %w", folder, err)
+	}
+	if err := validateSelectedMessage(client, folder, uid, selected.UIDValidity, expected); err != nil {
+		return err
+	}
+	storeOptions := &imap.StoreOptions{UnchangedSince: expected.ModSeq}
+	if expected.ModSeq == 0 {
+		storeOptions = nil
+	}
+	if err := client.Store(imap.UIDSetNum(imap.UID(uid)), &imap.StoreFlags{Op: imap.StoreFlagsAdd, Silent: true, Flags: []imap.Flag{imap.FlagDeleted}}, storeOptions).Close(); err != nil {
+		return fmt.Errorf("mark IMAP draft deleted: %w", err)
+	}
+	return nil
+}
+
+func validateSelectedMessage(client *imapclient.Client, folder string, uid uint32, uidValidity uint32, expected MessagePrecondition) error {
+	if expected.UIDValidity == 0 || uidValidity != expected.UIDValidity {
+		return fmt.Errorf("mailbox UIDVALIDITY changed; refresh and prepare the operation again")
+	}
+	options := &imap.FetchOptions{UID: true}
+	if expected.ModSeq != 0 {
+		options.ModSeq = true
+	}
+	items, err := client.Fetch(imap.UIDSetNum(imap.UID(uid)), options).Collect()
+	if err != nil {
+		return fmt.Errorf("validate IMAP message precondition: %w", err)
+	}
+	if len(items) != 1 || uint32(items[0].UID) != uid {
+		return fmt.Errorf("provider message changed; refresh and prepare the operation again")
+	}
+	if expected.ModSeq != 0 && items[0].ModSeq != expected.ModSeq {
+		return fmt.Errorf("provider message changed; refresh and prepare the operation again")
+	}
+	return nil
+}
+
+func defaultFolder(connection model.Connection, folder string) string {
+	if folder == "" && connection.Mail != nil {
+		folder = connection.Mail.Folders.Inbox
+	}
+	if folder == "" {
+		return "INBOX"
+	}
+	return folder
+}
+
+func authenticatedIMAP(connection model.Connection) (*imapclient.Client, error) {
+	if connection.Mail == nil || connection.Mail.IMAP.Address == "" {
+		return nil, fmt.Errorf("connection %s has no IMAP capability", connection.ID)
+	}
+	secret, err := config.ResolveSecret(connection.Mail.Secret)
+	if err != nil {
+		return nil, err
+	}
+	client, err := dialIMAP(connection.Mail.IMAP)
+	if err != nil {
+		return nil, err
+	}
+	if err := client.Login(connection.Mail.Username, secret).Wait(); err != nil {
+		_ = client.Close()
+		return nil, fmt.Errorf("authenticate to IMAP: %w", err)
+	}
+	return client, nil
+}
+
+func DoctorSMTP(ctx context.Context, connection model.Connection) error {
+	if connection.Mail == nil || connection.Mail.SMTP.Address == "" {
+		return nil
+	}
+	secret, err := config.ResolveSecret(connection.Mail.Secret)
+	if err != nil {
+		return err
+	}
+	host, err := smtpHost(connection.Mail.SMTP.Address)
+	if err != nil {
+		return err
+	}
+	client, err := dialSMTP(connection.Mail.SMTP, host)
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+	done := make(chan error, 1)
+	go func() {
+		if ok, _ := client.Extension("AUTH"); !ok {
+			done <- fmt.Errorf("SMTP server does not advertise AUTH")
+			return
+		}
+		done <- client.Auth(smtp.PlainAuth("", connection.Mail.Username, secret, host))
+	}()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case err := <-done:
+		if err != nil {
+			return fmt.Errorf("authenticate to SMTP: %w", err)
+		}
+		return nil
+	}
+}
