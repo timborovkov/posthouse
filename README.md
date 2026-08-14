@@ -49,7 +49,7 @@ posthouse connection discover acme
 posthouse connection doctor acme
 ```
 
-The discovery result can be fed back through `connection update` to persist special-use folders and CalDAV collections. A read-only feed example is in [examples/feed-connection.json](./examples/feed-connection.json). Config v2 accepts exactly one secret source:
+`connection discover` persists discovered special-use folders and CalDAV collections automatically; its displayed connection is redacted for safe inspection and should not be passed to `connection update`. A read-only feed example is in [examples/feed-connection.json](./examples/feed-connection.json). Config v2 accepts exactly one secret source:
 
 ```json
 {"secret":{"env":"ACME_MAIL_PASSWORD"}}

@@ -192,10 +192,11 @@ type eventMutationInput struct {
 }
 
 type eventDeleteInput struct {
-	Connection string `json:"connection"`
-	Collection string `json:"collection"`
-	Href       string `json:"href"`
-	ETag       string `json:"etag"`
+	Connection   string `json:"connection"`
+	Collection   string `json:"collection"`
+	Href         string `json:"href"`
+	ETag         string `json:"etag"`
+	RecurrenceID string `json:"recurrence_id,omitempty" jsonschema:"recurrence_id from events_list; expanded occurrences cannot be deleted as whole objects"`
 }
 
 type eventListInput struct {
@@ -372,7 +373,7 @@ func (s *Server) registerTools() {
 		})
 	mcp.AddTool(s.mcp, &mcp.Tool{Name: "event_delete_prepare", Title: "Prepare event delete", Description: "Prepare an ETag-guarded delete of one CalDAV event. No event is deleted until operation_execute.", Annotations: readOnly},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input eventDeleteInput) (*mcp.CallToolResult, model.PreparedOperation, error) {
-			prepared, err := s.service.PrepareCalendarDelete(ctx, input.Connection, input.Collection, input.Href, input.ETag)
+			prepared, err := s.service.PrepareCalendarDelete(ctx, input.Connection, input.Collection, input.Href, input.ETag, input.RecurrenceID)
 			return nil, prepared, err
 		})
 

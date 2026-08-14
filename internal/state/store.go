@@ -486,6 +486,7 @@ func (s *Store) ClaimOperation(ctx context.Context, token string) (record Operat
 		return record, false, err
 	}
 	record.Public.Status = "executing"
+	record.Public.ExecutedAt = time.Now().UTC()
 	if err := s.updateOperation(ctx, record, "prepared"); err != nil {
 		if !errors.Is(err, errOperationNotClaimed) {
 			return OperationRecord{}, false, err

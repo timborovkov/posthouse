@@ -17,6 +17,7 @@ import (
 	"github.com/emersion/go-imap/v2"
 	"github.com/emersion/go-imap/v2/imapclient"
 	gomail "github.com/emersion/go-message/mail"
+	"github.com/microcosm-cc/bluemonday"
 
 	"github.com/timborovkov/posthouse/internal/config"
 	"github.com/timborovkov/posthouse/internal/model"
@@ -28,6 +29,7 @@ type FetchedMessage struct {
 	Detail      model.MessageDetail
 	Attachments map[string][]byte
 	Raw         []byte
+	UIDValidity uint32
 }
 
 type Discovery struct {
@@ -39,6 +41,14 @@ type MessagePrecondition struct {
 	UIDValidity uint32 `json:"uid_validity"`
 	ModSeq      uint64 `json:"modseq,omitempty"`
 }
+
+type UncertainAppendError struct{ Err error }
+
+func (err *UncertainAppendError) Error() string {
+	return "IMAP APPEND outcome is uncertain after the message literal was written: " + err.Err.Error()
+}
+
+func (err *UncertainAppendError) Unwrap() error { return err.Err }
 
 type flagChange struct {
 	flag  imap.Flag
@@ -64,7 +74,8 @@ func Get(connection model.Connection, folder string, uid uint32) (FetchedMessage
 	}
 	defer client.Close()
 	defer client.Logout()
-	if _, err := client.Select(folder, &imap.SelectOptions{ReadOnly: true}).Wait(); err != nil {
+	selected, err := client.Select(folder, &imap.SelectOptions{ReadOnly: true}).Wait()
+	if err != nil {
 		return FetchedMessage{}, fmt.Errorf("select IMAP folder %s: %w", folder, err)
 	}
 	items, err := client.Fetch(imap.UIDSetNum(imap.UID(uid)), &imap.FetchOptions{
@@ -111,6 +122,7 @@ func Get(connection model.Connection, folder string, uid uint32) (FetchedMessage
 		return FetchedMessage{}, err
 	}
 	result.Raw = append([]byte(nil), raw...)
+	result.UIDValidity = selected.UIDValidity
 	result.Detail.ConnectionID = connection.ID
 	result.Detail.Folder = folder
 	result.Detail.UID = uid
@@ -136,17 +148,17 @@ func readBoundedLiteral(reader io.Reader, limit int64) ([]byte, error) {
 	return data, nil
 }
 
-func GetAttachment(connection model.Connection, folder string, uid uint32, attachmentID string) (model.Attachment, []byte, error) {
+func GetAttachment(connection model.Connection, folder string, uid uint32, attachmentID string) (model.Attachment, []byte, uint32, error) {
 	message, err := Get(connection, folder, uid)
 	if err != nil {
-		return model.Attachment{}, nil, err
+		return model.Attachment{}, nil, 0, err
 	}
 	for _, attachment := range message.Detail.Attachments {
 		if attachment.ID == attachmentID {
-			return attachment, message.Attachments[attachmentID], nil
+			return attachment, message.Attachments[attachmentID], message.UIDValidity, nil
 		}
 	}
-	return model.Attachment{}, nil, fmt.Errorf("attachment %q does not exist", attachmentID)
+	return model.Attachment{}, nil, 0, fmt.Errorf("attachment %q does not exist", attachmentID)
 }
 
 func parseMessage(raw []byte) (FetchedMessage, error) {
@@ -226,16 +238,12 @@ func headerAddresses(header gomail.Header, key string) []model.Address {
 }
 
 var (
-	dangerousHTML = regexp.MustCompile(`(?is)<(script|style|iframe|object|embed|form)[^>]*>.*?</(script|style|iframe|object|embed|form)\s*>|<(script|style|iframe|object|embed|form)[^>]*/?>`)
-	eventAttr     = regexp.MustCompile(`(?i)\s+on[a-z]+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)`)
-	javascriptURL = regexp.MustCompile(`(?i)(href|src)\s*=\s*("[[:space:]]*javascript:[^"]*"|'[[:space:]]*javascript:[^']*')`)
-	htmlTags      = regexp.MustCompile(`(?s)<[^>]+>`)
+	emailHTMLPolicy = bluemonday.UGCPolicy()
+	htmlTags        = regexp.MustCompile(`(?s)<[^>]+>`)
 )
 
 func sanitizeHTML(value string) string {
-	value = dangerousHTML.ReplaceAllString(value, "")
-	value = eventAttr.ReplaceAllString(value, "")
-	return javascriptURL.ReplaceAllString(value, `$1="#"`)
+	return emailHTMLPolicy.Sanitize(value)
 }
 
 func htmlToText(value string) string {
@@ -426,11 +434,11 @@ func AppendSerialized(connection model.Connection, folder string, data []byte, f
 		return 0, fmt.Errorf("write IMAP append: %w", err)
 	}
 	if err := command.Close(); err != nil {
-		return 0, fmt.Errorf("close IMAP append: %w", err)
+		return 0, &UncertainAppendError{Err: fmt.Errorf("close IMAP append: %w", err)}
 	}
 	result, err := command.Wait()
 	if err != nil {
-		return 0, fmt.Errorf("append IMAP message: %w", err)
+		return 0, &UncertainAppendError{Err: fmt.Errorf("append IMAP message: %w", err)}
 	}
 	return uint32(result.UID), nil
 }

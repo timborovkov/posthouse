@@ -198,8 +198,10 @@ func (s *Service) RemoveConnection(id string) error {
 }
 
 type mailCursorState struct {
-	UIDValidity uint32 `json:"uid_validity"`
-	BeforeUID   uint32 `json:"before_uid,omitempty"`
+	UIDValidity uint32    `json:"uid_validity"`
+	UIDNext     uint32    `json:"uid_next,omitempty"`
+	BeforeTime  time.Time `json:"before_time,omitempty"`
+	BeforeUID   uint32    `json:"before_uid,omitempty"`
 }
 
 type mailCursorPosition struct {
@@ -252,7 +254,9 @@ func (s *Service) SearchMessages(selection model.Selector, options postmail.Sear
 		}
 		connectionOptions := options
 		connectionOptions.Limit = pageSize + 1
-		connectionOptions.BeforeUID = state.BeforeUID
+		connectionOptions.CursorTime = state.BeforeTime
+		connectionOptions.CursorUID = state.BeforeUID
+		connectionOptions.MaxUIDExclusive = state.UIDNext
 		connectionOptions.ExpectedUIDValidity = state.UIDValidity
 		var result postmail.SearchResult
 		var err error
@@ -286,7 +290,7 @@ func (s *Service) SearchMessages(selection model.Selector, options postmail.Sear
 				continue
 			}
 		} else if options.Mode != "offline" {
-			if cacheErr := s.cacheMailResult(connection.ID, scope, result); cacheErr != nil {
+			if cacheErr := s.cacheMailResult(connection.ID, mailFolder(connection, connectionOptions.Folder), scope, result); cacheErr != nil {
 				pageErrors = append(pageErrors, sourceError(connection.ID, "cache_write_failed", cacheErr))
 			}
 		} else {
@@ -296,13 +300,13 @@ func (s *Service) SearchMessages(selection model.Selector, options postmail.Sear
 		}
 		results[connection.ID] = result
 		state.UIDValidity = result.UIDValidity
-		if state.BeforeUID == 0 {
-			state.BeforeUID = result.UIDNext
+		if state.UIDNext == 0 {
+			state.UIDNext = result.UIDNext
 		}
 		position.Connections[connection.ID] = state
 	}
 	indices := make(map[string]int, len(connections))
-	consumedMinimumUID := make(map[string]uint32, len(connections))
+	consumedLast := make(map[string]model.Message, len(connections))
 	page := model.MessagePage{Messages: make([]model.Message, 0, pageSize), Errors: pageErrors}
 	for len(page.Messages) < pageSize {
 		bestConnection := ""
@@ -323,9 +327,7 @@ func (s *Service) SearchMessages(selection model.Selector, options postmail.Sear
 		}
 		page.Messages = append(page.Messages, best)
 		indices[bestConnection]++
-		if current := consumedMinimumUID[bestConnection]; current == 0 || best.UID < current {
-			consumedMinimumUID[bestConnection] = best.UID
-		}
+		consumedLast[bestConnection] = best
 	}
 	hasMore := false
 	for _, connection := range connections {
@@ -336,9 +338,10 @@ func (s *Service) SearchMessages(selection model.Selector, options postmail.Sear
 		if indices[connection.ID] < len(result.Messages) || result.HasMore {
 			hasMore = true
 		}
-		if beforeUID := consumedMinimumUID[connection.ID]; beforeUID != 0 {
+		if last, ok := consumedLast[connection.ID]; ok {
 			state := position.Connections[connection.ID]
-			state.BeforeUID = beforeUID
+			state.BeforeTime = messageTime(last)
+			state.BeforeUID = last.UID
 			position.Connections[connection.ID] = state
 		}
 	}
@@ -378,6 +381,26 @@ type eventCursorPosition struct {
 
 func (s *Service) ListEvents(ctx context.Context, selection model.Selector, start, end time.Time, query string, requestedPageSize int, cursor string) (model.EventPage, error) {
 	return s.ListEventsMode(ctx, selection, start, end, query, requestedPageSize, cursor, "")
+}
+
+func (s *Service) GetEvent(ctx context.Context, selection model.Selector, start, end time.Time, id string) (model.Event, error) {
+	cursor := ""
+	for {
+		page, err := s.ListEvents(ctx, selection, start, end, "", 500, cursor)
+		if err != nil {
+			return model.Event{}, err
+		}
+		for _, event := range page.Events {
+			if event.ID == id {
+				return event, nil
+			}
+		}
+		if page.NextCursor == "" {
+			return model.Event{}, fmt.Errorf("event %q was not found in the selected range", id)
+		}
+		cursor = page.NextCursor
+		start, end = time.Time{}, time.Time{}
+	}
 }
 
 func (s *Service) ListEventsMode(ctx context.Context, selection model.Selector, start, end time.Time, query string, requestedPageSize int, cursor, mode string) (model.EventPage, error) {
@@ -737,7 +760,10 @@ func (s *Service) PrepareCalendarWrite(ctx context.Context, connectionID, kind s
 	})
 }
 
-func (s *Service) PrepareCalendarDelete(ctx context.Context, connectionID, collectionID, href, etag string) (model.PreparedOperation, error) {
+func (s *Service) PrepareCalendarDelete(ctx context.Context, connectionID, collectionID, href, etag, recurrenceID string) (model.PreparedOperation, error) {
+	if recurrenceID != "" {
+		return model.PreparedOperation{}, fmt.Errorf("cannot delete one expanded occurrence; update it with STATUS:CANCELLED or delete the series master")
+	}
 	connection, err := s.exactConnection(connectionID, "calendar.write")
 	if err != nil {
 		return model.PreparedOperation{}, err
@@ -816,7 +842,11 @@ func (s *Service) ExecuteOperation(ctx context.Context, token string) (model.Ope
 	if !s.now().Before(record.Public.ExpiresAt) {
 		return model.OperationResult{}, fmt.Errorf("prepared operation expired; prepare it again")
 	}
-	digest, err := digestPayload(record.Public.Kind, record.Payload)
+	executionPayload, err := snapshotAttachmentPayload(record.Public.Kind, record.Payload)
+	if err != nil {
+		return model.OperationResult{}, err
+	}
+	digest, err := digestPayload(record.Public.Kind, executionPayload)
 	if err != nil || digest != record.Digest {
 		return model.OperationResult{}, fmt.Errorf("prepared operation payload changed; prepare it again")
 	}
@@ -841,15 +871,16 @@ func (s *Service) ExecuteOperation(ctx context.Context, token string) (model.Ope
 		}
 		return operationResult(record.Public), nil
 	}
-	result, executeErr := s.execute(ctx, connection, record.Public.Kind, record.Payload)
+	result, executeErr := s.execute(ctx, connection, record.Public.Kind, executionPayload)
 	record.Public.ExecutedAt = s.now()
 	record.Public.Result = result
 	record.Public.Status = "succeeded"
 	if executeErr != nil {
 		record.Public.Status = "failed"
 		var uncertain *postmail.UncertainError
+		var uncertainAppend *postmail.UncertainAppendError
 		var partial *uncertainOperationError
-		if errors.As(executeErr, &uncertain) || errors.As(executeErr, &partial) {
+		if errors.As(executeErr, &uncertain) || errors.As(executeErr, &uncertainAppend) || errors.As(executeErr, &partial) {
 			record.Public.Status = "uncertain"
 		}
 		if record.Public.Result == nil {
@@ -874,7 +905,11 @@ func (s *Service) waitForOperation(ctx context.Context, ledger *state.Store, tok
 	ticker := time.NewTicker(50 * time.Millisecond)
 	defer ticker.Stop()
 	for record.Public.Status == "executing" {
-		if !s.now().Before(record.Public.ExpiresAt) {
+		executionDeadline := record.Public.ExecutedAt.Add(10 * time.Minute)
+		if record.Public.ExecutedAt.IsZero() {
+			executionDeadline = record.Public.ExpiresAt.Add(10 * time.Minute)
+		}
+		if !s.now().Before(executionDeadline) {
 			record.Public.Status = "uncertain"
 			record.Public.ExecutedAt = s.now()
 			record.Public.Result = map[string]any{"error": "execution was interrupted after the provider operation may have started; prepare a fresh operation only after verifying provider state"}
@@ -934,16 +969,25 @@ func (s *Service) execute(ctx context.Context, connection model.Connection, kind
 			return nil, err
 		}
 		if kind == "mail.mark" {
-			return map[string]any{"updated": true}, postmail.SetFlags(connection, action.Folder, action.UID, action.Seen, action.Flagged, action.Precondition)
+			if err := postmail.SetFlags(connection, action.Folder, action.UID, action.Seen, action.Flagged, action.Precondition); err != nil {
+				return nil, err
+			}
+			return map[string]any{"updated": true}, nil
 		}
-		return map[string]any{"moved": true, "destination": action.Destination}, postmail.Move(connection, action.Folder, action.UID, action.Destination, action.Precondition)
+		if err := postmail.Move(connection, action.Folder, action.UID, action.Destination, action.Precondition); err != nil {
+			return nil, err
+		}
+		return map[string]any{"moved": true, "destination": action.Destination}, nil
 	case "mail.draft.create", "mail.draft.update", "mail.draft.delete":
 		var draft draftPayload
 		if err := json.Unmarshal(payload, &draft); err != nil {
 			return nil, err
 		}
 		if kind == "mail.draft.delete" {
-			return map[string]any{"deleted": true}, s.mailMarkDeleted(connection, draft.Folder, draft.UID, draft.Precondition)
+			if err := s.mailMarkDeleted(connection, draft.Folder, draft.UID, draft.Precondition); err != nil {
+				return nil, err
+			}
+			return map[string]any{"deleted": true}, nil
 		}
 		if kind == "mail.draft.update" {
 			current, err := s.mailSnapshot(connection, draft.Folder, draft.UID)
@@ -976,7 +1020,10 @@ func (s *Service) execute(ctx context.Context, connection model.Connection, kind
 		if err := json.Unmarshal(payload, &deletion); err != nil {
 			return nil, err
 		}
-		return map[string]any{"deleted": true}, calendar.DeleteCalDAVEvent(ctx, connection, deletion.CollectionID, deletion.Href, deletion.ETag)
+		if err := calendar.DeleteCalDAVEvent(ctx, connection, deletion.CollectionID, deletion.Href, deletion.ETag); err != nil {
+			return nil, err
+		}
+		return map[string]any{"deleted": true}, nil
 	default:
 		return nil, fmt.Errorf("unsupported prepared operation kind %q", kind)
 	}
@@ -1002,7 +1049,8 @@ func (s *Service) GetMessageMode(connectionID, folder string, uid uint32, mode s
 		if fetchErr == nil {
 			if ledger, stateErr := s.ensureState(); stateErr == nil {
 				data, _ := json.Marshal(fetched.Detail)
-				_ = ledger.Put(context.Background(), state.CacheEntry{Namespace: "message_body", Key: messageCacheKey(connection.ID, folder, uid), ConnectionID: connection.ID, Kind: "message_body", ProviderID: fmt.Sprintf("%s/%d", folder, uid), ExpiresAt: s.now().Add(s.messageBodyTTL()), Value: data})
+				_ = s.cacheMailboxUIDValidity(ledger, connection.ID, folder, fetched.UIDValidity)
+				_ = ledger.Put(context.Background(), state.CacheEntry{Namespace: "message_body", Key: messageCacheKey(connection.ID, folder, fetched.UIDValidity, uid), ConnectionID: connection.ID, Kind: "message_body", ProviderID: fmt.Sprintf("%s/%d", folder, uid), ExpiresAt: s.now().Add(s.messageBodyTTL()), Value: data})
 			}
 			return fetched.Detail, nil
 		}
@@ -1037,10 +1085,11 @@ func (s *Service) GetAttachmentMode(ctx context.Context, connectionID, folder st
 		}
 	}
 	if mode != "offline" {
-		attachment, data, fetchErr := postmail.GetAttachment(connection, folder, uid, attachmentID)
+		attachment, data, uidValidity, fetchErr := postmail.GetAttachment(connection, folder, uid, attachmentID)
 		if fetchErr == nil {
 			if ledger, stateErr := s.ensureState(); stateErr == nil {
-				_ = ledger.Put(ctx, state.CacheEntry{Namespace: "attachment", Key: messageCacheKey(connection.ID, folder, uid) + "/" + attachmentID, ConnectionID: connection.ID, Kind: "attachment", ProviderID: attachmentID, ExpiresAt: s.now().Add(s.messageBodyTTL()), Value: data})
+				_ = s.cacheMailboxUIDValidity(ledger, connection.ID, folder, uidValidity)
+				_ = ledger.Put(ctx, state.CacheEntry{Namespace: "attachment", Key: messageCacheKey(connection.ID, folder, uidValidity, uid) + "/" + attachmentID, ConnectionID: connection.ID, Kind: "attachment", ProviderID: attachmentID, ExpiresAt: s.now().Add(s.messageBodyTTL()), Value: data})
 			}
 			return attachment, data, nil
 		}
@@ -1112,22 +1161,44 @@ func operationCapability(kind string) string {
 func digestPayload(kind string, payload []byte) (string, error) {
 	digest := sha256.New()
 	_, _ = digest.Write([]byte(kind + "\x00"))
-	_, _ = digest.Write(payload)
 	if kind == "mail.send" || strings.HasPrefix(kind, "mail.draft.") {
 		var message model.SendMessage
+		var draft draftPayload
 		if kind == "mail.send" {
 			if err := json.Unmarshal(payload, &message); err != nil {
 				return "", err
 			}
 		} else {
-			var draft draftPayload
 			if err := json.Unmarshal(payload, &draft); err != nil {
 				return "", err
 			}
 			message = draft.Message
 		}
+		canonical := message
+		canonical.Attachments = append([]model.AttachmentInput(nil), message.Attachments...)
+		for index := range canonical.Attachments {
+			if canonical.Attachments[index].Path != "" {
+				canonical.Attachments[index].Data = nil
+			}
+		}
+		var canonicalPayload []byte
+		var err error
+		if kind == "mail.send" {
+			canonicalPayload, err = json.Marshal(canonical)
+		} else {
+			draft.Message = canonical
+			canonicalPayload, err = json.Marshal(draft)
+		}
+		if err != nil {
+			return "", err
+		}
+		_, _ = digest.Write(canonicalPayload)
 		for _, attachment := range message.Attachments {
 			if attachment.Path == "" {
+				_, _ = digest.Write(attachment.Data)
+				continue
+			}
+			if attachment.Data != nil {
 				_, _ = digest.Write(attachment.Data)
 				continue
 			}
@@ -1143,8 +1214,44 @@ func digestPayload(kind string, payload []byte) (string, error) {
 				return "", err
 			}
 		}
+	} else {
+		_, _ = digest.Write(payload)
 	}
 	return hex.EncodeToString(digest.Sum(nil)), nil
+}
+
+func snapshotAttachmentPayload(kind string, payload []byte) ([]byte, error) {
+	if kind != "mail.send" && !strings.HasPrefix(kind, "mail.draft.") {
+		return payload, nil
+	}
+	var message model.SendMessage
+	var draft draftPayload
+	if kind == "mail.send" {
+		if err := json.Unmarshal(payload, &message); err != nil {
+			return nil, err
+		}
+	} else {
+		if err := json.Unmarshal(payload, &draft); err != nil {
+			return nil, err
+		}
+		message = draft.Message
+	}
+	for index := range message.Attachments {
+		attachment := &message.Attachments[index]
+		if attachment.Path == "" || attachment.Data != nil {
+			continue
+		}
+		data, err := os.ReadFile(attachment.Path)
+		if err != nil {
+			return nil, fmt.Errorf("snapshot attachment %s for operation execution: %w", attachment.Path, err)
+		}
+		attachment.Data = data
+	}
+	if kind == "mail.send" {
+		return json.Marshal(message)
+	}
+	draft.Message = message
+	return json.Marshal(draft)
 }
 
 func digestConnection(connection model.Connection) (string, error) {
@@ -1283,6 +1390,17 @@ func (s *Service) Sync(ctx context.Context, selection model.Selector) (map[strin
 	if !syncMail && !syncCalendar {
 		return nil, fmt.Errorf("sync capability must be mail, mail.read, calendar, or calendar.read")
 	}
+	if requestedCapability == "" {
+		selected, err := s.Connections(selection)
+		if err != nil {
+			return nil, err
+		}
+		syncMail, syncCalendar = false, false
+		for _, connection := range selected {
+			syncMail = syncMail || slices.Contains(connection.Capabilities, "mail.read")
+			syncCalendar = syncCalendar || slices.Contains(connection.Capabilities, "calendar.read")
+		}
+	}
 	if syncMail {
 		mailSelection := selection
 		mailSelection.Capability = "mail.read"
@@ -1337,12 +1455,15 @@ func sourceError(connectionID, code string, err error) model.SourceError {
 	return model.SourceError{ConnectionID: connectionID, Code: code, Message: err.Error(), Retryable: true}
 }
 
-func (s *Service) cacheMailResult(connectionID string, scope any, result postmail.SearchResult) error {
+func (s *Service) cacheMailResult(connectionID, folder string, scope any, result postmail.SearchResult) error {
 	ledger, err := s.ensureState()
 	if err != nil {
 		return err
 	}
 	now := s.now()
+	if err := s.cacheMailboxUIDValidity(ledger, connectionID, folder, result.UIDValidity); err != nil {
+		return err
+	}
 	combined := result
 	if entry, ok, getErr := ledger.Get(context.Background(), "message_metadata", scopedCacheKey(connectionID, scope), true); getErr == nil && ok {
 		var existing postmail.SearchResult
@@ -1398,8 +1519,14 @@ func (s *Service) cachedMailResult(connectionID string, scope any, cursorState m
 	}
 	filtered := make([]model.Message, 0, len(result.Messages))
 	for _, message := range result.Messages {
-		if cursorState.BeforeUID != 0 && message.UID >= cursorState.BeforeUID {
+		if cursorState.UIDNext != 0 && message.UID >= cursorState.UIDNext {
 			continue
+		}
+		if !cursorState.BeforeTime.IsZero() {
+			boundary := model.Message{ConnectionID: message.ConnectionID, ReceivedAt: cursorState.BeforeTime, UID: cursorState.BeforeUID}
+			if !messageBefore(boundary, message) {
+				continue
+			}
 		}
 		message.CachedAt = entry.CachedAt
 		filtered = append(filtered, message)
@@ -1452,7 +1579,11 @@ func (s *Service) cachedMessage(connectionID, folder string, uid uint32) (model.
 	if err != nil {
 		return model.MessageDetail{}, false
 	}
-	entry, ok, err := ledger.Get(context.Background(), "message_body", messageCacheKey(connectionID, folder, uid), true)
+	uidValidity, ok := s.cachedMailboxUIDValidity(ledger, connectionID, folder)
+	if !ok {
+		return model.MessageDetail{}, false
+	}
+	entry, ok, err := ledger.Get(context.Background(), "message_body", messageCacheKey(connectionID, folder, uidValidity, uid), true)
 	if err != nil || !ok {
 		return model.MessageDetail{}, false
 	}
@@ -1469,7 +1600,11 @@ func (s *Service) cachedAttachment(ctx context.Context, connectionID, folder str
 	if err != nil {
 		return model.Attachment{}, nil, false
 	}
-	entry, ok, err := ledger.Get(ctx, "attachment", messageCacheKey(connectionID, folder, uid)+"/"+attachmentID, true)
+	uidValidity, ok := s.cachedMailboxUIDValidity(ledger, connectionID, folder)
+	if !ok {
+		return model.Attachment{}, nil, false
+	}
+	entry, ok, err := ledger.Get(ctx, "attachment", messageCacheKey(connectionID, folder, uidValidity, uid)+"/"+attachmentID, true)
 	if err != nil || !ok {
 		return model.Attachment{}, nil, false
 	}
@@ -1512,8 +1647,42 @@ func scopedCacheKey(connectionID string, scope any) string {
 	return hex.EncodeToString(digest[:])
 }
 
-func messageCacheKey(connectionID, folder string, uid uint32) string {
-	return fmt.Sprintf("%s/%s/%d", connectionID, folder, uid)
+func messageCacheKey(connectionID, folder string, uidValidity, uid uint32) string {
+	return fmt.Sprintf("%s/%s/%d/%d", connectionID, folder, uidValidity, uid)
+}
+
+func mailboxCacheKey(connectionID, folder string) string {
+	return connectionID + "/" + folder
+}
+
+func (s *Service) cacheMailboxUIDValidity(ledger *state.Store, connectionID, folder string, uidValidity uint32) error {
+	data, err := json.Marshal(uidValidity)
+	if err != nil {
+		return err
+	}
+	return ledger.Put(context.Background(), state.CacheEntry{Namespace: "mailbox_uidvalidity", Key: mailboxCacheKey(connectionID, folder), ConnectionID: connectionID, Kind: "sync_state", ProviderID: folder, ExpiresAt: s.now().Add(s.messageMetadataTTL()), Value: data})
+}
+
+func (s *Service) cachedMailboxUIDValidity(ledger *state.Store, connectionID, folder string) (uint32, bool) {
+	entry, ok, err := ledger.Get(context.Background(), "mailbox_uidvalidity", mailboxCacheKey(connectionID, folder), true)
+	if err != nil || !ok {
+		return 0, false
+	}
+	var uidValidity uint32
+	if json.Unmarshal(entry.Value, &uidValidity) != nil || uidValidity == 0 {
+		return 0, false
+	}
+	return uidValidity, true
+}
+
+func mailFolder(connection model.Connection, folder string) string {
+	if folder == "" && connection.Mail != nil {
+		folder = connection.Mail.Folders.Inbox
+	}
+	if folder == "" {
+		return "INBOX"
+	}
+	return folder
 }
 
 func mergeFolders(configured, discovered model.FolderConfig) model.FolderConfig {
@@ -1539,13 +1708,7 @@ func mergeFolders(configured, discovered model.FolderConfig) model.FolderConfig 
 }
 
 func messageBefore(a, b model.Message) bool {
-	aTime, bTime := a.ReceivedAt, b.ReceivedAt
-	if aTime.IsZero() {
-		aTime = a.Date
-	}
-	if bTime.IsZero() {
-		bTime = b.Date
-	}
+	aTime, bTime := messageTime(a), messageTime(b)
 	if !aTime.Equal(bTime) {
 		return aTime.After(bTime)
 	}
@@ -1553,6 +1716,13 @@ func messageBefore(a, b model.Message) bool {
 		return a.ConnectionID < b.ConnectionID
 	}
 	return a.UID > b.UID
+}
+
+func messageTime(message model.Message) time.Time {
+	if !message.ReceivedAt.IsZero() {
+		return message.ReceivedAt
+	}
+	return message.Date
 }
 
 func compareEvents(a, b model.Event) int {

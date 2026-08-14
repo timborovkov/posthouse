@@ -131,7 +131,7 @@ func ParseRange(data []byte, rangeStart, rangeEnd time.Time) ([]model.Event, err
 		if strings.EqualFold(event.Status, "CANCELLED") {
 			continue
 		}
-		if event.RecurrenceRule == "" && len(event.RecurrenceDates) == 0 {
+		if event.RecurrenceRule == "" && len(event.RecurrenceDates) == 0 && len(event.RecurrencePeriods) == 0 {
 			if overlaps(event, rangeStart, rangeEnd) {
 				result = append(result, event)
 			}
@@ -146,7 +146,13 @@ func ParseRange(data []byte, rangeStart, rangeEnd time.Time) ([]model.Event, err
 			}
 			set.RRule(rule)
 		}
-		set.SetRDates(append([]time.Time{event.Start}, event.RecurrenceDates...))
+		rdates := append([]time.Time{event.Start}, event.RecurrenceDates...)
+		periodEnds := make(map[string]time.Time, len(event.RecurrencePeriods))
+		for _, period := range event.RecurrencePeriods {
+			rdates = append(rdates, period.Start)
+			periodEnds[period.Start.UTC().Format(time.RFC3339Nano)] = period.End
+		}
+		set.SetRDates(rdates)
 		set.SetExDates(event.ExceptionDates)
 		lookback := rangeStart.Add(-event.End.Sub(event.Start))
 		if event.AllDay {
@@ -170,7 +176,11 @@ func ParseRange(data []byte, rangeStart, rangeEnd time.Time) ([]model.Event, err
 			occurrence := event
 			occurrence.RecurrenceID = recurrenceID
 			occurrence.ID = stableOccurrenceID(event.ID, occurrenceStart)
-			occurrence.End = recurringEnd(event, occurrenceStart)
+			if periodEnd, ok := periodEnds[occurrenceStart.UTC().Format(time.RFC3339Nano)]; ok {
+				occurrence.End = occurrenceStart.Add(periodEnd.Sub(occurrenceStart))
+			} else {
+				occurrence.End = recurringEnd(event, occurrenceStart)
+			}
 			occurrence.Start = occurrenceStart
 			if overlaps(occurrence, rangeStart, rangeEnd) {
 				result = append(result, occurrence)
@@ -282,7 +292,7 @@ func typedEvent(component *ics.VEvent, locations map[string]*time.Location) (mod
 	if recurrence := component.GetProperty(ics.ComponentPropertyRrule); recurrence != nil {
 		event.RecurrenceRule = recurrence.Value
 	}
-	if event.RecurrenceDates, err = componentTimes(component, ics.ComponentPropertyRdate, locations); err != nil {
+	if event.RecurrenceDates, event.RecurrencePeriods, err = componentRecurrences(component, locations); err != nil {
 		return model.Event{}, fmt.Errorf("parse RDATE for event %s: %w", event.ID, err)
 	}
 	if event.ExceptionDates, err = componentTimes(component, ics.ComponentPropertyExdate, locations); err != nil {
@@ -379,7 +389,8 @@ func Generate(event model.Event) (model.Event, string, error) {
 	}
 	if event.RecurrenceID != "" {
 		if recurrenceTime, err := time.Parse(time.RFC3339, event.RecurrenceID); err == nil {
-			lines = append(lines, "RECURRENCE-ID:"+recurrenceTime.UTC().Format("20060102T150405Z"))
+			key, value := formatRecurrenceTime("RECURRENCE-ID", recurrenceTime, event.AllDay)
+			lines = append(lines, key+":"+value)
 		}
 	}
 	if event.RecurrenceRule != "" {
@@ -388,16 +399,31 @@ func Generate(event model.Event) (model.Event, string, error) {
 	if len(event.RecurrenceDates) > 0 {
 		values := make([]string, len(event.RecurrenceDates))
 		for index, value := range event.RecurrenceDates {
-			values[index] = value.UTC().Format("20060102T150405Z")
+			_, values[index] = formatRecurrenceTime("RDATE", value, event.AllDay)
 		}
-		lines = append(lines, "RDATE:"+strings.Join(values, ","))
+		key := "RDATE"
+		if event.AllDay {
+			key += ";VALUE=DATE"
+		}
+		lines = append(lines, key+":"+strings.Join(values, ","))
+	}
+	if len(event.RecurrencePeriods) > 0 {
+		values := make([]string, len(event.RecurrencePeriods))
+		for index, period := range event.RecurrencePeriods {
+			values[index] = period.Start.UTC().Format("20060102T150405Z") + "/" + period.End.UTC().Format("20060102T150405Z")
+		}
+		lines = append(lines, "RDATE;VALUE=PERIOD:"+strings.Join(values, ","))
 	}
 	if len(event.ExceptionDates) > 0 {
 		values := make([]string, len(event.ExceptionDates))
 		for index, value := range event.ExceptionDates {
-			values[index] = value.UTC().Format("20060102T150405Z")
+			_, values[index] = formatRecurrenceTime("EXDATE", value, event.AllDay)
 		}
-		lines = append(lines, "EXDATE:"+strings.Join(values, ","))
+		key := "EXDATE"
+		if event.AllDay {
+			key += ";VALUE=DATE"
+		}
+		lines = append(lines, key+":"+strings.Join(values, ","))
 	}
 	if event.Sequence > 0 {
 		lines = append(lines, fmt.Sprintf("SEQUENCE:%d", event.Sequence))
@@ -527,6 +553,13 @@ func parseTime(key, value string) (time.Time, bool, error) {
 }
 
 func formatTime(name string, value time.Time, allDay bool) (string, string) {
+	if allDay {
+		return name + ";VALUE=DATE", value.Format("20060102")
+	}
+	return name, value.UTC().Format("20060102T150405Z")
+}
+
+func formatRecurrenceTime(name string, value time.Time, allDay bool) (string, string) {
 	if allDay {
 		return name + ";VALUE=DATE", value.Format("20060102")
 	}

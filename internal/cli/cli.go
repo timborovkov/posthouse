@@ -220,7 +220,7 @@ func (c *CLI) mail(ctx context.Context, args []string) error {
 		flags.SetOutput(c.stderr)
 		connection := flags.String("connection", "", "exact connection")
 		folder := flags.String("folder", "INBOX", "IMAP folder")
-		uid := flags.Uint("uid", 0, "message UID")
+		uid := flags.Uint64("uid", 0, "message UID")
 		offline := flags.Bool("offline", false, "read only from encrypted cache")
 		refresh := flags.Bool("refresh", false, "require a live provider read without stale fallback")
 		if err := flags.Parse(args[1:]); err != nil {
@@ -229,11 +229,15 @@ func (c *CLI) mail(ctx context.Context, args []string) error {
 		if *connection == "" || *uid == 0 {
 			return fmt.Errorf("mail get requires --connection and --uid")
 		}
+		messageUID, err := checkedUID(*uid)
+		if err != nil {
+			return err
+		}
 		mode, err := readMode(*offline, *refresh)
 		if err != nil {
 			return err
 		}
-		detail, err := c.service.GetMessageMode(*connection, *folder, uint32(*uid), mode)
+		detail, err := c.service.GetMessageMode(*connection, *folder, messageUID, mode)
 		if err != nil {
 			return err
 		}
@@ -243,7 +247,7 @@ func (c *CLI) mail(ctx context.Context, args []string) error {
 		flags.SetOutput(c.stderr)
 		connection := flags.String("connection", "", "exact connection")
 		folder := flags.String("folder", "INBOX", "IMAP folder")
-		uid := flags.Uint("uid", 0, "message UID")
+		uid := flags.Uint64("uid", 0, "message UID")
 		id := flags.String("id", "", "attachment ID from mail get")
 		output := flags.String("output", "-", "output path, or - for stdout")
 		force := flags.Bool("force", false, "replace output file")
@@ -255,11 +259,15 @@ func (c *CLI) mail(ctx context.Context, args []string) error {
 		if *connection == "" || *uid == 0 || *id == "" {
 			return fmt.Errorf("mail attachment requires --connection, --uid, and --id")
 		}
+		messageUID, err := checkedUID(*uid)
+		if err != nil {
+			return err
+		}
 		mode, err := readMode(*offline, *refresh)
 		if err != nil {
 			return err
 		}
-		attachment, data, err := c.service.GetAttachmentMode(ctx, *connection, *folder, uint32(*uid), *id, mode)
+		attachment, data, err := c.service.GetAttachmentMode(ctx, *connection, *folder, messageUID, *id, mode)
 		if err != nil {
 			return err
 		}
@@ -277,7 +285,7 @@ func (c *CLI) mail(ctx context.Context, args []string) error {
 		flags.SetOutput(c.stderr)
 		connection := flags.String("connection", "", "exact connection")
 		folder := flags.String("folder", "INBOX", "IMAP folder")
-		uid := flags.Uint("uid", 0, "message UID")
+		uid := flags.Uint64("uid", 0, "message UID")
 		body := flags.String("body", "", "plain-text body to place before the quoted message")
 		bodyFile := flags.String("body-file", "", "body file, or - for stdin")
 		var to stringList
@@ -288,6 +296,10 @@ func (c *CLI) mail(ctx context.Context, args []string) error {
 		if *connection == "" || *uid == 0 {
 			return fmt.Errorf("mail %s requires --connection and --uid", args[0])
 		}
+		messageUID, err := checkedUID(*uid)
+		if err != nil {
+			return err
+		}
 		if *bodyFile != "" {
 			data, err := readInput(*bodyFile)
 			if err != nil {
@@ -296,14 +308,13 @@ func (c *CLI) mail(ctx context.Context, args []string) error {
 			*body = string(data)
 		}
 		var prepared model.PreparedOperation
-		var err error
 		if args[0] == "reply" {
-			prepared, err = c.service.PrepareReply(ctx, *connection, *folder, uint32(*uid), *body)
+			prepared, err = c.service.PrepareReply(ctx, *connection, *folder, messageUID, *body)
 		} else {
 			if len(to) == 0 {
 				return fmt.Errorf("mail forward requires at least one --to")
 			}
-			prepared, err = c.service.PrepareForward(ctx, *connection, *folder, uint32(*uid), to, *body)
+			prepared, err = c.service.PrepareForward(ctx, *connection, *folder, messageUID, to, *body)
 		}
 		if err != nil {
 			return err
@@ -314,7 +325,7 @@ func (c *CLI) mail(ctx context.Context, args []string) error {
 		flags.SetOutput(c.stderr)
 		connection := flags.String("connection", "", "exact connection")
 		folder := flags.String("folder", "INBOX", "IMAP folder")
-		uid := flags.Uint("uid", 0, "message UID")
+		uid := flags.Uint64("uid", 0, "message UID")
 		read, unread := flags.Bool("read", false, "mark read"), flags.Bool("unread", false, "mark unread")
 		flagged, unflagged := flags.Bool("flagged", false, "flag message"), flags.Bool("unflagged", false, "remove flag")
 		if err := flags.Parse(args[1:]); err != nil {
@@ -322,6 +333,10 @@ func (c *CLI) mail(ctx context.Context, args []string) error {
 		}
 		if *connection == "" || *uid == 0 || (*read == *unread && *flagged == *unflagged) {
 			return fmt.Errorf("mail mark requires target and one unambiguous state change")
+		}
+		messageUID, err := checkedUID(*uid)
+		if err != nil {
+			return err
 		}
 		var seenValue, flagValue *bool
 		if *read != *unread {
@@ -332,7 +347,7 @@ func (c *CLI) mail(ctx context.Context, args []string) error {
 			value := *flagged
 			flagValue = &value
 		}
-		prepared, err := c.service.PrepareMailAction(ctx, *connection, "mail.mark", service.MailAction{Folder: *folder, UID: uint32(*uid), Seen: seenValue, Flagged: flagValue})
+		prepared, err := c.service.PrepareMailAction(ctx, *connection, "mail.mark", service.MailAction{Folder: *folder, UID: messageUID, Seen: seenValue, Flagged: flagValue})
 		if err != nil {
 			return err
 		}
@@ -342,7 +357,7 @@ func (c *CLI) mail(ctx context.Context, args []string) error {
 		flags.SetOutput(c.stderr)
 		connection := flags.String("connection", "", "exact connection")
 		folder := flags.String("folder", "INBOX", "source folder")
-		uid := flags.Uint("uid", 0, "message UID")
+		uid := flags.Uint64("uid", 0, "message UID")
 		destination := flags.String("destination", "", "destination folder for move")
 		if err := flags.Parse(args[1:]); err != nil {
 			return err
@@ -350,8 +365,12 @@ func (c *CLI) mail(ctx context.Context, args []string) error {
 		if *connection == "" || *uid == 0 {
 			return fmt.Errorf("mail %s requires --connection and --uid", args[0])
 		}
+		messageUID, err := checkedUID(*uid)
+		if err != nil {
+			return err
+		}
 		kind := "mail." + args[0]
-		prepared, err := c.service.PrepareMailAction(ctx, *connection, kind, service.MailAction{Folder: *folder, UID: uint32(*uid), Destination: *destination})
+		prepared, err := c.service.PrepareMailAction(ctx, *connection, kind, service.MailAction{Folder: *folder, UID: messageUID, Destination: *destination})
 		if err != nil {
 			return err
 		}
@@ -365,7 +384,7 @@ func (c *CLI) mail(ctx context.Context, args []string) error {
 		flags.SetOutput(c.stderr)
 		connection := flags.String("connection", "", "exact connection")
 		folder := flags.String("folder", "", "drafts folder")
-		uid := flags.Uint("uid", 0, "existing draft UID")
+		uid := flags.Uint64("uid", 0, "existing draft UID")
 		file := flags.String("file", "", "draft message JSON file, or -")
 		if err := flags.Parse(args[2:]); err != nil {
 			return err
@@ -386,7 +405,11 @@ func (c *CLI) mail(ctx context.Context, args []string) error {
 				return fmt.Errorf("decode draft: %w", err)
 			}
 		}
-		prepared, err := c.service.PrepareDraft(ctx, *connection, kind, *folder, uint32(*uid), message)
+		messageUID, err := checkedUID(*uid)
+		if err != nil {
+			return err
+		}
+		prepared, err := c.service.PrepareDraft(ctx, *connection, kind, *folder, messageUID, message)
 		if err != nil {
 			return err
 		}
@@ -503,16 +526,11 @@ func (c *CLI) calendar(ctx context.Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		page, err := c.service.ListEvents(ctx, flags.selector("calendar"), startTime, endTime, "", 500, "")
+		event, err := c.service.GetEvent(ctx, flags.selector("calendar"), startTime, endTime, *id)
 		if err != nil {
 			return err
 		}
-		for _, event := range page.Events {
-			if event.ID == *id {
-				return writeJSON(c.stdout, event)
-			}
-		}
-		return fmt.Errorf("event %q was not found in the selected range", *id)
+		return writeJSON(c.stdout, event)
 	case "create", "update":
 		flags := flag.NewFlagSet("calendar "+args[0], flag.ContinueOnError)
 		flags.SetOutput(c.stderr)
@@ -544,13 +562,14 @@ func (c *CLI) calendar(ctx context.Context, args []string) error {
 		collection := flags.String("collection", "", "calendar collection ID")
 		href := flags.String("href", "", "event href")
 		etag := flags.String("etag", "", "event ETag")
+		recurrenceID := flags.String("recurrence-id", "", "recurrence ID from calendar list; expanded occurrences cannot be deleted as whole objects")
 		if err := flags.Parse(args[1:]); err != nil {
 			return err
 		}
 		if *connection == "" || *collection == "" || *href == "" || *etag == "" {
 			return fmt.Errorf("calendar delete requires --connection, --collection, --href, and --etag")
 		}
-		prepared, err := c.service.PrepareCalendarDelete(ctx, *connection, *collection, *href, *etag)
+		prepared, err := c.service.PrepareCalendarDelete(ctx, *connection, *collection, *href, *etag, *recurrenceID)
 		if err != nil {
 			return err
 		}
@@ -823,6 +842,13 @@ func parseOptionalTime(value string) (time.Time, error) {
 		return time.Time{}, nil
 	}
 	return time.Parse(time.RFC3339, value)
+}
+
+func checkedUID(value uint64) (uint32, error) {
+	if value > uint64(^uint32(0)) {
+		return 0, fmt.Errorf("message UID %d exceeds the uint32 IMAP range", value)
+	}
+	return uint32(value), nil
 }
 
 func readMode(offline, refresh bool) (string, error) {

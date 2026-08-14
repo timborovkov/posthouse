@@ -486,11 +486,7 @@ func (p *posthouseApp) submitEditor() {
 			event := items[p.selected.Get()]
 			action := strings.ToLower(strings.TrimSpace(values[0]))
 			if action == "delete" {
-				if event.RecurrenceID != "" {
-					err = fmt.Errorf("cannot delete one expanded occurrence; edit the series or create a cancelled recurrence override")
-				} else {
-					prepared, err = p.service.PrepareCalendarDelete(p.ctx, event.ConnectionID, event.CollectionID, event.Href, event.ETag)
-				}
+				prepared, err = p.service.PrepareCalendarDelete(p.ctx, event.ConnectionID, event.CollectionID, event.Href, event.ETag, event.RecurrenceID)
 			} else if action == "update" || action == "update-series" {
 				if action == "update-series" && event.RecurrenceID != "" {
 					err = fmt.Errorf("cannot replace a recurring series from an expanded occurrence; refresh and edit the series master")

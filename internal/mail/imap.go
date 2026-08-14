@@ -21,7 +21,9 @@ type SearchOptions struct {
 	Before              time.Time
 	Unread              bool
 	Limit               int
-	BeforeUID           uint32
+	CursorTime          time.Time
+	CursorUID           uint32
+	MaxUIDExclusive     uint32
 	ExpectedUIDValidity uint32
 	Mode                string
 }
@@ -69,16 +71,7 @@ func Search(connection model.Connection, options SearchOptions) (SearchResult, e
 	if options.ExpectedUIDValidity != 0 && selected.UIDValidity != options.ExpectedUIDValidity {
 		return SearchResult{}, fmt.Errorf("mailbox UIDVALIDITY changed; restart pagination")
 	}
-	if options.BeforeUID == 1 {
-		return SearchResult{Messages: []model.Message{}, UIDValidity: selected.UIDValidity, UIDNext: uint32(selected.UIDNext)}, nil
-	}
-
 	criteria := &imap.SearchCriteria{Since: options.Since, Before: options.Before}
-	if options.BeforeUID > 1 {
-		var uidSet imap.UIDSet
-		uidSet.AddRange(1, imap.UID(options.BeforeUID-1))
-		criteria.UID = []imap.UIDSet{uidSet}
-	}
 	if options.Query != "" {
 		criteria.Text = []string{options.Query}
 	}
@@ -90,37 +83,22 @@ func Search(connection model.Connection, options SearchOptions) (SearchResult, e
 		return SearchResult{}, fmt.Errorf("search IMAP folder: %w", err)
 	}
 	uids := searchData.AllUIDs()
+	if options.MaxUIDExclusive != 0 {
+		filtered := uids[:0]
+		for _, uid := range uids {
+			if uint32(uid) < options.MaxUIDExclusive {
+				filtered = append(filtered, uid)
+			}
+		}
+		uids = filtered
+	}
 	if len(uids) == 0 {
 		return SearchResult{Messages: []model.Message{}, UIDValidity: selected.UIDValidity, UIDNext: uint32(selected.UIDNext)}, nil
-	}
-	hasMore := len(uids) > options.Limit
-	if len(uids) > options.Limit {
-		uids = uids[len(uids)-options.Limit:]
 	}
 	set := imap.UIDSetNum(uids...)
 	fetched, err := client.Fetch(set, &imap.FetchOptions{UID: true, Envelope: true, Flags: true, InternalDate: true, RFC822Size: true}).Collect()
 	if err != nil {
 		return SearchResult{}, fmt.Errorf("fetch IMAP messages: %w", err)
-	}
-	// Partial BODY responses are implemented inconsistently by otherwise useful
-	// IMAP servers. Fetch complete messages only when RFC822.SIZE proves they are
-	// small, keeping list reads bounded while retaining useful snippets.
-	const previewFetchLimit = 64 << 10
-	var previewUIDs []imap.UID
-	for _, item := range fetched {
-		if item.RFC822Size >= 0 && item.RFC822Size <= previewFetchLimit {
-			previewUIDs = append(previewUIDs, item.UID)
-		}
-	}
-	previews := make(map[imap.UID]string, len(previewUIDs))
-	if len(previewUIDs) > 0 {
-		previewSection := &imap.FetchItemBodySection{Peek: true}
-		previewItems, previewErr := client.Fetch(imap.UIDSetNum(previewUIDs...), &imap.FetchOptions{UID: true, BodySection: []*imap.FetchItemBodySection{previewSection}}).Collect()
-		if previewErr == nil {
-			for _, item := range previewItems {
-				previews[item.UID] = messagePreview(item.FindBodySection(previewSection))
-			}
-		}
 	}
 	messages := make([]model.Message, 0, len(fetched))
 	for _, item := range fetched {
@@ -137,12 +115,68 @@ func Search(connection model.Connection, options SearchOptions) (SearchResult, e
 			Subject:      item.Envelope.Subject,
 			Date:         item.Envelope.Date,
 			ReceivedAt:   item.InternalDate,
-			Preview:      previews[item.UID],
 			Unread:       !slices.Contains(item.Flags, imap.FlagSeen),
+			Flagged:      slices.Contains(item.Flags, imap.FlagFlagged),
 		})
 	}
-	sort.Slice(messages, func(i, j int) bool { return messages[i].UID > messages[j].UID })
+	sort.Slice(messages, func(i, j int) bool { return messageBefore(messages[i], messages[j]) })
+	if !options.CursorTime.IsZero() {
+		boundary := model.Message{ReceivedAt: options.CursorTime, UID: options.CursorUID}
+		filtered := messages[:0]
+		for _, message := range messages {
+			if messageBefore(boundary, message) {
+				filtered = append(filtered, message)
+			}
+		}
+		messages = filtered
+	}
+	hasMore := len(messages) > options.Limit
+	if hasMore {
+		messages = messages[:options.Limit]
+	}
+	// Partial BODY responses are implemented inconsistently by otherwise useful
+	// IMAP servers. Fetch complete messages only when RFC822.SIZE proves they are
+	// small, keeping list reads bounded while retaining useful snippets.
+	const previewFetchLimit = 64 << 10
+	previewUIDs := make([]imap.UID, 0, len(messages))
+	sizes := make(map[imap.UID]int64, len(fetched))
+	for _, item := range fetched {
+		sizes[item.UID] = item.RFC822Size
+	}
+	for _, message := range messages {
+		if size := sizes[imap.UID(message.UID)]; size >= 0 && size <= previewFetchLimit {
+			previewUIDs = append(previewUIDs, imap.UID(message.UID))
+		}
+	}
+	if len(previewUIDs) > 0 {
+		previewSection := &imap.FetchItemBodySection{Peek: true}
+		previewItems, previewErr := client.Fetch(imap.UIDSetNum(previewUIDs...), &imap.FetchOptions{UID: true, BodySection: []*imap.FetchItemBodySection{previewSection}}).Collect()
+		if previewErr == nil {
+			previews := make(map[uint32]string, len(previewItems))
+			for _, item := range previewItems {
+				previews[uint32(item.UID)] = messagePreview(item.FindBodySection(previewSection))
+			}
+			for index := range messages {
+				messages[index].Preview = previews[messages[index].UID]
+			}
+		}
+	}
 	return SearchResult{Messages: messages, UIDValidity: selected.UIDValidity, UIDNext: uint32(selected.UIDNext), HasMore: hasMore}, nil
+}
+
+func messageBefore(a, b model.Message) bool {
+	aTime, bTime := messageTime(a), messageTime(b)
+	if !aTime.Equal(bTime) {
+		return aTime.After(bTime)
+	}
+	return a.UID > b.UID
+}
+
+func messageTime(message model.Message) time.Time {
+	if !message.ReceivedAt.IsZero() {
+		return message.ReceivedAt
+	}
+	return message.Date
 }
 
 func messagePreview(data []byte) string {

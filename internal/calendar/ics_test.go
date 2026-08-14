@@ -32,6 +32,45 @@ func TestGenerateAndParseRoundTrip(t *testing.T) {
 	}
 }
 
+func TestGenerateUsesDateValuesForAllDayRecurrenceProperties(t *testing.T) {
+	event := model.Event{
+		ID: "days", Title: "Days", AllDay: true,
+		Start: time.Date(2026, 8, 15, 0, 0, 0, 0, time.UTC), End: time.Date(2026, 8, 16, 0, 0, 0, 0, time.UTC),
+		RecurrenceID:    "2026-08-15T00:00:00Z",
+		RecurrenceDates: []time.Time{time.Date(2026, 8, 17, 0, 0, 0, 0, time.UTC)},
+		ExceptionDates:  []time.Time{time.Date(2026, 8, 18, 0, 0, 0, 0, time.UTC)},
+	}
+	_, generated, err := Generate(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range []string{"RECURRENCE-ID;VALUE=DATE:20260815", "RDATE;VALUE=DATE:20260817", "EXDATE;VALUE=DATE:20260818"} {
+		if !strings.Contains(generated, line) {
+			t.Fatalf("generated calendar lacks %q:\n%s", line, generated)
+		}
+	}
+}
+
+func TestParseRangePreservesRDATEPeriodDurations(t *testing.T) {
+	data := `BEGIN:VCALENDAR
+VERSION:2.0
+BEGIN:VEVENT
+UID:periods
+DTSTART:20260815T090000Z
+DTEND:20260815T100000Z
+RDATE;VALUE=PERIOD:20260816T090000Z/20260816T110000Z,20260817T090000Z/PT3H
+SUMMARY:Variable length
+END:VEVENT
+END:VCALENDAR`
+	events, err := ParseRange([]byte(data), time.Date(2026, 8, 15, 0, 0, 0, 0, time.UTC), time.Date(2026, 8, 18, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 3 || events[0].End.Sub(events[0].Start) != time.Hour || events[1].End.Sub(events[1].Start) != 2*time.Hour || events[2].End.Sub(events[2].Start) != 3*time.Hour {
+		t.Fatalf("RDATE period events = %#v", events)
+	}
+}
+
 func TestParseMultipleEvents(t *testing.T) {
 	data := "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n" + eventFixture("one", "First", "20260814T090000Z", "20260814T100000Z") + eventFixture("two", "Second", "20260815T090000Z", "20260815T100000Z") + "END:VCALENDAR\r\n"
 	events, err := Parse([]byte(data))

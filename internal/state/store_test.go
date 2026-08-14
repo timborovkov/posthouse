@@ -61,6 +61,26 @@ func TestEncryptedCacheAndOperationRoundTrip(t *testing.T) {
 	}
 }
 
+func TestClaimOperationRecordsExecutionStart(t *testing.T) {
+	store, err := state.OpenWithKey(filepath.Join(t.TempDir(), "state.db"), 2<<20, bytesOf(6, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	prepared := model.PreparedOperation{Token: "claim-token", Kind: "mail.send", ConnectionID: "work", CreatedAt: time.Now().Add(-time.Minute), ExpiresAt: time.Now().Add(time.Minute), Status: "prepared"}
+	if err := store.PutOperation(ctx, state.OperationRecord{Public: prepared, Payload: []byte(`{}`), Digest: "digest"}); err != nil {
+		t.Fatal(err)
+	}
+	claimed, won, err := store.ClaimOperation(ctx, prepared.Token)
+	if err != nil || !won || claimed.Public.Status != "executing" || claimed.Public.ExecutedAt.IsZero() {
+		t.Fatalf("ClaimOperation record=%#v won=%v err=%v", claimed, won, err)
+	}
+	if !claimed.Public.ExecutedAt.After(prepared.CreatedAt) {
+		t.Fatalf("execution start %v was not distinct from preparation", claimed.Public.ExecutedAt)
+	}
+}
+
 func TestLRUEvictsAttachmentsBeforeBodies(t *testing.T) {
 	store, err := state.OpenWithKey(filepath.Join(t.TempDir(), "state.db"), 10, bytesOf(9, 32))
 	if err != nil {

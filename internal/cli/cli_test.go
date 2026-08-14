@@ -70,6 +70,15 @@ func TestCalendarListCursorRecoversDefaultRange(t *testing.T) {
 	}
 }
 
+func TestCheckedUIDRejectsOverflow(t *testing.T) {
+	if _, err := checkedUID(uint64(^uint32(0)) + 1); err == nil || !strings.Contains(err.Error(), "uint32") {
+		t.Fatalf("checkedUID overflow error = %v", err)
+	}
+	if uid, err := checkedUID(uint64(^uint32(0))); err != nil || uid != ^uint32(0) {
+		t.Fatalf("checkedUID maximum = %d, %v", uid, err)
+	}
+}
+
 func testCLI(t *testing.T, stdout *bytes.Buffer) *CLI {
 	t.Helper()
 	store, err := config.New(filepath.Join(t.TempDir(), "config.json"))

@@ -11,6 +11,7 @@ import (
 
 	ics "github.com/arran4/golang-ical"
 	"github.com/teambition/rrule-go"
+	"github.com/timborovkov/posthouse/internal/model"
 )
 
 func embeddedTimezones(calendar *ics.Calendar) (map[string]*time.Location, error) {
@@ -56,6 +57,46 @@ func componentTimes(component *ics.VEvent, property ics.ComponentProperty, locat
 		}
 	}
 	return result, nil
+}
+
+func componentRecurrences(component *ics.VEvent, locations map[string]*time.Location) ([]time.Time, []model.RecurrencePeriod, error) {
+	var dates []time.Time
+	var periods []model.RecurrencePeriod
+	for _, item := range component.GetProperties(ics.ComponentPropertyRdate) {
+		for _, value := range strings.Split(item.Value, ",") {
+			parts := strings.SplitN(value, "/", 2)
+			startProperty := *item
+			startProperty.Value = parts[0]
+			start, err := propertyTime(&startProperty, locations)
+			if err != nil {
+				return nil, nil, err
+			}
+			if len(parts) == 1 {
+				dates = append(dates, start)
+				continue
+			}
+			var end time.Time
+			if strings.HasPrefix(parts[1], "P") || strings.HasPrefix(parts[1], "+P") || strings.HasPrefix(parts[1], "-P") {
+				duration, err := parseDuration(parts[1])
+				if err != nil {
+					return nil, nil, err
+				}
+				end = start.Add(duration)
+			} else {
+				endProperty := *item
+				endProperty.Value = parts[1]
+				end, err = propertyTime(&endProperty, locations)
+				if err != nil {
+					return nil, nil, err
+				}
+			}
+			if !end.After(start) {
+				return nil, nil, fmt.Errorf("RDATE period end must be after start")
+			}
+			periods = append(periods, model.RecurrencePeriod{Start: start, End: end})
+		}
+	}
+	return dates, periods, nil
 }
 
 func propertyTime(property *ics.IANAProperty, locations map[string]*time.Location) (time.Time, error) {

@@ -183,29 +183,35 @@ type MessageDetail struct {
 	Attachments []Attachment `json:"attachments,omitempty"`
 }
 
+type RecurrencePeriod struct {
+	Start time.Time `json:"start"`
+	End   time.Time `json:"end"`
+}
+
 type Event struct {
-	ConnectionID    string      `json:"connection_id,omitempty"`
-	ID              string      `json:"id"`
-	SeriesID        string      `json:"series_id,omitempty"`
-	Title           string      `json:"title"`
-	Description     string      `json:"description,omitempty"`
-	Location        string      `json:"location,omitempty"`
-	Start           time.Time   `json:"start"`
-	End             time.Time   `json:"end"`
-	AllDay          bool        `json:"all_day,omitempty"`
-	Attendees       []string    `json:"attendees,omitempty"`
-	Organizer       string      `json:"organizer,omitempty"`
-	CollectionID    string      `json:"collection_id,omitempty"`
-	ETag            string      `json:"etag,omitempty"`
-	Href            string      `json:"href,omitempty"`
-	RecurrenceID    string      `json:"recurrence_id,omitempty"`
-	RecurrenceRule  string      `json:"recurrence_rule,omitempty"`
-	RecurrenceDates []time.Time `json:"recurrence_dates,omitempty"`
-	ExceptionDates  []time.Time `json:"exception_dates,omitempty"`
-	Sequence        int         `json:"sequence,omitempty"`
-	Status          string      `json:"status,omitempty"`
-	Stale           bool        `json:"stale,omitempty"`
-	CachedAt        time.Time   `json:"cached_at,omitempty"`
+	ConnectionID      string             `json:"connection_id,omitempty"`
+	ID                string             `json:"id"`
+	SeriesID          string             `json:"series_id,omitempty"`
+	Title             string             `json:"title"`
+	Description       string             `json:"description,omitempty"`
+	Location          string             `json:"location,omitempty"`
+	Start             time.Time          `json:"start"`
+	End               time.Time          `json:"end"`
+	AllDay            bool               `json:"all_day,omitempty"`
+	Attendees         []string           `json:"attendees,omitempty"`
+	Organizer         string             `json:"organizer,omitempty"`
+	CollectionID      string             `json:"collection_id,omitempty"`
+	ETag              string             `json:"etag,omitempty"`
+	Href              string             `json:"href,omitempty"`
+	RecurrenceID      string             `json:"recurrence_id,omitempty"`
+	RecurrenceRule    string             `json:"recurrence_rule,omitempty"`
+	RecurrenceDates   []time.Time        `json:"recurrence_dates,omitempty"`
+	RecurrencePeriods []RecurrencePeriod `json:"recurrence_periods,omitempty"`
+	ExceptionDates    []time.Time        `json:"exception_dates,omitempty"`
+	Sequence          int                `json:"sequence,omitempty"`
+	Status            string             `json:"status,omitempty"`
+	Stale             bool               `json:"stale,omitempty"`
+	CachedAt          time.Time          `json:"cached_at,omitempty"`
 }
 
 type EventPage struct {

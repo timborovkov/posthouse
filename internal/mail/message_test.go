@@ -30,3 +30,16 @@ func TestFlagPreconditionRefreshRequiresAnotherChange(t *testing.T) {
 		t.Fatal("non-nil flag change skipped the required MODSEQ refresh")
 	}
 }
+
+func TestSanitizeHTMLUsesParserBasedURLAndAttributeAllowlist(t *testing.T) {
+	input := `<p style="background:url(javascript:alert(1))" onclick=alert(1)>Hello</p><a href=javascript:alert(2)>bad</a><a href="jav&#x61;script:alert(3)">encoded</a><a href="https://example.test/path">safe</a><script>alert(4)</script>`
+	output := sanitizeHTML(input)
+	for _, forbidden := range []string{"javascript", "onclick", "style=", "script", "alert("} {
+		if strings.Contains(strings.ToLower(output), forbidden) {
+			t.Fatalf("sanitized HTML %q contains %q", output, forbidden)
+		}
+	}
+	if !strings.Contains(output, "https://example.test/path") || !strings.Contains(output, "Hello") {
+		t.Fatalf("sanitized HTML removed safe content: %q", output)
+	}
+}

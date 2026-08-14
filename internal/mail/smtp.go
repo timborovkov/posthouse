@@ -169,7 +169,7 @@ func validateMessage(message model.SendMessage) error {
 		if name == "" {
 			return fmt.Errorf("attachment name is required")
 		}
-		if attachment.Path != "" {
+		if attachment.Path != "" && attachment.Data == nil {
 			file, err := os.Open(attachment.Path)
 			if err != nil {
 				return fmt.Errorf("open attachment %s: %w", name, err)
@@ -261,14 +261,16 @@ func writeMessage(writer io.Writer, identity model.Identity, from string, messag
 			return fmt.Errorf("create attachment %s: %w", name, err)
 		}
 		var source io.ReadCloser
-		if attachment.Path != "" {
+		if attachment.Data != nil {
+			source = io.NopCloser(bytes.NewReader(attachment.Data))
+		} else if attachment.Path != "" {
 			source, err = os.Open(attachment.Path)
 			if err != nil {
 				_ = part.Close()
 				return fmt.Errorf("open attachment %s: %w", name, err)
 			}
 		} else {
-			source = io.NopCloser(bytes.NewReader(attachment.Data))
+			source = io.NopCloser(bytes.NewReader(nil))
 		}
 		_, copyErr := io.Copy(part, source)
 		closeSourceErr := source.Close()

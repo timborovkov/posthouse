@@ -125,6 +125,10 @@ func TestBuiltBinaryMultiConnectionPreparedMailAndCalendar(t *testing.T) {
 			t.Fatalf("%v execution: %#v", command, executed)
 		}
 	}
+	marked := waitMessage(t, env, binary, "personal", "INBOX", "E2E prepared")
+	if marked["flagged"] != true || marked["unread"] != false {
+		t.Fatalf("IMAP list did not expose updated flags: %#v", marked)
+	}
 
 	draftPath := filepath.Join(t.TempDir(), "draft.json")
 	draftData, _ := json.Marshal(model.SendMessage{To: []string{"work@work.test"}, Subject: "E2E draft", Text: "draft body"})
