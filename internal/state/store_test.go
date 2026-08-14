@@ -222,6 +222,34 @@ func TestPreparedOperationCanOnlyBeClaimedOnceAcrossStores(t *testing.T) {
 	}
 }
 
+func TestConcurrentStoreOpenWaitsForMigration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	key := bytesOf(4, 32)
+	start := make(chan struct{})
+	results := make(chan error, 16)
+	var wait sync.WaitGroup
+	for range 16 {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			<-start
+			store, err := state.OpenWithKey(path, 2<<20, key)
+			if err == nil {
+				err = store.Close()
+			}
+			results <- err
+		}()
+	}
+	close(start)
+	wait.Wait()
+	close(results)
+	for err := range results {
+		if err != nil {
+			t.Fatalf("concurrent OpenWithKey: %v", err)
+		}
+	}
+}
+
 func TestPreparedOperationsRespectStateLimit(t *testing.T) {
 	store, err := state.OpenWithKey(filepath.Join(t.TempDir(), "state.db"), 128, bytesOf(5, 32))
 	if err != nil {

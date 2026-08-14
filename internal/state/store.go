@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,7 +20,8 @@ import (
 
 	"github.com/zalando/go-keyring"
 	"golang.org/x/crypto/chacha20poly1305"
-	_ "modernc.org/sqlite"
+	"modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 
 	"github.com/timborovkov/posthouse/internal/model"
 )
@@ -110,7 +112,7 @@ func Open(path string, maxBytes int64) (*Store, error) {
 }
 
 func recoverRekeyKey(path string, oldKey []byte) ([]byte, error) {
-	db, err := sql.Open("sqlite", path)
+	db, err := openDatabase(path)
 	if err != nil {
 		return nil, err
 	}
@@ -136,7 +138,7 @@ func OpenWithKey(path string, maxBytes int64, key []byte) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, fmt.Errorf("create state directory: %w", err)
 	}
-	db, err := sql.Open("sqlite", path)
+	db, err := openDatabase(path)
 	if err != nil {
 		return nil, fmt.Errorf("open state database: %w", err)
 	}
@@ -157,9 +159,19 @@ func OpenWithKey(path string, maxBytes int64, key []byte) (*Store, error) {
 	return store, nil
 }
 
+func openDatabase(path string) (*sql.DB, error) {
+	dsn := url.URL{Scheme: "file", Path: path}
+	query := dsn.Query()
+	query.Add("_pragma", "busy_timeout(5000)")
+	query.Add("_pragma", "foreign_keys(1)")
+	dsn.RawQuery = query.Encode()
+	return sql.Open("sqlite", dsn.String())
+}
+
 func (s *Store) Close() error { return s.db.Close() }
 
 func (s *Store) migrate(ctx context.Context) error {
+	deadline := time.Now().Add(5 * time.Second)
 	statements := []string{
 		`PRAGMA journal_mode=WAL`,
 		`PRAGMA busy_timeout=5000`,
@@ -188,11 +200,31 @@ func (s *Store) migrate(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS operations_expiry ON operations(expires_at)`,
 	}
 	for _, statement := range statements {
-		if _, err := s.db.ExecContext(ctx, statement); err != nil {
-			return fmt.Errorf("migrate state database: %w", err)
+		for {
+			if _, err := s.db.ExecContext(ctx, statement); err == nil {
+				break
+			} else if !sqliteBusy(err) || !time.Now().Before(deadline) {
+				return fmt.Errorf("migrate state database: %w", err)
+			}
+			timer := time.NewTimer(25 * time.Millisecond)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return fmt.Errorf("migrate state database: %w", ctx.Err())
+			case <-timer.C:
+			}
 		}
 	}
 	return nil
+}
+
+func sqliteBusy(err error) bool {
+	var sqliteErr *sqlite.Error
+	if !errors.As(err, &sqliteErr) {
+		return false
+	}
+	code := sqliteErr.Code() & 0xff
+	return code == sqlite3.SQLITE_BUSY || code == sqlite3.SQLITE_LOCKED
 }
 
 func (s *Store) Put(ctx context.Context, entry CacheEntry) error {
