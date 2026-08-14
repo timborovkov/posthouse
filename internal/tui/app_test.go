@@ -120,6 +120,26 @@ func TestCapabilityDetectionSkipsUnavailableAggregateReads(t *testing.T) {
 	}
 }
 
+func TestCanceledRefreshSnapshotCannotReplaceCurrentState(t *testing.T) {
+	app := testApp(t)
+	defer app.close()
+	if app.refreshCancel != nil {
+		app.refreshCancel()
+	}
+	app.wg.Wait()
+	app.refreshGeneration.Store(10)
+	app.loading.Set(true)
+	app.messages.Set([]model.Message{{Subject: "current"}})
+	app.applySnapshot(snapshot{generation: 9, messages: []model.Message{{Subject: "stale"}}})
+	if got := app.messages.Get(); len(got) != 1 || got[0].Subject != "current" || !app.loading.Get() {
+		t.Fatalf("stale snapshot changed state: %#v loading=%v", got, app.loading.Get())
+	}
+	app.applySnapshot(snapshot{generation: 10, messages: []model.Message{{Subject: "fresh"}}})
+	if got := app.messages.Get(); len(got) != 1 || got[0].Subject != "fresh" || app.loading.Get() {
+		t.Fatalf("current snapshot state: %#v loading=%v", got, app.loading.Get())
+	}
+}
+
 func TestConnectionEditorSupportsSMTPOnlyOnboarding(t *testing.T) {
 	app := testApp(t)
 	defer app.close()
@@ -142,6 +162,18 @@ func TestSeriesUpdateRejectsExpandedOccurrence(t *testing.T) {
 	app.beginEditor("event-action", []string{"update-series", "Changed", "2026-08-15T09:00:00Z", "2026-08-15T10:00:00Z"})
 	app.submitEditor()
 	if !strings.Contains(app.errorText.Get(), "series master") || app.pendingToken.Get() != "" {
+		t.Fatalf("error=%q token=%q", app.errorText.Get(), app.pendingToken.Get())
+	}
+}
+
+func TestDeleteRejectsExpandedOccurrence(t *testing.T) {
+	app := testApp(t)
+	defer app.close()
+	app.view.Set(3)
+	app.events.Set([]model.Event{{ID: "series#20260815T090000Z", SeriesID: "series", ConnectionID: "work", RecurrenceID: "2026-08-15T09:00:00Z", Start: time.Date(2026, 8, 15, 9, 0, 0, 0, time.UTC), End: time.Date(2026, 8, 15, 10, 0, 0, 0, time.UTC)}})
+	app.beginEditor("event-action", []string{"delete", "", "", ""})
+	app.submitEditor()
+	if !strings.Contains(app.errorText.Get(), "cannot delete one expanded occurrence") || app.pendingToken.Get() != "" {
 		t.Fatalf("error=%q token=%q", app.errorText.Get(), app.pendingToken.Get())
 	}
 }

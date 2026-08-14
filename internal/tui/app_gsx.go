@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	tui "github.com/grindlemire/go-tui"
@@ -20,6 +21,7 @@ import (
 var viewNames = []string{"Connections", "Inbox", "Message", "Agenda", "Operations / Cache"}
 
 type snapshot struct {
+	generation  uint64
 	connections []model.Connection
 	messages    []model.Message
 	events      []model.Event
@@ -28,30 +30,31 @@ type snapshot struct {
 }
 
 type posthouseApp struct {
-	service       *service.Service
-	view          *tui.State[int]
-	selected      *tui.State[int]
-	loading       *tui.State[bool]
-	errorText     *tui.State[string]
-	status        *tui.State[string]
-	connections   *tui.State[[]model.Connection]
-	messages      *tui.State[[]model.Message]
-	events        *tui.State[[]model.Event]
-	detail        *tui.State[model.MessageDetail]
-	searching     *tui.State[bool]
-	query         *tui.State[string]
-	modal         *tui.State[bool]
-	modalText     *tui.State[string]
-	pendingToken  *tui.State[string]
-	editor        *tui.State[bool]
-	editorKind    *tui.State[string]
-	editorStep    *tui.State[int]
-	editorValues  *tui.State[[]string]
-	updates       chan snapshot
-	ctx           context.Context
-	cancel        context.CancelFunc
-	refreshCancel context.CancelFunc
-	wg            *sync.WaitGroup
+	service           *service.Service
+	view              *tui.State[int]
+	selected          *tui.State[int]
+	loading           *tui.State[bool]
+	errorText         *tui.State[string]
+	status            *tui.State[string]
+	connections       *tui.State[[]model.Connection]
+	messages          *tui.State[[]model.Message]
+	events            *tui.State[[]model.Event]
+	detail            *tui.State[model.MessageDetail]
+	searching         *tui.State[bool]
+	query             *tui.State[string]
+	modal             *tui.State[bool]
+	modalText         *tui.State[string]
+	pendingToken      *tui.State[string]
+	editor            *tui.State[bool]
+	editorKind        *tui.State[string]
+	editorStep        *tui.State[int]
+	editorValues      *tui.State[[]string]
+	updates           chan snapshot
+	ctx               context.Context
+	cancel            context.CancelFunc
+	refreshCancel     context.CancelFunc
+	refreshGeneration *atomic.Uint64
+	wg                *sync.WaitGroup
 }
 
 func New(application *service.Service) *posthouseApp {
@@ -66,7 +69,8 @@ func New(application *service.Service) *posthouseApp {
 		modalText: tui.NewState(""), pendingToken: tui.NewState(""),
 		editor: tui.NewState(false), editorKind: tui.NewState(""), editorStep: tui.NewState(0), editorValues: tui.NewState([]string{}),
 		updates: make(chan snapshot, 4), ctx: ctx, cancel: cancel,
-		wg: &sync.WaitGroup{},
+		refreshGeneration: &atomic.Uint64{},
+		wg:                &sync.WaitGroup{},
 	}
 	app.refresh()
 	return app
@@ -166,10 +170,11 @@ func (p *posthouseApp) refresh() {
 	p.loading.Set(true)
 	p.status.Set("Refreshing live sources…")
 	query := p.query.Get()
+	generation := p.refreshGeneration.Add(1)
 	p.wg.Add(1)
 	go func() {
 		defer p.wg.Done()
-		next := snapshot{}
+		next := snapshot{generation: generation}
 		connections, err := p.service.Connections(model.Selector{})
 		if err != nil {
 			next.err = err.Error()
@@ -197,6 +202,9 @@ func (p *posthouseApp) refresh() {
 		} else {
 			next.cache = "cache unavailable: " + cacheErr.Error()
 		}
+		if ctx.Err() != nil {
+			return
+		}
 		select {
 		case p.updates <- next:
 		case <-ctx.Done():
@@ -213,6 +221,9 @@ func (p *posthouseApp) close() {
 }
 
 func (p *posthouseApp) applySnapshot(next snapshot) {
+	if next.generation != p.refreshGeneration.Load() {
+		return
+	}
 	p.loading.Set(false)
 	p.connections.Set(next.connections)
 	p.messages.Set(next.messages)
@@ -475,7 +486,11 @@ func (p *posthouseApp) submitEditor() {
 			event := items[p.selected.Get()]
 			action := strings.ToLower(strings.TrimSpace(values[0]))
 			if action == "delete" {
-				prepared, err = p.service.PrepareCalendarDelete(p.ctx, event.ConnectionID, event.CollectionID, event.Href, event.ETag)
+				if event.RecurrenceID != "" {
+					err = fmt.Errorf("cannot delete one expanded occurrence; edit the series or create a cancelled recurrence override")
+				} else {
+					prepared, err = p.service.PrepareCalendarDelete(p.ctx, event.ConnectionID, event.CollectionID, event.Href, event.ETag)
+				}
 			} else if action == "update" || action == "update-series" {
 				if action == "update-series" && event.RecurrenceID != "" {
 					err = fmt.Errorf("cannot replace a recurring series from an expanded occurrence; refresh and edit the series master")
@@ -958,6 +973,7 @@ func (p *posthouseApp) updatePropsFields(fresh tui.Component) {
 	p.ctx = f.ctx
 	p.cancel = f.cancel
 	p.refreshCancel = f.refreshCancel
+	p.refreshGeneration = f.refreshGeneration
 	p.wg = f.wg
 }
 

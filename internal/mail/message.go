@@ -40,6 +40,11 @@ type MessagePrecondition struct {
 	ModSeq      uint64 `json:"modseq,omitempty"`
 }
 
+type flagChange struct {
+	flag  imap.Flag
+	value *bool
+}
+
 func Get(connection model.Connection, folder string, uid uint32) (FetchedMessage, error) {
 	if connection.Mail == nil || connection.Mail.IMAP.Address == "" {
 		return FetchedMessage{}, fmt.Errorf("connection %s has no IMAP capability", connection.ID)
@@ -62,10 +67,8 @@ func Get(connection model.Connection, folder string, uid uint32) (FetchedMessage
 	if _, err := client.Select(folder, &imap.SelectOptions{ReadOnly: true}).Wait(); err != nil {
 		return FetchedMessage{}, fmt.Errorf("select IMAP folder %s: %w", folder, err)
 	}
-	section := &imap.FetchItemBodySection{Peek: true}
 	items, err := client.Fetch(imap.UIDSetNum(imap.UID(uid)), &imap.FetchOptions{
-		UID: true, Envelope: true, Flags: true, InternalDate: true,
-		BodySection: []*imap.FetchItemBodySection{section},
+		UID: true, Envelope: true, Flags: true, InternalDate: true, RFC822Size: true,
 	}).Collect()
 	if err != nil {
 		return FetchedMessage{}, fmt.Errorf("fetch IMAP message: %w", err)
@@ -73,9 +76,35 @@ func Get(connection model.Connection, folder string, uid uint32) (FetchedMessage
 	if len(items) != 1 {
 		return FetchedMessage{}, fmt.Errorf("message %s/%d does not exist", folder, uid)
 	}
-	raw := items[0].FindBodySection(section)
-	if len(raw) > maxMessageBytes {
+	if items[0].RFC822Size > maxMessageBytes {
 		return FetchedMessage{}, fmt.Errorf("message exceeds 64 MiB read limit")
+	}
+	section := messageBodySection()
+	command := client.Fetch(imap.UIDSetNum(imap.UID(uid)), &imap.FetchOptions{UID: true, BodySection: []*imap.FetchItemBodySection{section}})
+	message := command.Next()
+	if message == nil {
+		if err := command.Close(); err != nil {
+			return FetchedMessage{}, fmt.Errorf("fetch IMAP message body: %w", err)
+		}
+		return FetchedMessage{}, fmt.Errorf("message %s/%d does not exist", folder, uid)
+	}
+	var raw []byte
+	for item := message.Next(); item != nil; item = message.Next() {
+		body, ok := item.(imapclient.FetchItemDataBodySection)
+		if !ok || !body.MatchCommand(section) || body.Literal == nil {
+			continue
+		}
+		raw, err = readBoundedLiteral(body.Literal, maxMessageBytes)
+		if err != nil {
+			_ = client.Close()
+			return FetchedMessage{}, err
+		}
+	}
+	if err := command.Close(); err != nil {
+		return FetchedMessage{}, fmt.Errorf("fetch IMAP message body: %w", err)
+	}
+	if raw == nil {
+		return FetchedMessage{}, fmt.Errorf("message %s/%d body was not returned", folder, uid)
 	}
 	result, err := parseMessage(raw)
 	if err != nil {
@@ -90,6 +119,21 @@ func Get(connection model.Connection, folder string, uid uint32) (FetchedMessage
 	result.Detail.Flagged = slices.Contains(items[0].Flags, imap.FlagFlagged)
 	result.Detail.HasAttachments = len(result.Detail.Attachments) > 0
 	return result, nil
+}
+
+func messageBodySection() *imap.FetchItemBodySection {
+	return &imap.FetchItemBodySection{Peek: true}
+}
+
+func readBoundedLiteral(reader io.Reader, limit int64) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(reader, limit+1))
+	if err != nil {
+		return nil, fmt.Errorf("read IMAP message body: %w", err)
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("message exceeds 64 MiB read limit")
+	}
+	return data, nil
 }
 
 func GetAttachment(connection model.Connection, folder string, uid uint32, attachmentID string) (model.Attachment, []byte, error) {
@@ -290,10 +334,7 @@ func SetFlags(connection model.Connection, folder string, uid uint32, seen, flag
 		return err
 	}
 	set := imap.UIDSetNum(imap.UID(uid))
-	changes := []struct {
-		flag  imap.Flag
-		value *bool
-	}{{imap.FlagSeen, seen}, {imap.FlagFlagged, flagged}}
+	changes := []flagChange{{imap.FlagSeen, seen}, {imap.FlagFlagged, flagged}}
 	modSeq := expected.ModSeq
 	for index, change := range changes {
 		flag, value := change.flag, change.value
@@ -311,7 +352,7 @@ func SetFlags(connection model.Connection, folder string, uid uint32, seen, flag
 		if err := client.Store(set, &imap.StoreFlags{Op: op, Silent: true, Flags: []imap.Flag{flag}}, storeOptions).Close(); err != nil {
 			return fmt.Errorf("update IMAP flags: %w", err)
 		}
-		if modSeq != 0 && index < len(changes)-1 {
+		if modSeq != 0 && hasFlagChange(changes[index+1:]) {
 			items, err := client.Fetch(set, &imap.FetchOptions{UID: true, ModSeq: true}).Collect()
 			if err != nil || len(items) != 1 {
 				return fmt.Errorf("refresh IMAP message precondition after flag update")
@@ -320,6 +361,15 @@ func SetFlags(connection model.Connection, folder string, uid uint32, seen, flag
 		}
 	}
 	return nil
+}
+
+func hasFlagChange(changes []flagChange) bool {
+	for _, change := range changes {
+		if change.value != nil {
+			return true
+		}
+	}
+	return false
 }
 
 func Move(connection model.Connection, folder string, uid uint32, destination string, expected MessagePrecondition) error {
@@ -350,16 +400,19 @@ func Move(connection model.Connection, folder string, uid uint32, destination st
 }
 
 func Append(connection model.Connection, folder string, message model.SendMessage, flags []imap.Flag) (uint32, error) {
+	data, err := BuildMessage(connection, message)
+	if err != nil {
+		return 0, fmt.Errorf("build IMAP message: %w", err)
+	}
+	return AppendSerialized(connection, folder, data, flags)
+}
+
+func AppendSerialized(connection model.Connection, folder string, data []byte, flags []imap.Flag) (uint32, error) {
 	if folder == "" {
 		return 0, fmt.Errorf("append folder is required")
 	}
-	from := connection.Identity.Email
-	if from == "" && connection.Mail != nil {
-		from = connection.Mail.Username
-	}
-	data, err := buildMessage(connection.Identity, from, message)
-	if err != nil {
-		return 0, fmt.Errorf("build IMAP message: %w", err)
+	if len(data) == 0 {
+		return 0, fmt.Errorf("serialized message is empty")
 	}
 	client, err := authenticatedIMAP(connection)
 	if err != nil {

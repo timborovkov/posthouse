@@ -114,9 +114,12 @@ func ParseRange(data []byte, rangeStart, rangeEnd time.Time) ([]model.Event, err
 	}
 	overrides := make(map[string]model.Event)
 	consumedOverrides := make(map[string]bool)
+	cancelledMasters := make(map[string]bool)
 	for _, event := range parsed {
 		if event.RecurrenceID != "" {
 			overrides[event.ID+"\x00"+event.RecurrenceID] = event
+		} else if strings.EqualFold(event.Status, "CANCELLED") {
+			cancelledMasters[event.ID] = true
 		}
 	}
 	const maxOccurrences = 10000
@@ -125,8 +128,11 @@ func ParseRange(data []byte, rangeStart, rangeEnd time.Time) ([]model.Event, err
 		if event.RecurrenceID != "" {
 			continue
 		}
+		if strings.EqualFold(event.Status, "CANCELLED") {
+			continue
+		}
 		if event.RecurrenceRule == "" && len(event.RecurrenceDates) == 0 {
-			if !strings.EqualFold(event.Status, "CANCELLED") && overlaps(event, rangeStart, rangeEnd) {
+			if overlaps(event, rangeStart, rangeEnd) {
 				result = append(result, event)
 			}
 			continue
@@ -142,7 +148,11 @@ func ParseRange(data []byte, rangeStart, rangeEnd time.Time) ([]model.Event, err
 		}
 		set.SetRDates(append([]time.Time{event.Start}, event.RecurrenceDates...))
 		set.SetExDates(event.ExceptionDates)
-		starts := set.Between(rangeStart.Add(-event.End.Sub(event.Start)), rangeEnd, true)
+		lookback := rangeStart.Add(-event.End.Sub(event.Start))
+		if event.AllDay {
+			lookback = rangeStart.AddDate(0, 0, -calendarDaySpan(event.Start, event.End))
+		}
+		starts := set.Between(lookback, rangeEnd, true)
 		if len(starts) > maxOccurrences-len(result) {
 			return nil, fmt.Errorf("calendar recurrence expansion exceeds %d occurrences", maxOccurrences)
 		}
@@ -160,7 +170,7 @@ func ParseRange(data []byte, rangeStart, rangeEnd time.Time) ([]model.Event, err
 			occurrence := event
 			occurrence.RecurrenceID = recurrenceID
 			occurrence.ID = stableOccurrenceID(event.ID, occurrenceStart)
-			occurrence.End = occurrenceStart.Add(event.End.Sub(event.Start))
+			occurrence.End = recurringEnd(event, occurrenceStart)
 			occurrence.Start = occurrenceStart
 			if overlaps(occurrence, rangeStart, rangeEnd) {
 				result = append(result, occurrence)
@@ -171,7 +181,7 @@ func ParseRange(data []byte, rangeStart, rangeEnd time.Time) ([]model.Event, err
 	// requested expansion window into the window. Such an occurrence never
 	// appears in starts above, so include the unmatched detached event directly.
 	for _, override := range parsed {
-		if override.RecurrenceID == "" || strings.EqualFold(override.Status, "CANCELLED") {
+		if override.RecurrenceID == "" || strings.EqualFold(override.Status, "CANCELLED") || cancelledMasters[override.ID] {
 			continue
 		}
 		key := override.ID + "\x00" + override.RecurrenceID
@@ -195,6 +205,23 @@ func ParseRange(data []byte, rangeStart, rangeEnd time.Time) ([]model.Event, err
 		return strings.Compare(a.ID, b.ID)
 	})
 	return result, nil
+}
+
+func calendarDaySpan(start, end time.Time) int {
+	startDate := time.Date(start.Year(), start.Month(), start.Day(), 0, 0, 0, 0, time.UTC)
+	endDate := time.Date(end.Year(), end.Month(), end.Day(), 0, 0, 0, 0, time.UTC)
+	days := int(endDate.Sub(startDate) / (24 * time.Hour))
+	if days < 1 {
+		return 1
+	}
+	return days
+}
+
+func recurringEnd(event model.Event, occurrenceStart time.Time) time.Time {
+	if event.AllDay {
+		return occurrenceStart.AddDate(0, 0, calendarDaySpan(event.Start, event.End))
+	}
+	return occurrenceStart.Add(event.End.Sub(event.Start))
 }
 
 func typedEvent(component *ics.VEvent, locations map[string]*time.Location) (model.Event, error) {

@@ -402,12 +402,27 @@ func resolveCalendarURL(connection model.Connection) (string, error) {
 
 func exactCollection(connection model.Connection, id string) (model.CalendarCollection, error) {
 	for _, collection := range connection.Calendar.Collections {
-		if strings.EqualFold(collection.ID, id) || strings.EqualFold(collection.Name, id) {
+		if strings.EqualFold(collection.ID, id) {
 			if collection.ReadOnly {
 				return model.CalendarCollection{}, fmt.Errorf("calendar collection %s is read-only", id)
 			}
 			return collection, nil
 		}
+	}
+	var named []model.CalendarCollection
+	for _, collection := range connection.Calendar.Collections {
+		if strings.EqualFold(collection.Name, id) {
+			named = append(named, collection)
+		}
+	}
+	if len(named) > 1 {
+		return model.CalendarCollection{}, fmt.Errorf("calendar collection name %q is ambiguous; use its stable collection ID", id)
+	}
+	if len(named) == 1 {
+		if named[0].ReadOnly {
+			return model.CalendarCollection{}, fmt.Errorf("calendar collection %s is read-only", id)
+		}
+		return named[0], nil
 	}
 	return model.CalendarCollection{}, fmt.Errorf("calendar collection %q does not exist; run connection discover", id)
 }

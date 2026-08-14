@@ -33,18 +33,21 @@ type Service struct {
 	mailSearch      func(model.Connection, postmail.SearchOptions) (postmail.SearchResult, error)
 	mailSnapshot    func(model.Connection, string, uint32) (postmail.MessagePrecondition, error)
 	mailAppend      func(model.Connection, string, model.SendMessage, []imap.Flag) (uint32, error)
+	mailBuild       func(model.Connection, model.SendMessage) ([]byte, error)
+	mailSendRaw     func(model.Connection, model.SendMessage, []byte) error
+	mailAppendRaw   func(model.Connection, string, []byte, []imap.Flag) (uint32, error)
 	mailMarkDeleted func(model.Connection, string, uint32, postmail.MessagePrecondition) error
 	stateMu         sync.Mutex
 	state           *state.Store
 	stateErr        error
 	now             func() time.Time
-	opMu            sync.Mutex
 }
 
 func New(store *config.Store) *Service {
 	return &Service{
 		store: store, calendar: calendar.NewClient(nil), mailSearch: postmail.Search,
 		mailSnapshot: postmail.SnapshotMessage, mailAppend: postmail.Append, mailMarkDeleted: postmail.MarkDeleted,
+		mailBuild: postmail.BuildMessage, mailSendRaw: postmail.SendSerialized, mailAppendRaw: postmail.AppendSerialized,
 		now: func() time.Time { return time.Now().UTC() },
 	}
 }
@@ -96,7 +99,7 @@ func (s *Service) Connections(selection model.Selector) ([]model.Connection, err
 	if err != nil {
 		return nil, err
 	}
-	if len(selection.Connections) == 0 && selection.Category == "" && len(selection.Labels) == 0 && selection.Capability == "" {
+	if len(selection.Connections) == 0 && selection.Category == "" && len(selection.Labels) == 0 && len(selection.Collections) == 0 && selection.Capability == "" {
 		result := make([]model.Connection, 0, len(cfg.Connections))
 		for _, connection := range cfg.Connections {
 			if !connection.Disabled {
@@ -796,8 +799,6 @@ func (s *Service) OperationShow(ctx context.Context, token string) (model.Prepar
 }
 
 func (s *Service) ExecuteOperation(ctx context.Context, token string) (model.OperationResult, error) {
-	s.opMu.Lock()
-	defer s.opMu.Unlock()
 	ledger, err := s.ensureState()
 	if err != nil {
 		return model.OperationResult{}, err
@@ -910,14 +911,19 @@ func (s *Service) execute(ctx context.Context, connection model.Connection, kind
 		if connection.Mail.SentCopy == "always" && connection.Mail.Folders.Sent == "" {
 			return nil, fmt.Errorf("configured sent copy folder is missing; message was not sent")
 		}
-		if err := postmail.Send(connection, message); err != nil {
+		data, err := s.mailBuild(connection, message)
+		if err != nil {
+			return nil, err
+		}
+		if err := s.mailSendRaw(connection, message, data); err != nil {
 			return nil, err
 		}
 		result := map[string]any{"sent": true}
 		if connection.Mail.SentCopy == "always" {
-			uid, err := postmail.Append(connection, connection.Mail.Folders.Sent, message, []imap.Flag{imap.FlagSeen})
+			uid, err := s.mailAppendRaw(connection, connection.Mail.Folders.Sent, data, []imap.Flag{imap.FlagSeen})
 			if err != nil {
-				return nil, fmt.Errorf("message sent but append sent copy failed: %w", err)
+				result["sent_copy"] = "failed"
+				return result, &uncertainOperationError{message: fmt.Sprintf("message was sent but appending its sent copy failed: %v", err)}
 			}
 			result["sent_copy_uid"] = uid
 		}
@@ -1288,6 +1294,7 @@ func (s *Service) Sync(ctx context.Context, selection model.Selector) (map[strin
 				if requestedCapability == "mail" || requestedCapability == "mail.read" {
 					return nil, err
 				}
+				result["errors"] = append(result["errors"].([]model.SourceError), s.syncSourceErrors(mailSelection, "mail", err)...)
 				break
 			}
 			result["messages"] = result["messages"].(int) + len(page.Messages)
@@ -1307,9 +1314,23 @@ func (s *Service) Sync(ctx context.Context, selection model.Selector) (map[strin
 			result["errors"] = append(result["errors"].([]model.SourceError), page.Errors...)
 		} else if requestedCapability == "calendar" || requestedCapability == "calendar.read" {
 			return nil, err
+		} else {
+			result["errors"] = append(result["errors"].([]model.SourceError), s.syncSourceErrors(calendarSelection, "calendar", err)...)
 		}
 	}
 	return result, nil
+}
+
+func (s *Service) syncSourceErrors(selection model.Selector, protocol string, err error) []model.SourceError {
+	connections, matchErr := s.Connections(selection)
+	if matchErr != nil {
+		return []model.SourceError{sourceError(protocol, protocol+"_sync_failed", err)}
+	}
+	result := make([]model.SourceError, 0, len(connections))
+	for _, connection := range connections {
+		result = append(result, sourceError(connection.ID, protocol+"_sync_failed", err))
+	}
+	return result
 }
 
 func sourceError(connectionID, code string, err error) model.SourceError {

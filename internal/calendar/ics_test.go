@@ -95,6 +95,22 @@ func TestCalDAVHrefMustStayWithinConfiguredCollection(t *testing.T) {
 	}
 }
 
+func TestCalDAVWriteRejectsAmbiguousCollectionName(t *testing.T) {
+	connection := model.Connection{ID: "work", Calendar: &model.CalendarConfig{
+		Kind: "caldav", URL: "https://calendar.example.test/root/",
+		Collections: []model.CalendarCollection{
+			{ID: "personal-one", Name: "Personal", Path: "/root/one/"},
+			{ID: "personal-two", Name: "Personal", Path: "/root/two/"},
+		},
+	}}
+	if err := ValidateCalDAVHref(connection, "Personal", ""); err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("ambiguous collection name returned %v", err)
+	}
+	if err := ValidateCalDAVHref(connection, "personal-two", "/root/two/event.ics"); err != nil {
+		t.Fatalf("stable collection ID returned %v", err)
+	}
+}
+
 func TestBasicAuthClientRejectsCrossOriginRequest(t *testing.T) {
 	origin, _ := url.Parse("https://calendar.example.test/")
 	called := false
@@ -173,6 +189,41 @@ END:VCALENDAR`
 	}
 	if events[0].Start.UTC().Hour() == events[1].Start.UTC().Hour() {
 		t.Fatalf("UTC offset did not change across DST: %v, %v", events[0].Start, events[1].Start)
+	}
+}
+
+func TestRecurringAllDayEndUsesCalendarDaysAcrossDST(t *testing.T) {
+	location, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := model.Event{
+		AllDay: true,
+		Start:  time.Date(2026, 3, 1, 0, 0, 0, 0, location),
+		End:    time.Date(2026, 3, 2, 0, 0, 0, 0, location),
+	}
+	start := time.Date(2026, 3, 8, 0, 0, 0, 0, location)
+	end := recurringEnd(event, start)
+	if end.Day() != 9 || end.Hour() != 0 || end.Location() != location {
+		t.Fatalf("recurring all-day end = %v", end)
+	}
+}
+
+func TestParseRangeSuppressesCancelledRecurringMaster(t *testing.T) {
+	data := `BEGIN:VCALENDAR
+VERSION:2.0
+BEGIN:VEVENT
+UID:cancelled-series
+DTSTART:20260815T090000Z
+DTEND:20260815T100000Z
+RRULE:FREQ=DAILY;COUNT=3
+STATUS:CANCELLED
+SUMMARY:Cancelled series
+END:VEVENT
+END:VCALENDAR`
+	events, err := ParseRange([]byte(data), time.Date(2026, 8, 14, 0, 0, 0, 0, time.UTC), time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC))
+	if err != nil || len(events) != 0 {
+		t.Fatalf("cancelled series events=%#v err=%v", events, err)
 	}
 }
 

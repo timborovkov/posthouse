@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -37,6 +38,18 @@ func TestListConnectionsCursorPagination(t *testing.T) {
 	}
 	if len(second.Connections) != 1 || second.Connections[0].ID != "c" || second.NextCursor != "" {
 		t.Fatalf("second page is %#v", second)
+	}
+}
+
+func TestConnectionsAppliesCollectionOnlySelector(t *testing.T) {
+	caldav := model.Connection{ID: "calendar", Name: "Calendar", Calendar: &model.CalendarConfig{
+		Kind: "caldav", URL: "http://localhost:5232", Username: "calendar", Secret: model.SecretRef{Env: "CALENDAR_PASSWORD"},
+		Collections: []model.CalendarCollection{{ID: "team", Name: "Team", Path: "/calendar/team/"}},
+	}}
+	application := serviceWithConnections(t, mailConnection("mail"), caldav)
+	connections, err := application.Connections(model.Selector{Collections: []string{"team"}})
+	if err != nil || len(connections) != 1 || connections[0].ID != "calendar" {
+		t.Fatalf("Connections returned %#v, %v", connections, err)
 	}
 }
 
@@ -325,6 +338,63 @@ func TestInterruptedClaimBecomesUncertainWithoutRetry(t *testing.T) {
 	}
 }
 
+func TestExecutingTokenDoesNotBlockUnrelatedOperation(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	connection := mailConnection("work")
+	connection.Identity = model.Identity{Email: "work@example.test"}
+	connection.Mail.SMTP = model.SMTPConfig{Address: "localhost:3025", Insecure: true}
+	application := serviceWithConnections(t, connection)
+	application.mailBuild = func(model.Connection, model.SendMessage) ([]byte, error) { return []byte("message"), nil }
+	application.mailSendRaw = func(model.Connection, model.SendMessage, []byte) error { return nil }
+	first, err := application.PrepareSend(context.Background(), model.SendMessage{ConnectionID: "work", To: []string{"first@example.test"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := application.PrepareSend(context.Background(), model.SendMessage{ConnectionID: "work", To: []string{"second@example.test"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger, err := application.ensureState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, claimed, err := ledger.ClaimOperation(context.Background(), first.Token); err != nil || !claimed {
+		t.Fatalf("ClaimOperation claimed=%v err=%v", claimed, err)
+	}
+	enteredWait := make(chan struct{})
+	var signal sync.Once
+	application.now = func() time.Time {
+		signal.Do(func() { close(enteredWait) })
+		return time.Now().UTC()
+	}
+	firstContext, cancelFirst := context.WithCancel(context.Background())
+	defer cancelFirst()
+	firstDone := make(chan struct{})
+	go func() {
+		defer close(firstDone)
+		_, _ = application.ExecuteOperation(firstContext, first.Token)
+	}()
+	<-enteredWait
+	secondDone := make(chan error, 1)
+	go func() {
+		result, executeErr := application.ExecuteOperation(context.Background(), second.Token)
+		if executeErr == nil && result.Status != "succeeded" {
+			executeErr = fmt.Errorf("status = %s", result.Status)
+		}
+		secondDone <- executeErr
+	}()
+	select {
+	case executeErr := <-secondDone:
+		if executeErr != nil {
+			t.Fatal(executeErr)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("unrelated operation was blocked by executing token")
+	}
+	cancelFirst()
+	<-firstDone
+}
+
 func TestPrepareSendPreviewIncludesExactContentAndThreading(t *testing.T) {
 	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
 	connection := mailConnection("work")
@@ -368,6 +438,48 @@ func TestDraftUpdateCleanupFailurePreservesAppendedUIDAsUncertain(t *testing.T) 
 	replayed, err := application.ExecuteOperation(context.Background(), prepared.Token)
 	if err != nil || replayed.Status != "uncertain" || fmt.Sprint(replayed.Result["uid"]) != "42" {
 		t.Fatalf("replay result=%#v err=%v", replayed, err)
+	}
+}
+
+func TestSentCopyUsesDeliveredBytesAndAppendFailureIsUncertain(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	connection := mailConnection("work")
+	connection.Identity = model.Identity{Email: "work@example.test"}
+	connection.Mail.SMTP = model.SMTPConfig{Address: "localhost:3025", Insecure: true}
+	connection.Mail.SentCopy = "always"
+	connection.Mail.Folders.Sent = "Sent"
+	application := serviceWithConnections(t, connection)
+	serialized := []byte("exact serialized message")
+	builds, sends, appends := 0, 0, 0
+	application.mailBuild = func(model.Connection, model.SendMessage) ([]byte, error) {
+		builds++
+		return append([]byte(nil), serialized...), nil
+	}
+	application.mailSendRaw = func(_ model.Connection, _ model.SendMessage, data []byte) error {
+		sends++
+		if string(data) != string(serialized) {
+			t.Fatalf("sent data = %q", data)
+		}
+		return nil
+	}
+	application.mailAppendRaw = func(_ model.Connection, folder string, data []byte, _ []imap.Flag) (uint32, error) {
+		appends++
+		if folder != "Sent" || string(data) != string(serialized) {
+			t.Fatalf("append folder=%q data=%q", folder, data)
+		}
+		return 0, fmt.Errorf("IMAP unavailable")
+	}
+	prepared, err := application.PrepareSend(context.Background(), model.SendMessage{ConnectionID: "work", To: []string{"person@example.test"}, Subject: "subject"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := application.ExecuteOperation(context.Background(), prepared.Token)
+	if err == nil || result.Status != "uncertain" || result.Result["sent"] != true || result.Result["sent_copy"] != "failed" {
+		t.Fatalf("ExecuteOperation result=%#v err=%v", result, err)
+	}
+	replayed, replayErr := application.ExecuteOperation(context.Background(), prepared.Token)
+	if replayErr != nil || replayed.Status != "uncertain" || builds != 1 || sends != 1 || appends != 1 {
+		t.Fatalf("replay=%#v err=%v counts=%d/%d/%d", replayed, replayErr, builds, sends, appends)
 	}
 }
 
@@ -416,6 +528,25 @@ func TestSyncFreezesMailRangeAcrossPages(t *testing.T) {
 	}
 	if result["messages"] != 101 || len(cutoffs) != 2 || !cutoffs[0].Equal(cutoffs[1]) {
 		t.Fatalf("Sync result=%#v cutoffs=%v", result, cutoffs)
+	}
+}
+
+func TestCombinedSyncReportsFailedProtocolSources(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	application := serviceWithConnections(t, mailConnection("mail"), calendarConnection("calendar", "Calendar"))
+	application.mailSearch = func(model.Connection, postmail.SearchOptions) (postmail.SearchResult, error) {
+		return postmail.SearchResult{}, fmt.Errorf("mail offline")
+	}
+	application.calendar = calendar.NewClient(&http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: make(http.Header), Body: io.NopCloser(strings.NewReader("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nEND:VCALENDAR\r\n"))}, nil
+	})})
+	result, err := application.Sync(context.Background(), model.Selector{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	errors, ok := result["errors"].([]model.SourceError)
+	if !ok || len(errors) != 1 || errors[0].ConnectionID != "mail" || errors[0].Code != "mail_sync_failed" {
+		t.Fatalf("Sync result=%#v", result)
 	}
 }
 

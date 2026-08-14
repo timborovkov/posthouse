@@ -27,14 +27,30 @@ func (e *UncertainError) Error() string {
 func (e *UncertainError) Unwrap() error { return e.Err }
 
 func Send(connection model.Connection, message model.SendMessage) error {
+	data, err := BuildMessage(connection, message)
+	if err != nil {
+		return err
+	}
+	return SendSerialized(connection, message, data)
+}
+
+func BuildMessage(connection model.Connection, message model.SendMessage) ([]byte, error) {
+	from := connection.Identity.Email
+	if from == "" && connection.Mail != nil {
+		from = connection.Mail.Username
+	}
+	return buildMessage(connection.Identity, from, message)
+}
+
+func SendSerialized(connection model.Connection, message model.SendMessage, data []byte) error {
 	if connection.Mail == nil || connection.Mail.SMTP.Address == "" {
 		return fmt.Errorf("connection %s has no SMTP capability", connection.ID)
 	}
 	if len(message.To)+len(message.CC)+len(message.BCC) == 0 {
 		return fmt.Errorf("at least one recipient is required")
 	}
-	if err := validateMessage(message); err != nil {
-		return err
+	if len(data) == 0 {
+		return fmt.Errorf("serialized message is empty")
 	}
 	secret, err := config.ResolveSecret(connection.Mail.Secret)
 	if err != nil {
@@ -77,7 +93,7 @@ func Send(connection model.Connection, message model.SendMessage) error {
 	if err != nil {
 		return fmt.Errorf("start SMTP body: %w", err)
 	}
-	if err := writeMessage(writer, connection.Identity, from, message); err != nil {
+	if _, err := writer.Write(data); err != nil {
 		// Do not close the DATA writer here: Close sends the SMTP terminator and
 		// could make the server accept a partial message. Closing the client
 		// connection causes the server to discard the incomplete transaction.

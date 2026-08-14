@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	tui "github.com/grindlemire/go-tui"
@@ -18,6 +19,7 @@ import (
 var viewNames = []string{"Connections", "Inbox", "Message", "Agenda", "Operations / Cache"}
 
 type snapshot struct {
+	generation uint64
 	connections []model.Connection
 	messages []model.Message
 	events []model.Event
@@ -49,6 +51,7 @@ type posthouseApp struct {
 	ctx context.Context
 	cancel context.CancelFunc
 	refreshCancel context.CancelFunc
+	refreshGeneration *atomic.Uint64
 	wg *sync.WaitGroup
 }
 
@@ -64,6 +67,7 @@ func New(application *service.Service) *posthouseApp {
 		modalText: tui.NewState(""), pendingToken: tui.NewState(""),
 		editor: tui.NewState(false), editorKind: tui.NewState(""), editorStep: tui.NewState(0), editorValues: tui.NewState([]string{}),
 		updates: make(chan snapshot, 4), ctx: ctx, cancel: cancel,
+		refreshGeneration: &atomic.Uint64{},
 		wg: &sync.WaitGroup{},
 	}
 	app.refresh()
@@ -133,15 +137,17 @@ func (p *posthouseApp) refresh() {
 	p.loading.Set(true)
 	p.status.Set("Refreshing live sources…")
 	query := p.query.Get()
+	generation := p.refreshGeneration.Add(1)
 	p.wg.Add(1)
 	go func() {
 		defer p.wg.Done()
-		next := snapshot{}
+		next := snapshot{generation:generation}
 		connections, err := p.service.Connections(model.Selector{})
 		if err != nil { next.err = err.Error() } else { next.connections = connections }
 		if connectionsHaveCapability(connections,"mail.read") { messages, mailErr := p.service.SearchMessages(model.Selector{}, mail.SearchOptions{Query: query}, 100, ""); if mailErr == nil { next.messages = messages.Messages } else { next.err = appendError(next.err, mailErr) } }
 		if connectionsHaveCapability(connections,"calendar.read") { events, calendarErr := p.service.ListEvents(ctx, model.Selector{}, time.Now().Add(-24*time.Hour), time.Now().Add(90*24*time.Hour), query, 500, ""); if calendarErr == nil { next.events = events.Events } else { next.err = appendError(next.err, calendarErr) } }
 		if cache, cacheErr := p.service.CacheStatus(ctx); cacheErr == nil { next.cache = fmt.Sprintf("%d entries · %.1f MiB / %.1f MiB", cache.Entries, float64(cache.Bytes)/(1<<20), float64(cache.MaxBytes)/(1<<20)) } else { next.cache = "cache unavailable: "+cacheErr.Error() }
+		if ctx.Err()!=nil { return }
 		select { case p.updates <- next: case <-ctx.Done(): }
 	}()
 }
@@ -149,6 +155,7 @@ func (p *posthouseApp) refresh() {
 func (p *posthouseApp) close() { p.cancel(); if p.refreshCancel!=nil { p.refreshCancel() }; p.wg.Wait() }
 
 func (p *posthouseApp) applySnapshot(next snapshot) {
+	if next.generation != p.refreshGeneration.Load() { return }
 	p.loading.Set(false)
 	p.connections.Set(next.connections)
 	p.messages.Set(next.messages)
@@ -249,7 +256,7 @@ func (p *posthouseApp) submitEditor() {
 	} else if p.editorKind.Get()=="event-action" {
 		items:=p.events.Get(); if len(items)==0 || p.selected.Get()>=len(items) { err=fmt.Errorf("selected event is no longer available") } else {
 			event:=items[p.selected.Get()]; action:=strings.ToLower(strings.TrimSpace(values[0]))
-			if action=="delete" { prepared,err=p.service.PrepareCalendarDelete(p.ctx,event.ConnectionID,event.CollectionID,event.Href,event.ETag) } else if action=="update" || action=="update-series" { if action=="update-series" && event.RecurrenceID!="" { err=fmt.Errorf("cannot replace a recurring series from an expanded occurrence; refresh and edit the series master") } else { var start,end time.Time; if start,err=time.Parse(time.RFC3339,values[2]); err==nil { if end,err=time.Parse(time.RFC3339,values[3]); err==nil { event.Title=values[1]; event.Start=start; event.End=end; prepared,err=p.service.PrepareCalendarWrite(p.ctx,event.ConnectionID,"calendar.update",event) } } } } else { err=fmt.Errorf("unknown event action %q",action) }
+			if action=="delete" { if event.RecurrenceID!="" { err=fmt.Errorf("cannot delete one expanded occurrence; edit the series or create a cancelled recurrence override") } else { prepared,err=p.service.PrepareCalendarDelete(p.ctx,event.ConnectionID,event.CollectionID,event.Href,event.ETag) } } else if action=="update" || action=="update-series" { if action=="update-series" && event.RecurrenceID!="" { err=fmt.Errorf("cannot replace a recurring series from an expanded occurrence; refresh and edit the series master") } else { var start,end time.Time; if start,err=time.Parse(time.RFC3339,values[2]); err==nil { if end,err=time.Parse(time.RFC3339,values[3]); err==nil { event.Title=values[1]; event.Start=start; event.End=end; prepared,err=p.service.PrepareCalendarWrite(p.ctx,event.ConnectionID,"calendar.update",event) } } } } else { err=fmt.Errorf("unknown event action %q",action) }
 		}
 	} else if p.editorKind.Get()=="mail" {
 		if len(values)!=6 || values[0]=="" { err=fmt.Errorf("connection is required") } else { message:=model.SendMessage{ConnectionID:values[0],To:splitValues(values[2]),Subject:values[3],Text:values[4]}; for _,path:=range splitValues(values[5]) { message.Attachments=append(message.Attachments,model.AttachmentInput{Path:path}) }; mode:=strings.ToLower(strings.TrimSpace(values[1])); if mode=="draft" { prepared,err=p.service.PrepareDraft(p.ctx,values[0],"mail.draft.create","",0,message) } else if mode=="send" || mode=="" { prepared,err=p.service.PrepareSend(p.ctx,message) } else { err=fmt.Errorf("mode must be send or draft") } }
