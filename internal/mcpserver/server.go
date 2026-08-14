@@ -230,7 +230,8 @@ func (s *Server) registerTools() {
 	readOnly := &mcp.ToolAnnotations{ReadOnlyHint: true}
 	openWorld := true
 	nondestructive := false
-	write := &mcp.ToolAnnotations{DestructiveHint: &nondestructive, OpenWorldHint: &openWorld}
+	destructive := true
+	executeWrite := &mcp.ToolAnnotations{DestructiveHint: &destructive, IdempotentHint: true, OpenWorldHint: &openWorld}
 
 	mcp.AddTool(s.mcp, &mcp.Tool{Name: "connections_list", Title: "List connections", Description: "List configured mail and calendar connections by name, category, and labels, up to 200 per page. Pass next_cursor back unchanged with identical filters. Secret values and secret environment-variable names are never returned.", Annotations: readOnly},
 		func(_ context.Context, _ *mcp.CallToolRequest, input connectionsListInput) (*mcp.CallToolResult, model.ConnectionPage, error) {
@@ -380,7 +381,7 @@ func (s *Server) registerTools() {
 			operation, err := s.service.OperationShow(ctx, input.Token)
 			return nil, operation, err
 		})
-	mcp.AddTool(s.mcp, &mcp.Tool{Name: "operation_execute", Title: "Execute prepared operation", Description: "Execute one confirmed prepared-operation token exactly once. Repeated calls return the original result; uncertain SMTP outcomes are never retried.", Annotations: write},
+	mcp.AddTool(s.mcp, &mcp.Tool{Name: "operation_execute", Title: "Execute prepared operation", Description: "Execute one confirmed prepared-operation token exactly once. Repeated calls return the original result; uncertain SMTP outcomes are never retried.", Annotations: executeWrite},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input operationInput) (*mcp.CallToolResult, model.OperationResult, error) {
 			result, err := s.service.ExecuteOperation(ctx, input.Token)
 			return nil, result, err

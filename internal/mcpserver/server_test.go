@@ -52,8 +52,12 @@ func TestServerListsAndCallsReadOnlyConnectionTool(t *testing.T) {
 		t.Fatalf("ListTools returned error: %v", err)
 	}
 	names := make([]string, 0, len(listed.Tools))
+	var executeTool *mcp.Tool
 	for _, tool := range listed.Tools {
 		names = append(names, tool.Name)
+		if tool.Name == "operation_execute" {
+			executeTool = tool
+		}
 	}
 	for _, want := range []string{"connections_list", "messages_search", "messages_get", "messages_send_prepare", "messages_reply_prepare", "messages_forward_prepare", "messages_draft_prepare", "messages_action_prepare", "events_list", "event_ics_generate", "event_create_prepare", "operation_execute", "connection_doctor", "sync", "cache_status"} {
 		if !slices.Contains(names, want) {
@@ -62,6 +66,9 @@ func TestServerListsAndCallsReadOnlyConnectionTool(t *testing.T) {
 	}
 	if slices.Contains(names, "messages_send") {
 		t.Fatal("direct messages_send tool bypasses the prepared-operation safety boundary")
+	}
+	if executeTool == nil || executeTool.Annotations == nil || executeTool.Annotations.DestructiveHint == nil || !*executeTool.Annotations.DestructiveHint || !executeTool.Annotations.IdempotentHint {
+		t.Fatalf("operation_execute annotations=%#v", executeTool)
 	}
 
 	result, err := clientSession.CallTool(context.Background(), &mcp.CallToolParams{Name: "connections_list", Arguments: map[string]any{"page_size": 1}})

@@ -96,3 +96,17 @@ func TestValidateCalendarRequiresOneFeedURLSource(t *testing.T) {
 		t.Fatalf("Validate rejected a secret feed URL: %v", err)
 	}
 }
+
+func TestValidateRequiresFolderForAlwaysSentCopy(t *testing.T) {
+	connection := model.Connection{ID: "work", Name: "Work", Mail: &model.MailConfig{
+		Username: "work@example.test", SecretEnv: "WORK_PASSWORD",
+		SMTP: model.SMTPConfig{Address: "smtp.example.test:465", TLS: true}, SentCopy: "always",
+	}}
+	if err := Validate(model.Config{Connections: []model.Connection{connection}}); err == nil {
+		t.Fatal("Validate accepted always sent-copy without a sent folder")
+	}
+	connection.Mail.Folders.Sent = "Sent"
+	if err := Validate(model.Config{Connections: []model.Connection{connection}}); err != nil {
+		t.Fatalf("Validate rejected configured sent-copy folder: %v", err)
+	}
+}

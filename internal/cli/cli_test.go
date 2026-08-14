@@ -58,6 +58,18 @@ func TestHeadlessCacheRekeyReportsEnvironmentRotation(t *testing.T) {
 	}
 }
 
+func TestCalendarListCursorRecoversDefaultRange(t *testing.T) {
+	start, end := "2026-08-15T00:00:00Z", "2026-09-14T00:00:00Z"
+	startTime, endTime, err := calendarListRange(start, end, "opaque-cursor", false, false)
+	if err != nil || !startTime.IsZero() || !endTime.IsZero() {
+		t.Fatalf("recovered defaults start=%v end=%v err=%v", startTime, endTime, err)
+	}
+	startTime, endTime, err = calendarListRange(start, end, "opaque-cursor", true, true)
+	if err != nil || startTime.IsZero() || endTime.IsZero() {
+		t.Fatalf("explicit ranges start=%v end=%v err=%v", startTime, endTime, err)
+	}
+}
+
 func testCLI(t *testing.T, stdout *bytes.Buffer) *CLI {
 	t.Helper()
 	store, err := config.New(filepath.Join(t.TempDir(), "config.json"))

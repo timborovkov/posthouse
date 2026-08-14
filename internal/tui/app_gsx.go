@@ -176,17 +176,21 @@ func (p *posthouseApp) refresh() {
 		} else {
 			next.connections = connections
 		}
-		messages, mailErr := p.service.SearchMessages(model.Selector{}, mail.SearchOptions{Query: query}, 100, "")
-		if mailErr == nil {
-			next.messages = messages.Messages
-		} else if len(connections) > 0 {
-			next.err = appendError(next.err, mailErr)
+		if connectionsHaveCapability(connections, "mail.read") {
+			messages, mailErr := p.service.SearchMessages(model.Selector{}, mail.SearchOptions{Query: query}, 100, "")
+			if mailErr == nil {
+				next.messages = messages.Messages
+			} else {
+				next.err = appendError(next.err, mailErr)
+			}
 		}
-		events, calendarErr := p.service.ListEvents(ctx, model.Selector{}, time.Now().Add(-24*time.Hour), time.Now().Add(90*24*time.Hour), query, 500, "")
-		if calendarErr == nil {
-			next.events = events.Events
-		} else if len(connections) > 0 {
-			next.err = appendError(next.err, calendarErr)
+		if connectionsHaveCapability(connections, "calendar.read") {
+			events, calendarErr := p.service.ListEvents(ctx, model.Selector{}, time.Now().Add(-24*time.Hour), time.Now().Add(90*24*time.Hour), query, 500, "")
+			if calendarErr == nil {
+				next.events = events.Events
+			} else {
+				next.err = appendError(next.err, calendarErr)
+			}
 		}
 		if cache, cacheErr := p.service.CacheStatus(ctx); cacheErr == nil {
 			next.cache = fmt.Sprintf("%d entries · %.1f MiB / %.1f MiB", cache.Entries, float64(cache.Bytes)/(1<<20), float64(cache.MaxBytes)/(1<<20))
@@ -410,8 +414,8 @@ func (p *posthouseApp) submitEditor() {
 			err = fmt.Errorf("connection ID and name are required")
 		} else {
 			connection := model.Connection{ID: values[0], Name: values[1], Category: values[2], Identity: model.Identity{Email: values[3]}}
-			if values[6] != "" {
-				connection.Mail = &model.MailConfig{Username: values[4], Secret: model.SecretRef{Env: values[5]}, IMAP: model.IMAPConfig{Address: values[6], TLS: true}, SMTP: model.SMTPConfig{Address: values[7], TLS: values[7] != ""}, SentCopy: "provider-managed"}
+			if values[6] != "" || values[7] != "" {
+				connection.Mail = &model.MailConfig{Username: values[4], Secret: model.SecretRef{Env: values[5]}, IMAP: model.IMAPConfig{Address: values[6], TLS: values[6] != ""}, SMTP: model.SMTPConfig{Address: values[7], TLS: values[7] != ""}, SentCopy: "provider-managed"}
 			}
 			if values[8] != "" {
 				connection.Calendar = &model.CalendarConfig{Kind: "caldav", URL: values[8], Username: values[9], Secret: model.SecretRef{Env: values[10]}}
@@ -473,16 +477,17 @@ func (p *posthouseApp) submitEditor() {
 			if action == "delete" {
 				prepared, err = p.service.PrepareCalendarDelete(p.ctx, event.ConnectionID, event.CollectionID, event.Href, event.ETag)
 			} else if action == "update" || action == "update-series" {
-				var start, end time.Time
-				if start, err = time.Parse(time.RFC3339, values[2]); err == nil {
-					if end, err = time.Parse(time.RFC3339, values[3]); err == nil {
-						event.Title = values[1]
-						event.Start = start
-						event.End = end
-						if action == "update-series" {
-							event.RecurrenceID = ""
+				if action == "update-series" && event.RecurrenceID != "" {
+					err = fmt.Errorf("cannot replace a recurring series from an expanded occurrence; refresh and edit the series master")
+				} else {
+					var start, end time.Time
+					if start, err = time.Parse(time.RFC3339, values[2]); err == nil {
+						if end, err = time.Parse(time.RFC3339, values[3]); err == nil {
+							event.Title = values[1]
+							event.Start = start
+							event.End = end
+							prepared, err = p.service.PrepareCalendarWrite(p.ctx, event.ConnectionID, "calendar.update", event)
 						}
-						prepared, err = p.service.PrepareCalendarWrite(p.ctx, event.ConnectionID, "calendar.update", event)
 					}
 				}
 			} else {
@@ -542,6 +547,15 @@ func splitValues(value string) []string {
 		}
 	}
 	return result
+}
+
+func connectionsHaveCapability(connections []model.Connection, capability string) bool {
+	for _, connection := range connections {
+		if slices.Contains(connection.Capabilities, capability) {
+			return true
+		}
+	}
+	return false
 }
 
 func (p *posthouseApp) defaultCalendarTarget() (string, string) {

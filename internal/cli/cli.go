@@ -403,8 +403,9 @@ func (c *CLI) calendar(ctx context.Context, args []string) error {
 	switch args[0] {
 	case "list":
 		flags := newSelectorFlags("calendar list")
-		start := flags.set.String("start", time.Now().Format(time.RFC3339), "inclusive RFC3339 timestamp")
-		end := flags.set.String("end", time.Now().Add(30*24*time.Hour).Format(time.RFC3339), "exclusive RFC3339 timestamp")
+		defaultStart := time.Now()
+		start := flags.set.String("start", defaultStart.Format(time.RFC3339), "inclusive RFC3339 timestamp")
+		end := flags.set.String("end", defaultStart.Add(30*24*time.Hour).Format(time.RFC3339), "exclusive RFC3339 timestamp")
 		query := flags.set.String("query", "", "text query")
 		offline := flags.set.Bool("offline", false, "read only from encrypted cache")
 		refresh := flags.set.Bool("refresh", false, "require a live provider refresh without stale fallback")
@@ -413,13 +414,14 @@ func (c *CLI) calendar(ctx context.Context, args []string) error {
 		if err := flags.set.Parse(args[1:]); err != nil {
 			return err
 		}
-		startTime, err := parseOptionalTime(*start)
+		explicitStart, explicitEnd := false, false
+		flags.set.Visit(func(flag *flag.Flag) {
+			explicitStart = explicitStart || flag.Name == "start"
+			explicitEnd = explicitEnd || flag.Name == "end"
+		})
+		startTime, endTime, err := calendarListRange(*start, *end, *cursor, explicitStart, explicitEnd)
 		if err != nil {
-			return fmt.Errorf("start: %w", err)
-		}
-		endTime, err := parseOptionalTime(*end)
-		if err != nil {
-			return fmt.Errorf("end: %w", err)
+			return err
 		}
 		mode, err := readMode(*offline, *refresh)
 		if err != nil {
@@ -556,6 +558,24 @@ func (c *CLI) calendar(ctx context.Context, args []string) error {
 	default:
 		return fmt.Errorf("unknown calendar command %q", args[0])
 	}
+}
+
+func calendarListRange(start, end, cursor string, explicitStart, explicitEnd bool) (time.Time, time.Time, error) {
+	startTime, err := parseOptionalTime(start)
+	if err != nil {
+		return time.Time{}, time.Time{}, fmt.Errorf("start: %w", err)
+	}
+	endTime, err := parseOptionalTime(end)
+	if err != nil {
+		return time.Time{}, time.Time{}, fmt.Errorf("end: %w", err)
+	}
+	if cursor != "" && !explicitStart {
+		startTime = time.Time{}
+	}
+	if cursor != "" && !explicitEnd {
+		endTime = time.Time{}
+	}
+	return startTime, endTime, nil
 }
 
 func (c *CLI) mcp(ctx context.Context, args []string) error {

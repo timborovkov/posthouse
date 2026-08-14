@@ -276,6 +276,9 @@ func Validate(cfg model.Config) error {
 			default:
 				return fmt.Errorf("%s.mail.sent_copy must be always, never, or provider-managed", prefix)
 			}
+			if connection.Mail.SentCopy == "always" && strings.TrimSpace(connection.Mail.Folders.Sent) == "" {
+				return fmt.Errorf("%s.mail.folders.sent is required when sent_copy is always", prefix)
+			}
 		}
 		if connection.Calendar != nil {
 			cal := connection.Calendar

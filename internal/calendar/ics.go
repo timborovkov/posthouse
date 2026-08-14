@@ -113,6 +113,7 @@ func ParseRange(data []byte, rangeStart, rangeEnd time.Time) ([]model.Event, err
 		rangeEnd = time.Now().Add(365 * 24 * time.Hour)
 	}
 	overrides := make(map[string]model.Event)
+	consumedOverrides := make(map[string]bool)
 	for _, event := range parsed {
 		if event.RecurrenceID != "" {
 			overrides[event.ID+"\x00"+event.RecurrenceID] = event
@@ -147,7 +148,9 @@ func ParseRange(data []byte, rangeStart, rangeEnd time.Time) ([]model.Event, err
 		}
 		for _, occurrenceStart := range starts {
 			recurrenceID := occurrenceStart.UTC().Format(time.RFC3339)
-			if override, ok := overrides[event.ID+"\x00"+recurrenceID]; ok {
+			overrideKey := event.ID + "\x00" + recurrenceID
+			if override, ok := overrides[overrideKey]; ok {
+				consumedOverrides[overrideKey] = true
 				if !strings.EqualFold(override.Status, "CANCELLED") && overlaps(override, rangeStart, rangeEnd) {
 					override.ID = stableOccurrenceID(event.ID, occurrenceStart)
 					result = append(result, override)
@@ -162,6 +165,27 @@ func ParseRange(data []byte, rangeStart, rangeEnd time.Time) ([]model.Event, err
 			if overlaps(occurrence, rangeStart, rangeEnd) {
 				result = append(result, occurrence)
 			}
+		}
+	}
+	// An override may move an occurrence whose original start is outside the
+	// requested expansion window into the window. Such an occurrence never
+	// appears in starts above, so include the unmatched detached event directly.
+	for _, override := range parsed {
+		if override.RecurrenceID == "" || strings.EqualFold(override.Status, "CANCELLED") {
+			continue
+		}
+		key := override.ID + "\x00" + override.RecurrenceID
+		if consumedOverrides[key] || !overlaps(override, rangeStart, rangeEnd) {
+			continue
+		}
+		originalStart, err := time.Parse(time.RFC3339, override.RecurrenceID)
+		if err != nil {
+			return nil, fmt.Errorf("parse recurrence override for event %s: %w", override.ID, err)
+		}
+		override.ID = stableOccurrenceID(override.ID, originalStart)
+		result = append(result, override)
+		if len(result) > maxOccurrences {
+			return nil, fmt.Errorf("calendar recurrence expansion exceeds %d occurrences", maxOccurrences)
 		}
 	}
 	slices.SortFunc(result, func(a, b model.Event) int {

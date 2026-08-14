@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/emersion/go-imap/v2"
 	"github.com/timborovkov/posthouse/internal/calendar"
 	"github.com/timborovkov/posthouse/internal/config"
 	postmail "github.com/timborovkov/posthouse/internal/mail"
@@ -54,7 +55,7 @@ func TestListEventsCursorPagination(t *testing.T) {
 	if err != nil || len(first.Events) != 2 || first.Events[0].ID != "one" || first.NextCursor == "" {
 		t.Fatalf("first page is %#v, %v", first, err)
 	}
-	second, err := application.ListEvents(context.Background(), model.Selector{}, start, end, "", 2, first.NextCursor)
+	second, err := application.ListEvents(context.Background(), model.Selector{}, time.Time{}, time.Time{}, "", 2, first.NextCursor)
 	if err != nil || len(second.Events) != 1 || second.Events[0].ID != "three" || second.NextCursor != "" {
 		t.Fatalf("second page is %#v, %v", second, err)
 	}
@@ -324,6 +325,52 @@ func TestInterruptedClaimBecomesUncertainWithoutRetry(t *testing.T) {
 	}
 }
 
+func TestPrepareSendPreviewIncludesExactContentAndThreading(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	connection := mailConnection("work")
+	connection.Identity = model.Identity{Email: "work@example.test"}
+	connection.Mail.SMTP = model.SMTPConfig{Address: "localhost:3025", Insecure: true}
+	application := serviceWithConnections(t, connection)
+	prepared, err := application.PrepareSend(context.Background(), model.SendMessage{
+		ConnectionID: "work", To: []string{"person@example.test"}, Subject: "subject", Text: "complete body",
+		ReplyTo: "reply@example.test", InReplyTo: "parent-id", References: []string{"root-id", "parent-id"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for key, want := range map[string]any{"text": "complete body", "reply_to": "reply@example.test", "in_reply_to": "parent-id"} {
+		if prepared.Preview[key] != want {
+			t.Fatalf("preview[%q]=%#v want %#v", key, prepared.Preview[key], want)
+		}
+	}
+	if references, ok := prepared.Preview["references"].([]string); !ok || len(references) != 2 {
+		t.Fatalf("preview references=%#v", prepared.Preview["references"])
+	}
+}
+
+func TestDraftUpdateCleanupFailurePreservesAppendedUIDAsUncertain(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	application := serviceWithConnections(t, mailConnection("work"))
+	precondition := postmail.MessagePrecondition{UIDValidity: 7, ModSeq: 11}
+	application.mailSnapshot = func(model.Connection, string, uint32) (postmail.MessagePrecondition, error) { return precondition, nil }
+	application.mailAppend = func(model.Connection, string, model.SendMessage, []imap.Flag) (uint32, error) { return 42, nil }
+	application.mailMarkDeleted = func(model.Connection, string, uint32, postmail.MessagePrecondition) error {
+		return fmt.Errorf("concurrent modification")
+	}
+	prepared, err := application.PrepareDraft(context.Background(), "work", "mail.draft.update", "Drafts", 5, model.SendMessage{Subject: "replacement"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := application.ExecuteOperation(context.Background(), prepared.Token)
+	if err == nil || result.Status != "uncertain" || fmt.Sprint(result.Result["uid"]) != "42" || result.Result["cleanup"] != "failed" {
+		t.Fatalf("ExecuteOperation result=%#v err=%v", result, err)
+	}
+	replayed, err := application.ExecuteOperation(context.Background(), prepared.Token)
+	if err != nil || replayed.Status != "uncertain" || fmt.Sprint(replayed.Result["uid"]) != "42" {
+		t.Fatalf("replay result=%#v err=%v", replayed, err)
+	}
+}
+
 func TestSyncAcceptsGranularReadCapability(t *testing.T) {
 	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
 	application := serviceWithConnections(t, mailConnection("work"))
@@ -341,6 +388,47 @@ func TestSyncAcceptsGranularReadCapability(t *testing.T) {
 	}
 	if _, err := application.Sync(context.Background(), model.Selector{Capability: "mail.send"}); err == nil {
 		t.Fatal("Sync accepted non-readable capability")
+	}
+}
+
+func TestSyncFreezesMailRangeAcrossPages(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	application := serviceWithConnections(t, mailConnection("work"))
+	clock := time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)
+	application.now = func() time.Time { clock = clock.Add(time.Second); return clock }
+	var cutoffs []time.Time
+	application.mailSearch = func(connection model.Connection, options postmail.SearchOptions) (postmail.SearchResult, error) {
+		cutoffs = append(cutoffs, options.Since)
+		messages := make([]model.Message, 0, 101)
+		for uid := uint32(101); uid > 0; uid-- {
+			if options.BeforeUID == 0 || uid < options.BeforeUID {
+				messages = append(messages, model.Message{ConnectionID: connection.ID, UID: uid, ReceivedAt: time.Unix(int64(uid), 0)})
+			}
+		}
+		if len(messages) > options.Limit {
+			messages = messages[:options.Limit]
+		}
+		return postmail.SearchResult{Messages: messages, UIDValidity: 1, UIDNext: 102}, nil
+	}
+	result, err := application.Sync(context.Background(), model.Selector{Capability: "mail.read"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result["messages"] != 101 || len(cutoffs) != 2 || !cutoffs[0].Equal(cutoffs[1]) {
+		t.Fatalf("Sync result=%#v cutoffs=%v", result, cutoffs)
+	}
+}
+
+func TestPrepareCalendarUpdateRejectsSeriesReplacementFromOccurrence(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	connection := model.Connection{ID: "work", Name: "Work", Calendar: &model.CalendarConfig{
+		Kind: "caldav", URL: "http://localhost:5232", Username: "work", Secret: model.SecretRef{Env: "CALENDAR_PASSWORD"},
+		Collections: []model.CalendarCollection{{ID: "team", Path: "/work/team/"}},
+	}}
+	application := serviceWithConnections(t, connection)
+	event := model.Event{ID: "series#20260815T090000Z", SeriesID: "series", CollectionID: "team", Href: "/work/team/series.ics", ETag: "etag", Start: instant(9), End: instant(10)}
+	if _, err := application.PrepareCalendarWrite(context.Background(), "work", "calendar.update", event); err == nil || !strings.Contains(err.Error(), "series master") {
+		t.Fatalf("PrepareCalendarWrite returned %v", err)
 	}
 }
 

@@ -28,7 +28,13 @@ const (
 	keyringService       = "posthouse.cache"
 	legacyKeyringService = "posthouse"
 	cacheKeyName         = "cache-master-key"
+	rekeyRecoveryName    = "rekey-recovery"
 	chunkSize            = 1 << 20
+)
+
+var (
+	credentialGet = keyring.Get
+	credentialSet = keyring.Set
 )
 
 type Store struct {
@@ -71,7 +77,7 @@ func DefaultPath(configPath, configured string) string {
 	if configured != "" {
 		return configured
 	}
-	return filepath.Join(filepath.Dir(configPath), "state.db")
+	return filepath.Join(filepath.Dir(configPath), "posthouse.db")
 }
 
 func Open(path string, maxBytes int64) (*Store, error) {
@@ -79,7 +85,45 @@ func Open(path string, maxBytes int64) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	return OpenWithKey(path, maxBytes, key)
+	store, openErr := OpenWithKey(path, maxBytes, key)
+	if openErr == nil {
+		_, _ = store.db.Exec(`DELETE FROM state_meta WHERE name=?`, rekeyRecoveryName)
+		return store, nil
+	}
+	if os.Getenv("POSTHOUSE_CACHE_KEY") != "" {
+		return nil, openErr
+	}
+	recoveredKey, recoveryErr := recoverRekeyKey(path, key)
+	if recoveryErr != nil {
+		return nil, openErr
+	}
+	store, err = OpenWithKey(path, maxBytes, recoveredKey)
+	if err != nil {
+		return nil, openErr
+	}
+	if err := credentialSet(keyringService, cacheKeyName, base64.RawURLEncoding.EncodeToString(recoveredKey)); err != nil {
+		_ = store.Close()
+		return nil, fmt.Errorf("recover rekeyed cache master key in OS keychain: %w", err)
+	}
+	_, _ = store.db.Exec(`DELETE FROM state_meta WHERE name=?`, rekeyRecoveryName)
+	return store, nil
+}
+
+func recoverRekeyKey(path string, oldKey []byte) ([]byte, error) {
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+	var ciphertext []byte
+	if err := db.QueryRow(`SELECT ciphertext FROM state_meta WHERE name=?`, rekeyRecoveryName).Scan(&ciphertext); err != nil {
+		return nil, err
+	}
+	key, err := open(oldKey, ciphertext, []byte("posthouse-state-rekey-recovery"))
+	if err != nil || len(key) != chacha20poly1305.KeySize {
+		return nil, fmt.Errorf("cache rekey recovery record is invalid")
+	}
+	return key, nil
 }
 
 func OpenWithKey(path string, maxBytes int64, key []byte) (*Store, error) {
@@ -434,6 +478,16 @@ func (s *Store) Rekey(ctx context.Context, newKey []byte) error {
 	if err := s.lockAndVerifyKey(ctx, tx); err != nil {
 		return err
 	}
+	useKeychain := os.Getenv("POSTHOUSE_CACHE_KEY") == ""
+	if useKeychain {
+		recovery, err := seal(s.key, newKey, []byte("posthouse-state-rekey-recovery"))
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO state_meta(name,ciphertext) VALUES(?,?) ON CONFLICT(name) DO UPDATE SET ciphertext=excluded.ciphertext`, rekeyRecoveryName, recovery); err != nil {
+			return fmt.Errorf("store cache rekey recovery record: %w", err)
+		}
+	}
 	rows, err := tx.QueryContext(ctx, `SELECT c.entry_id,c.sequence,e.namespace,e.key_hash,c.ciphertext FROM cache_chunks c JOIN cache_entries e ON e.id=c.entry_id ORDER BY c.entry_id,c.sequence`)
 	if err != nil {
 		return fmt.Errorf("list cache entries for rekey: %w", err)
@@ -511,20 +565,16 @@ func (s *Store) Rekey(ctx context.Context, newKey []byte) error {
 	if _, err := tx.ExecContext(ctx, `UPDATE state_meta SET ciphertext=? WHERE name='key-check'`, marker); err != nil {
 		return fmt.Errorf("update cache key marker during rekey: %w", err)
 	}
-	useKeychain := os.Getenv("POSTHOUSE_CACHE_KEY") == ""
-	oldEncoded := base64.RawURLEncoding.EncodeToString(s.key)
-	if useKeychain {
-		if err := keyring.Set(keyringService, cacheKeyName, base64.RawURLEncoding.EncodeToString(newKey)); err != nil {
-			return fmt.Errorf("store rekeyed cache master key: %w", err)
-		}
-	}
 	if err := tx.Commit(); err != nil {
-		if useKeychain {
-			_ = keyring.Set(keyringService, cacheKeyName, oldEncoded)
-		}
 		return err
 	}
 	s.key = append(s.key[:0], newKey...)
+	if useKeychain {
+		if err := credentialSet(keyringService, cacheKeyName, base64.RawURLEncoding.EncodeToString(newKey)); err != nil {
+			return fmt.Errorf("cache was rekeyed but OS keychain activation failed; restart Posthouse to recover the committed key: %w", err)
+		}
+		_, _ = s.db.ExecContext(ctx, `DELETE FROM state_meta WHERE name=?`, rekeyRecoveryName)
+	}
 	return nil
 }
 
@@ -639,20 +689,20 @@ func masterKey() ([]byte, error) {
 	if encoded := os.Getenv("POSTHOUSE_CACHE_KEY"); encoded != "" {
 		return decodeKey(encoded)
 	}
-	encoded, err := keyring.Get(keyringService, cacheKeyName)
+	encoded, err := credentialGet(keyringService, cacheKeyName)
 	if err == nil {
 		return decodeKey(encoded)
 	}
 	if !errors.Is(err, keyring.ErrNotFound) {
 		return nil, fmt.Errorf("resolve cache key from OS keychain (or set POSTHOUSE_CACHE_KEY for headless use): %w", err)
 	}
-	encoded, err = keyring.Get(legacyKeyringService, cacheKeyName)
+	encoded, err = credentialGet(legacyKeyringService, cacheKeyName)
 	if err == nil {
 		key, decodeErr := decodeKey(encoded)
 		if decodeErr != nil {
 			return nil, fmt.Errorf("migrate legacy cache key: %w", decodeErr)
 		}
-		if err := keyring.Set(keyringService, cacheKeyName, encoded); err != nil {
+		if err := credentialSet(keyringService, cacheKeyName, encoded); err != nil {
 			return nil, fmt.Errorf("migrate cache key to isolated credential namespace: %w", err)
 		}
 		return key, nil
@@ -664,7 +714,7 @@ func masterKey() ([]byte, error) {
 	if _, err := rand.Read(key); err != nil {
 		return nil, fmt.Errorf("generate cache key: %w", err)
 	}
-	if err := keyring.Set(keyringService, cacheKeyName, base64.RawURLEncoding.EncodeToString(key)); err != nil {
+	if err := credentialSet(keyringService, cacheKeyName, base64.RawURLEncoding.EncodeToString(key)); err != nil {
 		return nil, fmt.Errorf("store cache key in OS keychain (or set POSTHOUSE_CACHE_KEY for headless use): %w", err)
 	}
 	return key, nil

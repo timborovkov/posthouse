@@ -176,6 +176,33 @@ END:VCALENDAR`
 	}
 }
 
+func TestParseRangeIncludesOverrideMovedInFromOutsideRange(t *testing.T) {
+	data := `BEGIN:VCALENDAR
+VERSION:2.0
+BEGIN:VEVENT
+UID:moved-series
+DTSTART:20260801T090000Z
+DTEND:20260801T100000Z
+RRULE:FREQ=WEEKLY;COUNT=2
+SUMMARY:Original
+END:VEVENT
+BEGIN:VEVENT
+UID:moved-series
+RECURRENCE-ID:20260808T090000Z
+DTSTART:20260816T110000Z
+DTEND:20260816T120000Z
+SUMMARY:Moved into range
+END:VEVENT
+END:VCALENDAR`
+	events, err := ParseRange([]byte(data), time.Date(2026, 8, 15, 0, 0, 0, 0, time.UTC), time.Date(2026, 8, 17, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].Title != "Moved into range" || events[0].RecurrenceID != "2026-08-08T09:00:00Z" {
+		t.Fatalf("moved override events=%#v", events)
+	}
+}
+
 func TestParseRangeUsesEmbeddedTimezone(t *testing.T) {
 	data := `BEGIN:VCALENDAR
 VERSION:2.0

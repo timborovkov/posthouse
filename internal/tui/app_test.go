@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	tui "github.com/grindlemire/go-tui"
 	"github.com/timborovkov/posthouse/internal/config"
@@ -109,6 +110,39 @@ func TestSplitValuesTrimsCommaSeparatedInput(t *testing.T) {
 	got := splitValues(" one@example.test, ,two@example.test ")
 	if len(got) != 2 || got[0] != "one@example.test" || got[1] != "two@example.test" {
 		t.Fatalf("splitValues returned %#v", got)
+	}
+}
+
+func TestCapabilityDetectionSkipsUnavailableAggregateReads(t *testing.T) {
+	connections := []model.Connection{{ID: "calendar", Capabilities: []string{"calendar.read"}}}
+	if connectionsHaveCapability(connections, "mail.read") || !connectionsHaveCapability(connections, "calendar.read") {
+		t.Fatalf("capability detection failed for %#v", connections)
+	}
+}
+
+func TestConnectionEditorSupportsSMTPOnlyOnboarding(t *testing.T) {
+	app := testApp(t)
+	defer app.close()
+	app.beginEditor("connection", []string{"smtp", "SMTP", "work", "sender@example.test", "sender@example.test", "SMTP_PASSWORD", "", "smtp.example.test:465", "", "", ""})
+	app.submitEditor()
+	if app.errorText.Get() != "" {
+		t.Fatalf("SMTP-only onboarding failed: %s", app.errorText.Get())
+	}
+	connections, err := app.service.Connections(model.Selector{})
+	if err != nil || len(connections) != 1 || connections[0].Mail == nil || connections[0].Mail.SMTP.Address != "smtp.example.test:465" || connectionsHaveCapability(connections, "mail.read") {
+		t.Fatalf("connections=%#v err=%v", connections, err)
+	}
+}
+
+func TestSeriesUpdateRejectsExpandedOccurrence(t *testing.T) {
+	app := testApp(t)
+	defer app.close()
+	app.view.Set(3)
+	app.events.Set([]model.Event{{ID: "series#20260815T090000Z", SeriesID: "series", ConnectionID: "work", RecurrenceID: "2026-08-15T09:00:00Z", Start: time.Date(2026, 8, 15, 9, 0, 0, 0, time.UTC), End: time.Date(2026, 8, 15, 10, 0, 0, 0, time.UTC)}})
+	app.beginEditor("event-action", []string{"update-series", "Changed", "2026-08-15T09:00:00Z", "2026-08-15T10:00:00Z"})
+	app.submitEditor()
+	if !strings.Contains(app.errorText.Get(), "series master") || app.pendingToken.Get() != "" {
+		t.Fatalf("error=%q token=%q", app.errorText.Get(), app.pendingToken.Get())
 	}
 }
 

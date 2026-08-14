@@ -117,7 +117,7 @@ export POSTHOUSE_CACHE_KEY="$POSTHOUSE_CACHE_KEY_NEW"
 unset POSTHOUSE_CACHE_KEY_NEW
 ```
 
-The command returns a `required_action` field in headless mode. An already-running process that still holds the old key is prevented from writing and must be restarted.
+The command returns a `required_action` field in headless mode. An already-running process that still holds the old key is prevented from writing and must be restarted. Desktop keychain rekeys keep an encrypted recovery record in the same SQLite transaction; if keychain activation is interrupted after commit, the next startup recovers and promotes the committed key automatically.
 
 Selectors intersect exact connection IDs/names, category, labels, capability, and calendar collections. List cursors are opaque, query-bound, and source-snapshot-bound: new or recovered sources join only a fresh traversal. IMAP cursors also bind UIDVALIDITY and the initial UID boundary.
 

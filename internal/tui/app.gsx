@@ -139,10 +139,8 @@ func (p *posthouseApp) refresh() {
 		next := snapshot{}
 		connections, err := p.service.Connections(model.Selector{})
 		if err != nil { next.err = err.Error() } else { next.connections = connections }
-		messages, mailErr := p.service.SearchMessages(model.Selector{}, mail.SearchOptions{Query: query}, 100, "")
-		if mailErr == nil { next.messages = messages.Messages } else if len(connections)>0 { next.err = appendError(next.err, mailErr) }
-		events, calendarErr := p.service.ListEvents(ctx, model.Selector{}, time.Now().Add(-24*time.Hour), time.Now().Add(90*24*time.Hour), query, 500, "")
-		if calendarErr == nil { next.events = events.Events } else if len(connections)>0 { next.err = appendError(next.err, calendarErr) }
+		if connectionsHaveCapability(connections,"mail.read") { messages, mailErr := p.service.SearchMessages(model.Selector{}, mail.SearchOptions{Query: query}, 100, ""); if mailErr == nil { next.messages = messages.Messages } else { next.err = appendError(next.err, mailErr) } }
+		if connectionsHaveCapability(connections,"calendar.read") { events, calendarErr := p.service.ListEvents(ctx, model.Selector{}, time.Now().Add(-24*time.Hour), time.Now().Add(90*24*time.Hour), query, 500, ""); if calendarErr == nil { next.events = events.Events } else { next.err = appendError(next.err, calendarErr) } }
 		if cache, cacheErr := p.service.CacheStatus(ctx); cacheErr == nil { next.cache = fmt.Sprintf("%d entries · %.1f MiB / %.1f MiB", cache.Entries, float64(cache.Bytes)/(1<<20), float64(cache.MaxBytes)/(1<<20)) } else { next.cache = "cache unavailable: "+cacheErr.Error() }
 		select { case p.updates <- next: case <-ctx.Done(): }
 	}()
@@ -236,7 +234,7 @@ func (p *posthouseApp) submitEditor() {
 	if p.editorKind.Get()=="connection" {
 		if len(values)!=11 || values[0]=="" || values[1]=="" { err=fmt.Errorf("connection ID and name are required") } else {
 			connection:=model.Connection{ID:values[0],Name:values[1],Category:values[2],Identity:model.Identity{Email:values[3]}}
-			if values[6]!="" { connection.Mail=&model.MailConfig{Username:values[4],Secret:model.SecretRef{Env:values[5]},IMAP:model.IMAPConfig{Address:values[6],TLS:true},SMTP:model.SMTPConfig{Address:values[7],TLS:values[7]!=""},SentCopy:"provider-managed"} }
+			if values[6]!="" || values[7]!="" { connection.Mail=&model.MailConfig{Username:values[4],Secret:model.SecretRef{Env:values[5]},IMAP:model.IMAPConfig{Address:values[6],TLS:values[6]!=""},SMTP:model.SMTPConfig{Address:values[7],TLS:values[7]!=""},SentCopy:"provider-managed"} }
 			if values[8]!="" { connection.Calendar=&model.CalendarConfig{Kind:"caldav",URL:values[8],Username:values[9],Secret:model.SecretRef{Env:values[10]}} }
 			err=p.service.UpsertConnection(connection,false)
 				if err==nil { p.editor.Set(false); p.modalText.Set("Connection saved\n\nRun Enter on the selected connection for non-mutating doctor checks. Use connection discover to persist provider folders and calendars."); p.refresh(); return }
@@ -251,7 +249,7 @@ func (p *posthouseApp) submitEditor() {
 	} else if p.editorKind.Get()=="event-action" {
 		items:=p.events.Get(); if len(items)==0 || p.selected.Get()>=len(items) { err=fmt.Errorf("selected event is no longer available") } else {
 			event:=items[p.selected.Get()]; action:=strings.ToLower(strings.TrimSpace(values[0]))
-			if action=="delete" { prepared,err=p.service.PrepareCalendarDelete(p.ctx,event.ConnectionID,event.CollectionID,event.Href,event.ETag) } else if action=="update" || action=="update-series" { var start,end time.Time; if start,err=time.Parse(time.RFC3339,values[2]); err==nil { if end,err=time.Parse(time.RFC3339,values[3]); err==nil { event.Title=values[1]; event.Start=start; event.End=end; if action=="update-series" { event.RecurrenceID="" }; prepared,err=p.service.PrepareCalendarWrite(p.ctx,event.ConnectionID,"calendar.update",event) } } } else { err=fmt.Errorf("unknown event action %q",action) }
+			if action=="delete" { prepared,err=p.service.PrepareCalendarDelete(p.ctx,event.ConnectionID,event.CollectionID,event.Href,event.ETag) } else if action=="update" || action=="update-series" { if action=="update-series" && event.RecurrenceID!="" { err=fmt.Errorf("cannot replace a recurring series from an expanded occurrence; refresh and edit the series master") } else { var start,end time.Time; if start,err=time.Parse(time.RFC3339,values[2]); err==nil { if end,err=time.Parse(time.RFC3339,values[3]); err==nil { event.Title=values[1]; event.Start=start; event.End=end; prepared,err=p.service.PrepareCalendarWrite(p.ctx,event.ConnectionID,"calendar.update",event) } } } } else { err=fmt.Errorf("unknown event action %q",action) }
 		}
 	} else if p.editorKind.Get()=="mail" {
 		if len(values)!=6 || values[0]=="" { err=fmt.Errorf("connection is required") } else { message:=model.SendMessage{ConnectionID:values[0],To:splitValues(values[2]),Subject:values[3],Text:values[4]}; for _,path:=range splitValues(values[5]) { message.Attachments=append(message.Attachments,model.AttachmentInput{Path:path}) }; mode:=strings.ToLower(strings.TrimSpace(values[1])); if mode=="draft" { prepared,err=p.service.PrepareDraft(p.ctx,values[0],"mail.draft.create","",0,message) } else if mode=="send" || mode=="" { prepared,err=p.service.PrepareSend(p.ctx,message) } else { err=fmt.Errorf("mode must be send or draft") } }
@@ -265,6 +263,7 @@ func (p *posthouseApp) submitEditor() {
 
 func (p *posthouseApp) defaultConnection(capability string) string { for _,connection:=range p.connections.Get() { if slices.Contains(connection.Capabilities,capability) { return connection.ID } }; return "" }
 func splitValues(value string) []string { var result []string; for _,item:=range strings.Split(value,",") { if item=strings.TrimSpace(item); item!="" { result=append(result,item) } }; return result }
+func connectionsHaveCapability(connections []model.Connection, capability string) bool { for _,connection:=range connections { if slices.Contains(connection.Capabilities,capability) { return true } }; return false }
 func (p *posthouseApp) defaultCalendarTarget() (string,string) { for _,connection:=range p.connections.Get() { if connection.Calendar==nil || !slices.Contains(connection.Capabilities,"calendar.write") { continue }; for _,collection:=range connection.Calendar.Collections { if !collection.ReadOnly { return connection.ID,collection.ID } }; return connection.ID,"" }; return "","" }
 func (p *posthouseApp) selectedMessage() (model.Message,bool) { if p.view.Get()==2 && p.detail.Get().UID!=0 { return p.detail.Get().Message,true }; if p.view.Get()==1 { items:=p.messages.Get(); if len(items)>0 && p.selected.Get()<len(items) { return items[p.selected.Get()],true } }; return model.Message{},false }
 

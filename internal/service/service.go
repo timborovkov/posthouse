@@ -28,18 +28,25 @@ import (
 )
 
 type Service struct {
-	store      *config.Store
-	calendar   *calendar.Client
-	mailSearch func(model.Connection, postmail.SearchOptions) (postmail.SearchResult, error)
-	stateMu    sync.Mutex
-	state      *state.Store
-	stateErr   error
-	now        func() time.Time
-	opMu       sync.Mutex
+	store           *config.Store
+	calendar        *calendar.Client
+	mailSearch      func(model.Connection, postmail.SearchOptions) (postmail.SearchResult, error)
+	mailSnapshot    func(model.Connection, string, uint32) (postmail.MessagePrecondition, error)
+	mailAppend      func(model.Connection, string, model.SendMessage, []imap.Flag) (uint32, error)
+	mailMarkDeleted func(model.Connection, string, uint32, postmail.MessagePrecondition) error
+	stateMu         sync.Mutex
+	state           *state.Store
+	stateErr        error
+	now             func() time.Time
+	opMu            sync.Mutex
 }
 
 func New(store *config.Store) *Service {
-	return &Service{store: store, calendar: calendar.NewClient(nil), mailSearch: postmail.Search, now: func() time.Time { return time.Now().UTC() }}
+	return &Service{
+		store: store, calendar: calendar.NewClient(nil), mailSearch: postmail.Search,
+		mailSnapshot: postmail.SnapshotMessage, mailAppend: postmail.Append, mailMarkDeleted: postmail.MarkDeleted,
+		now: func() time.Time { return time.Now().UTC() },
+	}
 }
 
 func (s *Service) Close() error {
@@ -362,6 +369,8 @@ type eventCursorPosition struct {
 	ID           string                       `json:"id"`
 	Snapshot     string                       `json:"snapshot"`
 	Failed       map[string]model.SourceError `json:"failed,omitempty"`
+	RangeStart   time.Time                    `json:"range_start"`
+	RangeEnd     time.Time                    `json:"range_end"`
 }
 
 func (s *Service) ListEvents(ctx context.Context, selection model.Selector, start, end time.Time, query string, requestedPageSize int, cursor string) (model.EventPage, error) {
@@ -387,6 +396,18 @@ func (s *Service) ListEventsMode(ctx context.Context, selection model.Selector, 
 	for index, connection := range connections {
 		connectionIDs[index] = connection.ID
 	}
+	position := eventCursorPosition{Failed: make(map[string]model.SourceError)}
+	if cursor != "" {
+		if err := pagination.DecodePosition(cursor, "events", &position); err != nil {
+			return model.EventPage{}, err
+		}
+		if start.IsZero() {
+			start = position.RangeStart
+		}
+		if end.IsZero() {
+			end = position.RangeEnd
+		}
+	}
 	scope := struct {
 		Selector      model.Selector `json:"selector"`
 		ConnectionIDs []string       `json:"connection_ids"`
@@ -394,10 +415,10 @@ func (s *Service) ListEventsMode(ctx context.Context, selection model.Selector, 
 		End           time.Time      `json:"end"`
 		Query         string         `json:"query"`
 	}{selection, connectionIDs, start, end, query}
-	position := eventCursorPosition{Failed: make(map[string]model.SourceError)}
 	if err := pagination.Decode(cursor, "events", scope, &position); err != nil {
 		return model.EventPage{}, err
 	}
+	position.RangeStart, position.RangeEnd = start, end
 	var result []model.Event
 	var pageErrors []model.SourceError
 	successfulSources := 0
@@ -522,6 +543,10 @@ type calendarDeletePayload struct {
 	ETag         string `json:"etag"`
 }
 
+type uncertainOperationError struct{ message string }
+
+func (err *uncertainOperationError) Error() string { return err.message }
+
 func (s *Service) PrepareSend(ctx context.Context, message model.SendMessage) (model.PreparedOperation, error) {
 	connection, err := s.exactConnection(message.ConnectionID, "mail.send")
 	if err != nil {
@@ -533,11 +558,16 @@ func (s *Service) PrepareSend(ctx context.Context, message model.SendMessage) (m
 	if len(message.To)+len(message.CC)+len(message.BCC) == 0 {
 		return model.PreparedOperation{}, fmt.Errorf("at least one recipient is required")
 	}
+	if connection.Mail.SentCopy == "always" && connection.Mail.Folders.Sent == "" {
+		return model.PreparedOperation{}, fmt.Errorf("connection %s requires a sent-copy folder; run connection discover or configure folders.sent", connection.ID)
+	}
 	message.ConnectionID = connection.ID
 	return s.prepare(ctx, "mail.send", connection, message, map[string]any{
 		"acting_identity": connection.Identity,
 		"recipients":      map[string]any{"to": message.To, "cc": message.CC, "bcc": message.BCC},
-		"subject":         message.Subject, "attachments": attachmentPreviews(message.Attachments),
+		"subject":         message.Subject, "text": message.Text, "reply_to": message.ReplyTo,
+		"in_reply_to": message.InReplyTo, "references": message.References,
+		"attachments":  attachmentPreviews(message.Attachments),
 		"side_effects": []string{"send SMTP message", sentCopyEffect(connection)},
 	})
 }
@@ -633,7 +663,7 @@ func (s *Service) PrepareMailAction(ctx context.Context, connectionID, kind stri
 	if (kind == "mail.archive" || kind == "mail.trash") && payload.Destination == "" {
 		return model.PreparedOperation{}, fmt.Errorf("connection %s has no discovered destination folder; run connection discover", connection.ID)
 	}
-	payload.Precondition, err = postmail.SnapshotMessage(connection, payload.Folder, payload.UID)
+	payload.Precondition, err = s.mailSnapshot(connection, payload.Folder, payload.UID)
 	if err != nil {
 		return model.PreparedOperation{}, err
 	}
@@ -664,7 +694,7 @@ func (s *Service) PrepareDraft(ctx context.Context, connectionID, kind string, f
 	message.ConnectionID = connection.ID
 	payload := draftPayload{Folder: folder, UID: uid, Message: message}
 	if kind != "mail.draft.create" {
-		payload.Precondition, err = postmail.SnapshotMessage(connection, folder, uid)
+		payload.Precondition, err = s.mailSnapshot(connection, folder, uid)
 		if err != nil {
 			return model.PreparedOperation{}, err
 		}
@@ -689,6 +719,9 @@ func (s *Service) PrepareCalendarWrite(ctx context.Context, connectionID, kind s
 	}
 	if kind == "calendar.update" && event.ETag == "" {
 		return model.PreparedOperation{}, fmt.Errorf("calendar update requires the current ETag")
+	}
+	if kind == "calendar.update" && event.RecurrenceID == "" && event.SeriesID != "" && event.ID != event.SeriesID {
+		return model.PreparedOperation{}, fmt.Errorf("cannot replace a recurring series from an expanded occurrence; refresh and edit the series master")
 	}
 	if err := calendar.ValidateCalDAVHref(connection, event.CollectionID, event.Href); err != nil {
 		return model.PreparedOperation{}, err
@@ -814,10 +847,14 @@ func (s *Service) ExecuteOperation(ctx context.Context, token string) (model.Ope
 	if executeErr != nil {
 		record.Public.Status = "failed"
 		var uncertain *postmail.UncertainError
-		if errors.As(executeErr, &uncertain) {
+		var partial *uncertainOperationError
+		if errors.As(executeErr, &uncertain) || errors.As(executeErr, &partial) {
 			record.Public.Status = "uncertain"
 		}
-		record.Public.Result = map[string]any{"error": executeErr.Error()}
+		if record.Public.Result == nil {
+			record.Public.Result = make(map[string]any)
+		}
+		record.Public.Result["error"] = executeErr.Error()
 	}
 	if err := ledger.CompleteOperation(ctx, record); err != nil {
 		current, readErr := ledger.GetOperation(ctx, token)
@@ -870,14 +907,14 @@ func (s *Service) execute(ctx context.Context, connection model.Connection, kind
 		if err := json.Unmarshal(payload, &message); err != nil {
 			return nil, err
 		}
+		if connection.Mail.SentCopy == "always" && connection.Mail.Folders.Sent == "" {
+			return nil, fmt.Errorf("configured sent copy folder is missing; message was not sent")
+		}
 		if err := postmail.Send(connection, message); err != nil {
 			return nil, err
 		}
 		result := map[string]any{"sent": true}
 		if connection.Mail.SentCopy == "always" {
-			if connection.Mail.Folders.Sent == "" {
-				return nil, fmt.Errorf("message sent but configured sent copy folder is missing")
-			}
 			uid, err := postmail.Append(connection, connection.Mail.Folders.Sent, message, []imap.Flag{imap.FlagSeen})
 			if err != nil {
 				return nil, fmt.Errorf("message sent but append sent copy failed: %w", err)
@@ -900,21 +937,21 @@ func (s *Service) execute(ctx context.Context, connection model.Connection, kind
 			return nil, err
 		}
 		if kind == "mail.draft.delete" {
-			return map[string]any{"deleted": true}, postmail.MarkDeleted(connection, draft.Folder, draft.UID, draft.Precondition)
+			return map[string]any{"deleted": true}, s.mailMarkDeleted(connection, draft.Folder, draft.UID, draft.Precondition)
 		}
 		if kind == "mail.draft.update" {
-			current, err := postmail.SnapshotMessage(connection, draft.Folder, draft.UID)
+			current, err := s.mailSnapshot(connection, draft.Folder, draft.UID)
 			if err != nil || current != draft.Precondition {
 				return nil, fmt.Errorf("provider draft changed; refresh and prepare the operation again")
 			}
 		}
-		uid, err := postmail.Append(connection, draft.Folder, draft.Message, []imap.Flag{imap.FlagDraft})
+		uid, err := s.mailAppend(connection, draft.Folder, draft.Message, []imap.Flag{imap.FlagDraft})
 		if err != nil {
 			return nil, err
 		}
 		if kind == "mail.draft.update" {
-			if err := postmail.MarkDeleted(connection, draft.Folder, draft.UID, draft.Precondition); err != nil {
-				return nil, err
+			if err := s.mailMarkDeleted(connection, draft.Folder, draft.UID, draft.Precondition); err != nil {
+				return map[string]any{"uid": uid, "replaced_uid": draft.UID, "cleanup": "failed"}, &uncertainOperationError{message: fmt.Sprintf("replacement draft was appended as UID %d but old draft cleanup failed: %v", uid, err)}
 			}
 		}
 		return map[string]any{"uid": uid}, nil
@@ -1243,9 +1280,10 @@ func (s *Service) Sync(ctx context.Context, selection model.Selector) (map[strin
 	if syncMail {
 		mailSelection := selection
 		mailSelection.Capability = "mail.read"
+		mailSince := s.now().Add(-time.Duration(cacheConfig.MessageMetadataDays) * 24 * time.Hour)
 		cursor := ""
 		for {
-			page, err := s.SearchMessages(mailSelection, postmail.SearchOptions{Since: s.now().Add(-time.Duration(cacheConfig.MessageMetadataDays) * 24 * time.Hour), Mode: "refresh"}, 100, cursor)
+			page, err := s.SearchMessages(mailSelection, postmail.SearchOptions{Since: mailSince, Mode: "refresh"}, 100, cursor)
 			if err != nil {
 				if requestedCapability == "mail" || requestedCapability == "mail.read" {
 					return nil, err

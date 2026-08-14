@@ -40,25 +40,56 @@ func Decode(token string, kind string, scope any, position any) error {
 	if len(token) > 64<<10 {
 		return fmt.Errorf("cursor is too large")
 	}
-	data, err := base64.RawURLEncoding.DecodeString(token)
+	decoded, err := decodeEnvelope(token, kind)
 	if err != nil {
-		return fmt.Errorf("invalid cursor encoding")
-	}
-	var decoded envelope
-	if err := json.Unmarshal(data, &decoded); err != nil {
-		return fmt.Errorf("invalid cursor payload")
+		return err
 	}
 	fingerprint, err := Fingerprint(scope)
 	if err != nil {
 		return err
 	}
-	if decoded.Version != version || decoded.Kind != kind || decoded.Scope != fingerprint {
+	if decoded.Scope != fingerprint {
 		return fmt.Errorf("cursor does not belong to this query; restart pagination")
 	}
 	if err := json.Unmarshal(decoded.Position, position); err != nil {
 		return fmt.Errorf("invalid cursor position")
 	}
 	return nil
+}
+
+// DecodePosition recovers cursor-carried defaults before the caller rebuilds
+// the query scope. Decode must still be called afterwards to bind those values
+// to the cursor fingerprint.
+func DecodePosition(token, kind string, position any) error {
+	if token == "" {
+		return nil
+	}
+	decoded, err := decodeEnvelope(token, kind)
+	if err != nil {
+		return err
+	}
+	if err := json.Unmarshal(decoded.Position, position); err != nil {
+		return fmt.Errorf("invalid cursor position")
+	}
+	return nil
+}
+
+func decodeEnvelope(token, kind string) (envelope, error) {
+	if len(token) > 64<<10 {
+		return envelope{}, fmt.Errorf("cursor is too large")
+	}
+	data, err := base64.RawURLEncoding.DecodeString(token)
+	if err != nil {
+		return envelope{}, fmt.Errorf("invalid cursor encoding")
+	}
+	var decoded envelope
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return envelope{}, fmt.Errorf("invalid cursor payload")
+	}
+	if decoded.Version != version || decoded.Kind != kind {
+		return envelope{}, fmt.Errorf("cursor does not belong to this query; restart pagination")
+	}
+	return decoded, nil
 }
 
 func Fingerprint(value any) (string, error) {

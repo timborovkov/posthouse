@@ -17,6 +17,13 @@ import (
 	"github.com/timborovkov/posthouse/internal/state"
 )
 
+func TestDefaultPathUsesDocumentedDatabaseName(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	if got, want := state.DefaultPath(configPath, ""), filepath.Join(filepath.Dir(configPath), "posthouse.db"); got != want {
+		t.Fatalf("DefaultPath=%q want %q", got, want)
+	}
+}
+
 func TestEncryptedCacheAndOperationRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.db")
 	store, err := state.OpenWithKey(path, 2<<20, bytesOf(7, 32))
