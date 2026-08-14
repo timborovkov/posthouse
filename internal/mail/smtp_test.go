@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/posthousehq/posthouse/internal/model"
+	"github.com/timborovkov/posthouse/internal/model"
 )
 
 func TestBuildMessageDoesNotExposeBCCAndNormalizesHeaders(t *testing.T) {

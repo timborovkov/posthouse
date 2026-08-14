@@ -1,4 +1,4 @@
-module github.com/posthousehq/posthouse
+module github.com/timborovkov/posthouse
 
 go 1.26.0
 

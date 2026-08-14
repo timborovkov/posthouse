@@ -10,7 +10,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/posthousehq/posthouse/internal/model"
+	"github.com/timborovkov/posthouse/internal/model"
 )
 
 const currentVersion = 1

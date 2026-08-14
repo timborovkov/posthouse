@@ -12,8 +12,8 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/posthousehq/posthouse/internal/config"
-	"github.com/posthousehq/posthouse/internal/model"
+	"github.com/timborovkov/posthouse/internal/config"
+	"github.com/timborovkov/posthouse/internal/model"
 )
 
 const maxFeedBytes = 16 << 20

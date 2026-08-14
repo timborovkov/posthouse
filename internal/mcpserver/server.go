@@ -11,10 +11,10 @@ import (
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/posthousehq/posthouse/internal/calendar"
-	postmail "github.com/posthousehq/posthouse/internal/mail"
-	"github.com/posthousehq/posthouse/internal/model"
-	"github.com/posthousehq/posthouse/internal/service"
+	"github.com/timborovkov/posthouse/internal/calendar"
+	postmail "github.com/timborovkov/posthouse/internal/mail"
+	"github.com/timborovkov/posthouse/internal/model"
+	"github.com/timborovkov/posthouse/internal/service"
 )
 
 const Version = "0.1.0"

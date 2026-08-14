@@ -16,11 +16,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/posthousehq/posthouse/internal/calendar"
-	postmail "github.com/posthousehq/posthouse/internal/mail"
-	"github.com/posthousehq/posthouse/internal/mcpserver"
-	"github.com/posthousehq/posthouse/internal/model"
-	"github.com/posthousehq/posthouse/internal/service"
+	"github.com/timborovkov/posthouse/internal/calendar"
+	postmail "github.com/timborovkov/posthouse/internal/mail"
+	"github.com/timborovkov/posthouse/internal/mcpserver"
+	"github.com/timborovkov/posthouse/internal/model"
+	"github.com/timborovkov/posthouse/internal/service"
 )
 
 type CLI struct {

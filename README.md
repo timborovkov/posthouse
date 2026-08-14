@@ -39,7 +39,7 @@ A **connection** is one authenticated provider endpoint. An **identity** is the 
 Posthouse pins Go 1.26.6.
 
 ```sh
-go install github.com/posthousehq/posthouse/cmd/posthouse@latest
+go install github.com/timborovkov/posthouse/cmd/posthouse@latest
 ```
 
 From a clone:

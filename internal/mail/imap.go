@@ -10,8 +10,8 @@ import (
 
 	"github.com/emersion/go-imap/v2"
 	"github.com/emersion/go-imap/v2/imapclient"
-	"github.com/posthousehq/posthouse/internal/config"
-	"github.com/posthousehq/posthouse/internal/model"
+	"github.com/timborovkov/posthouse/internal/config"
+	"github.com/timborovkov/posthouse/internal/model"
 )
 
 type SearchOptions struct {

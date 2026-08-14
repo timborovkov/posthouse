@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/posthousehq/posthouse/internal/model"
+	"github.com/timborovkov/posthouse/internal/model"
 )
 
 func TestStoreRoundTripAndPermissions(t *testing.T) {

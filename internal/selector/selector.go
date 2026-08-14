@@ -5,7 +5,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/posthousehq/posthouse/internal/model"
+	"github.com/timborovkov/posthouse/internal/model"
 )
 
 func Match(all []model.Connection, s model.Selector) ([]model.Connection, error) {

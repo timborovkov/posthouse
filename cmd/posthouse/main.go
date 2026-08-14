@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/posthousehq/posthouse/internal/cli"
-	"github.com/posthousehq/posthouse/internal/config"
-	"github.com/posthousehq/posthouse/internal/service"
+	"github.com/timborovkov/posthouse/internal/cli"
+	"github.com/timborovkov/posthouse/internal/config"
+	"github.com/timborovkov/posthouse/internal/service"
 )
 
 func main() {

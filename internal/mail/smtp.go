@@ -12,8 +12,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/posthousehq/posthouse/internal/config"
-	"github.com/posthousehq/posthouse/internal/model"
+	"github.com/timborovkov/posthouse/internal/config"
+	"github.com/timborovkov/posthouse/internal/model"
 )
 
 func Send(connection model.Connection, message model.SendMessage) error {

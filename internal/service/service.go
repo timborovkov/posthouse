@@ -7,12 +7,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/posthousehq/posthouse/internal/calendar"
-	"github.com/posthousehq/posthouse/internal/config"
-	postmail "github.com/posthousehq/posthouse/internal/mail"
-	"github.com/posthousehq/posthouse/internal/model"
-	"github.com/posthousehq/posthouse/internal/pagination"
-	"github.com/posthousehq/posthouse/internal/selector"
+	"github.com/timborovkov/posthouse/internal/calendar"
+	"github.com/timborovkov/posthouse/internal/config"
+	postmail "github.com/timborovkov/posthouse/internal/mail"
+	"github.com/timborovkov/posthouse/internal/model"
+	"github.com/timborovkov/posthouse/internal/pagination"
+	"github.com/timborovkov/posthouse/internal/selector"
 )
 
 type Service struct {

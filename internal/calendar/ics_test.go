@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/posthousehq/posthouse/internal/model"
+	"github.com/timborovkov/posthouse/internal/model"
 )
 
 func TestGenerateAndParseRoundTrip(t *testing.T) {
