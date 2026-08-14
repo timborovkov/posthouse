@@ -46,7 +46,19 @@ func (c *Client) List(ctx context.Context, connection model.Connection, start, e
 		return nil, fmt.Errorf("create calendar feed request: %w", err)
 	}
 	request.Header.Set("Accept", "text/calendar")
-	response, err := c.httpClient.Do(request)
+	feedClient := *c.httpClient
+	origin := request.URL
+	configuredRedirect := feedClient.CheckRedirect
+	feedClient.CheckRedirect = func(redirect *http.Request, via []*http.Request) error {
+		if !sameOrigin(origin, redirect.URL) {
+			return fmt.Errorf("refusing cross-origin calendar feed redirect")
+		}
+		if configuredRedirect != nil {
+			return configuredRedirect(redirect, via)
+		}
+		return nil
+	}
+	response, err := feedClient.Do(request)
 	if err != nil {
 		return nil, safeTransportError("fetch calendar feed", err)
 	}

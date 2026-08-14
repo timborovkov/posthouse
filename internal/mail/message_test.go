@@ -1,6 +1,7 @@
 package mail
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -41,5 +42,32 @@ func TestSanitizeHTMLUsesParserBasedURLAndAttributeAllowlist(t *testing.T) {
 	}
 	if !strings.Contains(output, "https://example.test/path") || !strings.Contains(output, "Hello") {
 		t.Fatalf("sanitized HTML removed safe content: %q", output)
+	}
+}
+
+func TestParseMessagePreservesNonTextInlinePart(t *testing.T) {
+	raw := []byte("MIME-Version: 1.0\r\nContent-Type: multipart/related; boundary=part\r\n\r\n--part\r\nContent-Type: text/html\r\n\r\n<img src=\"cid:logo\">\r\n--part\r\nContent-Type: image/png; name=logo.png\r\nContent-Disposition: inline; filename=logo.png\r\nContent-ID: <logo>\r\nContent-Transfer-Encoding: base64\r\n\r\naW1hZ2U=\r\n--part--\r\n")
+	parsed, err := parseMessage(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(parsed.Detail.Attachments) != 1 {
+		t.Fatalf("attachments = %#v", parsed.Detail.Attachments)
+	}
+	attachment := parsed.Detail.Attachments[0]
+	if !attachment.Inline || attachment.Name != "logo.png" || attachment.ContentID != "logo" || string(parsed.Attachments[attachment.ID]) != "image" {
+		t.Fatalf("inline attachment = %#v bytes=%q", attachment, parsed.Attachments[attachment.ID])
+	}
+}
+
+func TestAppendWaitErrorDistinguishesTaggedRejection(t *testing.T) {
+	rejected := classifyAppendWaitError(&imap.Error{Type: imap.StatusResponseTypeNo, Text: "over quota"})
+	var uncertain *UncertainAppendError
+	if errors.As(rejected, &uncertain) {
+		t.Fatalf("tagged NO was classified uncertain: %v", rejected)
+	}
+	ambiguous := classifyAppendWaitError(errors.New("connection closed"))
+	if !errors.As(ambiguous, &uncertain) {
+		t.Fatalf("transport loss was not classified uncertain: %v", ambiguous)
 	}
 }

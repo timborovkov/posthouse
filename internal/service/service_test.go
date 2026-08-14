@@ -555,6 +555,104 @@ func TestPrepareSendPreviewIncludesExactContentAndThreading(t *testing.T) {
 	}
 }
 
+func TestPrepareDraftPreviewIncludesEverySerializedField(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	connection := mailConnection("work")
+	connection.Mail.Folders.Drafts = "Drafts"
+	application := serviceWithConnections(t, connection)
+	message := model.SendMessage{To: []string{"to@example.test"}, CC: []string{"cc@example.test"}, BCC: []string{"bcc@example.test"}, Subject: "subject", Text: "body", ReplyTo: "reply@example.test", InReplyTo: "parent", References: []string{"one", "two"}}
+	prepared, err := application.PrepareDraft(context.Background(), "work", "mail.draft.create", "Drafts", 0, message)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for key, want := range map[string]string{"subject": message.Subject, "text": message.Text, "reply_to": message.ReplyTo, "in_reply_to": message.InReplyTo} {
+		if prepared.Preview[key] != want {
+			t.Fatalf("preview[%q]=%#v want %#v", key, prepared.Preview[key], want)
+		}
+	}
+	recipients, ok := prepared.Preview["recipients"].(map[string]any)
+	if !ok || len(recipients) != 3 {
+		t.Fatalf("preview recipients=%#v", prepared.Preview["recipients"])
+	}
+	if references, ok := prepared.Preview["references"].([]string); !ok || len(references) != 2 {
+		t.Fatalf("preview references=%#v", prepared.Preview["references"])
+	}
+}
+
+func TestCalendarUpdateRequiresProviderHref(t *testing.T) {
+	connection := model.Connection{ID: "work", Name: "Work", Calendar: &model.CalendarConfig{Kind: "caldav", URL: "http://localhost:5232", Username: "work", Secret: model.SecretRef{Env: "CALENDAR_PASSWORD"}, Collections: []model.CalendarCollection{{ID: "team", Path: "/work/team/"}}}}
+	application := serviceWithConnections(t, connection)
+	_, err := application.PrepareCalendarWrite(context.Background(), "work", "calendar.update", model.Event{ID: "event", CollectionID: "team", ETag: "etag", Start: instant(9), End: instant(10)})
+	if err == nil || !strings.Contains(err.Error(), "provider href") {
+		t.Fatalf("PrepareCalendarWrite error = %v", err)
+	}
+}
+
+func TestSyncSnapshotsSupportOrdinaryOfflineMailReads(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	application := serviceWithConnections(t, mailConnection("work"))
+	application.now = func() time.Time { return instant(14) }
+	application.mailSearch = func(_ model.Connection, options postmail.SearchOptions) (postmail.SearchResult, error) {
+		messages := []model.Message{{ConnectionID: "work", Folder: "INBOX", UID: 2, Subject: "new", ReceivedAt: instant(13)}, {ConnectionID: "work", Folder: "INBOX", UID: 1, Subject: "old", ReceivedAt: instant(12)}}
+		var filtered []model.Message
+		for _, message := range messages {
+			if afterMailCursor(message, options) {
+				filtered = append(filtered, message)
+			}
+		}
+		return postmail.SearchResult{Messages: filtered, UIDValidity: 1, UIDNext: 3}, nil
+	}
+	if _, err := application.Sync(context.Background(), model.Selector{}); err != nil {
+		t.Fatal(err)
+	}
+	page, err := application.SearchMessages(model.Selector{}, postmail.SearchOptions{Mode: "offline"}, 10, "")
+	if err != nil || messageUIDs(page.Messages) != "work:2,work:1" {
+		t.Fatalf("offline page after sync = %#v, %v", page, err)
+	}
+}
+
+func TestCalendarSyncCountsAllPagesAndSupportsNarrowOfflineRead(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	application := serviceWithConnections(t, calendarConnection("calendar", "Calendar"))
+	application.now = func() time.Time { return time.Date(2026, 8, 15, 0, 0, 0, 0, time.UTC) }
+	var feed strings.Builder
+	feed.WriteString("BEGIN:VCALENDAR\r\nVERSION:2.0\r\n")
+	for index := 0; index < 501; index++ {
+		when := application.now().Add(time.Duration(index) * time.Minute)
+		fmt.Fprintf(&feed, "BEGIN:VEVENT\r\nUID:event-%03d\r\nSUMMARY:event-%03d\r\nDTSTART:%s\r\nDTEND:%s\r\nEND:VEVENT\r\n", index, index, when.Format("20060102T150405Z"), when.Add(time.Minute).Format("20060102T150405Z"))
+	}
+	feed.WriteString("END:VCALENDAR\r\n")
+	application.calendar = calendar.NewClient(&http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: make(http.Header), Body: io.NopCloser(strings.NewReader(feed.String()))}, nil
+	})})
+	result, err := application.Sync(context.Background(), model.Selector{Capability: "calendar.read"})
+	if err != nil || result["events"] != 501 {
+		t.Fatalf("Sync result=%#v err=%v", result, err)
+	}
+	start := application.now().Add(499 * time.Minute)
+	page, err := application.ListEventsMode(context.Background(), model.Selector{}, start, start.Add(3*time.Minute), "", 10, "", "offline")
+	if err != nil || len(page.Events) != 2 || page.Events[0].ID != "event-499" {
+		t.Fatalf("narrow offline page=%#v err=%v", page, err)
+	}
+}
+
+func TestEventCursorComparatorIncludesCollectionAndObjectIdentity(t *testing.T) {
+	start := instant(9)
+	one := model.Event{Start: start, ConnectionID: "work", CollectionID: "one", ID: "same", Href: "/one/same.ics"}
+	two := model.Event{Start: start, ConnectionID: "work", CollectionID: "two", ID: "same", Href: "/two/same.ics"}
+	if compareEvents(one, two) == 0 {
+		t.Fatal("event comparator collapsed distinct collection objects")
+	}
+}
+
+func TestNormalizeEventRangeBoundsProviderQueries(t *testing.T) {
+	now := instant(12)
+	start, end := normalizeEventRange(time.Time{}, time.Time{}, now)
+	if !start.Equal(now.Add(-90*24*time.Hour)) || !end.Equal(now.Add(365*24*time.Hour)) {
+		t.Fatalf("normalized range = %v to %v", start, end)
+	}
+}
+
 func TestDraftUpdateCleanupFailurePreservesAppendedUIDAsUncertain(t *testing.T) {
 	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
 	application := serviceWithConnections(t, mailConnection("work"))

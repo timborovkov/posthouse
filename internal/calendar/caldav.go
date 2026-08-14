@@ -24,6 +24,15 @@ type ConflictError struct{ Message string }
 
 func (e *ConflictError) Error() string { return e.Message }
 
+type PartialError struct {
+	Errors                []model.SourceError
+	SuccessfulCollections int
+}
+
+func (e *PartialError) Error() string {
+	return fmt.Sprintf("%d CalDAV collection operations failed", len(e.Errors))
+}
+
 type CalDAVDiscovery struct {
 	Principal string                     `json:"principal"`
 	Home      string                     `json:"home"`
@@ -88,6 +97,7 @@ func (c *Client) ListCalDAV(ctx context.Context, connection model.Connection, co
 		collections = discovery.Calendars
 	}
 	var result []model.Event
+	partial := &PartialError{}
 	for _, collection := range collections {
 		if len(collectionIDs) > 0 && !containsFold(collectionIDs, collection.ID) && !containsFold(collectionIDs, collection.Name) {
 			continue
@@ -97,16 +107,20 @@ func (c *Client) ListCalDAV(ctx context.Context, connection model.Connection, co
 			CompFilter:  caldav.CompFilter{Name: "VCALENDAR", Comps: []caldav.CompFilter{{Name: "VEVENT", Start: start, End: end}}},
 		})
 		if err != nil {
-			return nil, safeTransportError("query CalDAV collection "+collection.ID, err)
+			partial.Errors = append(partial.Errors, model.SourceError{ConnectionID: connection.ID, CollectionID: collection.ID, Code: "calendar_collection_unavailable", Message: safeTransportError("query CalDAV collection "+collection.ID, err).Error(), Retryable: true})
+			continue
 		}
+		partial.SuccessfulCollections++
 		for _, object := range objects {
 			data, etag, err := getCalendarObject(ctx, httpClient, endpoint, object.Path)
 			if err != nil {
-				return nil, err
+				partial.Errors = append(partial.Errors, model.SourceError{ConnectionID: connection.ID, CollectionID: collection.ID, Code: "calendar_object_unavailable", Message: err.Error(), Retryable: true})
+				continue
 			}
 			events, err := ParseRange(data, start, end)
 			if err != nil {
-				return nil, fmt.Errorf("parse CalDAV object %s: %w", object.Path, err)
+				partial.Errors = append(partial.Errors, model.SourceError{ConnectionID: connection.ID, CollectionID: collection.ID, Code: "calendar_object_invalid", Message: fmt.Sprintf("parse CalDAV object in collection %s: %v", collection.ID, err), Retryable: false})
+				continue
 			}
 			for _, event := range events {
 				if query != "" && !strings.Contains(strings.ToLower(event.Title+" "+event.Description+" "+event.Location), strings.ToLower(strings.TrimSpace(query))) {
@@ -119,6 +133,9 @@ func (c *Client) ListCalDAV(ctx context.Context, connection model.Connection, co
 				result = append(result, event)
 			}
 		}
+	}
+	if len(partial.Errors) > 0 {
+		return result, partial
 	}
 	return result, nil
 }

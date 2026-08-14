@@ -21,10 +21,10 @@ export POSTHOUSE_TEST_PERSONAL_PASSWORD=personal-pass
 
 case "$layer" in
   integration)
-    GOCACHE=${GOCACHE:-/tmp/posthouse-go-cache} go test -race -tags=integration ./internal/integration
+    GOCACHE=${GOCACHE:-/tmp/posthouse-go-cache} go test -count=1 -race -tags=integration ./internal/integration
     ;;
   e2e)
-    GOCACHE=${GOCACHE:-/tmp/posthouse-go-cache} go test -race -tags=e2e ./internal/e2e
+    GOCACHE=${GOCACHE:-/tmp/posthouse-go-cache} go test -count=1 -race -tags=e2e ./internal/e2e
     ;;
   *)
     echo "unknown test layer: $layer" >&2

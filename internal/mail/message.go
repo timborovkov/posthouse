@@ -205,6 +205,14 @@ func parseMessage(raw []byte) (FetchedMessage, error) {
 				if result.Detail.HTML == "" {
 					result.Detail.HTML = sanitizeHTML(string(data))
 				}
+			default:
+				name := inlineFilename(header, attachmentIndex)
+				digest := sha256.Sum256([]byte(fmt.Sprintf("%d\x00%s\x00%s", attachmentIndex, name, contentType)))
+				id := base64.RawURLEncoding.EncodeToString(digest[:12])
+				attachment := model.Attachment{ID: id, Name: name, ContentType: contentType, Size: int64(len(data)), Inline: true, ContentID: strings.Trim(header.Get("Content-ID"), "<>")}
+				result.Detail.Attachments = append(result.Detail.Attachments, attachment)
+				result.Attachments[id] = data
+				attachmentIndex++
 			}
 		case *gomail.AttachmentHeader:
 			name, _ := header.Filename()
@@ -223,6 +231,18 @@ func parseMessage(raw []byte) (FetchedMessage, error) {
 	}
 	result.Detail.Preview = preview([]byte(result.Detail.Text))
 	return result, nil
+}
+
+func inlineFilename(header *gomail.InlineHeader, index int) string {
+	_, dispositionParams, _ := header.ContentDisposition()
+	if name := dispositionParams["filename"]; name != "" {
+		return name
+	}
+	_, contentTypeParams, _ := header.ContentType()
+	if name := contentTypeParams["name"]; name != "" {
+		return name
+	}
+	return fmt.Sprintf("inline-%d", index+1)
 }
 
 func headerAddresses(header gomail.Header, key string) []model.Address {
@@ -438,9 +458,18 @@ func AppendSerialized(connection model.Connection, folder string, data []byte, f
 	}
 	result, err := command.Wait()
 	if err != nil {
-		return 0, &UncertainAppendError{Err: fmt.Errorf("append IMAP message: %w", err)}
+		return 0, classifyAppendWaitError(err)
 	}
 	return uint32(result.UID), nil
+}
+
+func classifyAppendWaitError(err error) error {
+	wrapped := fmt.Errorf("append IMAP message: %w", err)
+	var statusErr *imap.Error
+	if errors.As(err, &statusErr) && (statusErr.Type == imap.StatusResponseTypeNo || statusErr.Type == imap.StatusResponseTypeBad) {
+		return wrapped
+	}
+	return &UncertainAppendError{Err: wrapped}
 }
 
 func MarkDeleted(connection model.Connection, folder string, uid uint32, expected MessagePrecondition) error {

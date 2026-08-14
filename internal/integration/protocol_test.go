@@ -116,6 +116,13 @@ func TestCalDAVDiscoveryCRUDAndETagConflict(t *testing.T) {
 	if events, err := client.ListCalDAV(context.Background(), connection, []string{other.ID}, event.Start.Add(-time.Hour), event.End.Add(time.Hour), "integration"); err != nil || len(events) != 0 {
 		t.Fatalf("collection-isolated ListCalDAV returned %#v, %v", events, err)
 	}
+	connection.Calendar.Collections = append(connection.Calendar.Collections, model.CalendarCollection{ID: "missing", Path: "/work/missing-calendar/"})
+	partialEvents, partialErr := client.ListCalDAV(context.Background(), connection, nil, event.Start.Add(-time.Hour), event.End.Add(time.Hour), "integration")
+	var partial *postcalendar.PartialError
+	if !errors.As(partialErr, &partial) || partial.SuccessfulCollections < 2 || len(partial.Errors) != 1 || len(partialEvents) != 1 {
+		t.Fatalf("partial CalDAV result events=%#v partial=%#v err=%v", partialEvents, partial, partialErr)
+	}
+	connection.Calendar.Collections = discovery.Calendars
 	conflicting := created
 	conflicting.Title = "stale update"
 	conflicting.ETag = "definitely-stale"

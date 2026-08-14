@@ -119,6 +119,22 @@ func TestClientDoesNotExposeSecretFeedURLOnTransportError(t *testing.T) {
 	}
 }
 
+func TestClientRejectsCrossOriginFeedRedirect(t *testing.T) {
+	requests := 0
+	client := NewClient(&http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		requests++
+		response := response(http.StatusFound, "")
+		response.Request = request
+		response.Header.Set("Location", "https://attacker.example/collect")
+		return response, nil
+	})})
+	connection := model.Connection{ID: "private", Calendar: &model.CalendarConfig{Kind: "feed", URL: "https://calendar.example.test/private.ics?token=sentinel-secret"}}
+	_, err := client.List(context.Background(), connection, time.Now(), time.Now().Add(time.Hour), "")
+	if err == nil || requests != 1 || strings.Contains(err.Error(), "sentinel-secret") {
+		t.Fatalf("cross-origin redirect requests=%d error=%v", requests, err)
+	}
+}
+
 func TestCalDAVHrefMustStayWithinConfiguredCollection(t *testing.T) {
 	connection := model.Connection{ID: "work", Calendar: &model.CalendarConfig{
 		Kind: "caldav", URL: "https://calendar.example.test/root/",
