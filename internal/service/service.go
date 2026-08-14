@@ -1913,7 +1913,7 @@ func messageBefore(a, b model.Message) bool {
 	if a.ConnectionID != b.ConnectionID {
 		return a.ConnectionID < b.ConnectionID
 	}
-	return a.UID > b.UID
+	return a.UID < b.UID
 }
 
 func messageTime(message model.Message) time.Time {

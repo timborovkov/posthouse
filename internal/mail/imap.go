@@ -117,6 +117,9 @@ func Search(connection model.Connection, options SearchOptions) (SearchResult, e
 	if len(uids) == 0 {
 		return SearchResult{Messages: []model.Message{}, UIDValidity: selected.UIDValidity, UIDNext: uint32(selected.UIDNext)}, nil
 	}
+	if providerOrdered {
+		uids = orderedUIDWindow(uids, options.CursorUID, options.Limit+1)
+	}
 	candidates, err := fetchSearchCandidates(client, connection.ID, options, uids, providerOrdered)
 	if err != nil {
 		return SearchResult{}, err
@@ -155,6 +158,24 @@ func Search(connection model.Connection, options SearchOptions) (SearchResult, e
 		}
 	}
 	return SearchResult{Messages: messages, UIDValidity: selected.UIDValidity, UIDNext: uint32(selected.UIDNext), HasMore: hasMore}, nil
+}
+
+func orderedUIDWindow(uids []imap.UID, cursorUID uint32, limit int) []imap.UID {
+	start := 0
+	if cursorUID != 0 {
+		start = -1
+		for index, uid := range uids {
+			if uint32(uid) == cursorUID {
+				start = index + 1
+				break
+			}
+		}
+		if start < 0 {
+			return uids
+		}
+	}
+	end := min(start+limit, len(uids))
+	return uids[start:end]
 }
 
 func fetchSearchCandidates(client *imapclient.Client, connectionID string, options SearchOptions, uids []imap.UID, providerOrdered bool) ([]searchCandidate, error) {
@@ -206,7 +227,10 @@ func messageBefore(a, b model.Message) bool {
 	if !aTime.Equal(bTime) {
 		return aTime.After(bTime)
 	}
-	return a.UID > b.UID
+	// RFC 5256 SORT uses ascending message order as the implicit final
+	// tie-breaker. UID order follows mailbox order, so mirror it here to keep
+	// provider windows and local aggregate cursors identical.
+	return a.UID < b.UID
 }
 
 func messageTime(message model.Message) time.Time {
