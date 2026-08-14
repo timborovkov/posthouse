@@ -1,0 +1,29 @@
+{
+  "id": "acme",
+  "name": "Acme work",
+  "category": "work",
+  "labels": ["acme", "primary"],
+  "identity": {
+    "name": "Your Name",
+    "email": "you@acme.example"
+  },
+  "mail": {
+    "username": "you@acme.example",
+    "secret_env": "ACME_MAIL_PASSWORD",
+    "imap": {
+      "address": "imap.acme.example:993",
+      "tls": true
+    },
+    "smtp": {
+      "address": "smtp.acme.example:465",
+      "tls": true
+    },
+    "folders": {
+      "inbox": "INBOX",
+      "sent": "Sent"
+    }
+  },
+  "calendar": {
+    "url_secret_env": "ACME_CALENDAR_ICS_URL"
+  }
+}

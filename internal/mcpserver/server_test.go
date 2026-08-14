@@ -1,0 +1,120 @@
+package mcpserver
+
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"slices"
+	"strings"
+	"testing"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/posthousehq/posthouse/internal/config"
+	"github.com/posthousehq/posthouse/internal/model"
+	"github.com/posthousehq/posthouse/internal/service"
+)
+
+func TestServerListsAndCallsReadOnlyConnectionTool(t *testing.T) {
+	store, err := config.New(filepath.Join(t.TempDir(), "config.json"))
+	if err != nil {
+		t.Fatalf("config.New returned error: %v", err)
+	}
+	application := service.New(store)
+	if err := application.UpsertConnection(model.Connection{
+		ID: "work", Name: "Work", Category: "work", Labels: []string{"primary"},
+		Mail: &model.MailConfig{Username: "me@example.com", SecretEnv: "WORK_PASSWORD", IMAP: model.IMAPConfig{Address: "imap.example.com:993", TLS: true}},
+	}, false); err != nil {
+		t.Fatalf("UpsertConnection returned error: %v", err)
+	}
+	if err := application.UpsertConnection(model.Connection{
+		ID: "personal", Name: "Personal", Category: "personal",
+		Mail: &model.MailConfig{Username: "personal@example.com", SecretEnv: "PERSONAL_PASSWORD", IMAP: model.IMAPConfig{Address: "imap.example.com:993", TLS: true}},
+	}, false); err != nil {
+		t.Fatalf("second UpsertConnection returned error: %v", err)
+	}
+	server := New(application)
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	serverSession, err := server.mcp.Connect(context.Background(), serverTransport, nil)
+	if err != nil {
+		t.Fatalf("server Connect returned error: %v", err)
+	}
+	defer serverSession.Close()
+	client := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "0.0.1"}, nil)
+	clientSession, err := client.Connect(context.Background(), clientTransport, nil)
+	if err != nil {
+		t.Fatalf("client Connect returned error: %v", err)
+	}
+	defer clientSession.Close()
+
+	listed, err := clientSession.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("ListTools returned error: %v", err)
+	}
+	names := make([]string, 0, len(listed.Tools))
+	for _, tool := range listed.Tools {
+		names = append(names, tool.Name)
+	}
+	for _, want := range []string{"connections_list", "messages_search", "messages_send", "events_list", "event_ics_generate"} {
+		if !slices.Contains(names, want) {
+			t.Fatalf("tools %v do not contain %s", names, want)
+		}
+	}
+
+	result, err := clientSession.CallTool(context.Background(), &mcp.CallToolParams{Name: "connections_list", Arguments: map[string]any{"page_size": 1}})
+	if err != nil {
+		t.Fatalf("CallTool returned error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("CallTool returned tool error: %#v", result.Content)
+	}
+	structured, ok := result.StructuredContent.(map[string]any)
+	if !ok {
+		t.Fatalf("StructuredContent has type %T", result.StructuredContent)
+	}
+	connections, ok := structured["connections"].([]any)
+	if !ok || len(connections) != 1 {
+		t.Fatalf("connections output is %#v", structured["connections"])
+	}
+	nextCursor, ok := structured["next_cursor"].(string)
+	if !ok || nextCursor == "" {
+		t.Fatalf("next_cursor is %#v", structured["next_cursor"])
+	}
+	secondPage, err := clientSession.CallTool(context.Background(), &mcp.CallToolParams{Name: "connections_list", Arguments: map[string]any{"page_size": 1, "cursor": nextCursor}})
+	if err != nil || secondPage.IsError {
+		t.Fatalf("second connections_list returned %#v, %v", secondPage, err)
+	}
+
+	icsResult, err := clientSession.CallTool(context.Background(), &mcp.CallToolParams{Name: "event_ics_generate", Arguments: map[string]any{
+		"title": "Planning", "start": "2026-08-17T09:00:00Z", "end": "2026-08-17T10:00:00Z",
+	}})
+	if err != nil || icsResult.IsError {
+		t.Fatalf("event_ics_generate returned %#v, %v", icsResult, err)
+	}
+	if len(icsResult.Content) != 1 {
+		t.Fatalf("event_ics_generate returned %d content blocks", len(icsResult.Content))
+	}
+	resource, ok := icsResult.Content[0].(*mcp.EmbeddedResource)
+	if !ok || resource.Resource.MIMEType != "text/calendar" || !strings.Contains(resource.Resource.Text, "BEGIN:VCALENDAR") {
+		t.Fatalf("embedded resource is %#v", icsResult.Content[0])
+	}
+}
+
+func TestAuthenticate(t *testing.T) {
+	next := http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) { writer.WriteHeader(http.StatusNoContent) })
+	handler := authenticate(next, "correct")
+
+	unauthorized := httptest.NewRecorder()
+	handler.ServeHTTP(unauthorized, httptest.NewRequest(http.MethodPost, "/mcp", nil))
+	if unauthorized.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthorized status is %d", unauthorized.Code)
+	}
+
+	authorized := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/mcp", nil)
+	request.Header.Set("Authorization", "Bearer correct")
+	handler.ServeHTTP(authorized, request)
+	if authorized.Code != http.StatusNoContent {
+		t.Fatalf("authorized status is %d", authorized.Code)
+	}
+}
