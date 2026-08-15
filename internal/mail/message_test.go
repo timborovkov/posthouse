@@ -32,6 +32,17 @@ func TestFlagMutationVerification(t *testing.T) {
 	}
 }
 
+func TestRequestedFlagStateRechecksEveryMutation(t *testing.T) {
+	seen, flagged := true, true
+	changes := []flagChange{{flag: imap.FlagSeen, value: &seen}, {flag: imap.FlagFlagged, value: &flagged}}
+	if requestedFlagStateApplied([]imap.Flag{imap.FlagFlagged}, changes) {
+		t.Fatal("final flag verification ignored a reverted earlier mutation")
+	}
+	if !requestedFlagStateApplied([]imap.Flag{imap.FlagSeen, imap.FlagFlagged}, changes) {
+		t.Fatal("final flag verification rejected the complete requested state")
+	}
+}
+
 func TestSanitizeHTMLUsesParserBasedURLAndAttributeAllowlist(t *testing.T) {
 	input := `<p style="background:url(javascript:alert(1))" onclick=alert(1)>Hello</p><a href=javascript:alert(2)>bad</a><a href="jav&#x61;script:alert(3)">encoded</a><a href="https://example.test/path">safe</a><script>alert(4)</script>`
 	output := sanitizeHTML(input)

@@ -150,7 +150,7 @@ func SearchContext(ctx context.Context, connection model.Connection, options Sea
 	}
 	if providerOrdered {
 		windowLimit := options.Limit + 1
-		if needsExactTimestampFilter(options.Since) || needsExactTimestampFilter(options.Before) {
+		if needsUnboundedSortWindow(options) {
 			windowLimit = 0
 		}
 		uids = orderedUIDWindow(uids, options.CursorUID, windowLimit)
@@ -196,6 +196,10 @@ func SearchContext(ctx context.Context, connection model.Connection, options Sea
 		}
 	}
 	return SearchResult{Messages: messages, UIDValidity: selected.UIDValidity, UIDNext: uint32(selected.UIDNext), HasMore: hasMore}, nil
+}
+
+func needsUnboundedSortWindow(options SearchOptions) bool {
+	return needsExactTimestampFilter(options.Since) || !options.Before.IsZero()
 }
 
 func orderedUIDWindow(uids []imap.UID, cursorUID uint32, limit int) []imap.UID {

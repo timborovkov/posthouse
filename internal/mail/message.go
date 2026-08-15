@@ -169,6 +169,24 @@ func GetAttachment(connection model.Connection, folder string, uid uint32, attac
 	return model.Attachment{}, nil, 0, fmt.Errorf("attachment %q does not exist", attachmentID)
 }
 
+func MailboxUIDValidityContext(ctx context.Context, connection model.Connection, folder string) (uint32, error) {
+	client, stop, err := authenticatedIMAPContext(ctx, connection)
+	if err != nil {
+		return 0, err
+	}
+	defer stop()
+	defer client.Close()
+	defer client.Logout()
+	if folder == "" {
+		folder = defaultFolder(connection, folder)
+	}
+	selected, err := client.Select(folder, &imap.SelectOptions{ReadOnly: true}).Wait()
+	if err != nil {
+		return 0, fmt.Errorf("select IMAP folder %s: %w", folder, err)
+	}
+	return selected.UIDValidity, nil
+}
+
 func parseMessage(raw []byte) (FetchedMessage, error) {
 	reader, err := gomail.CreateReader(bytes.NewReader(raw))
 	if err != nil && reader == nil {
@@ -399,6 +417,7 @@ func SetFlagsContext(ctx context.Context, connection model.Connection, folder st
 	changes := []flagChange{{imap.FlagSeen, seen}, {imap.FlagFlagged, flagged}}
 	modSeq := expected.ModSeq
 	mutated := false
+	var finalFlags []imap.Flag
 	for _, change := range changes {
 		flag, value := change.flag, change.value
 		if value == nil {
@@ -429,15 +448,28 @@ func SetFlagsContext(ctx context.Context, connection model.Connection, folder st
 		if !flagMutationApplied(flags, flag, *value) {
 			return fmt.Errorf("IMAP message changed; flag update was not applied, refresh and prepare the operation again")
 		}
+		finalFlags = flags
 		if modSeq != 0 {
 			modSeq = nextModSeq
 		}
+	}
+	if !requestedFlagStateApplied(finalFlags, changes) {
+		return fmt.Errorf("IMAP message changed; requested flag state was not preserved, refresh and prepare the operation again")
 	}
 	return nil
 }
 
 func flagMutationApplied(flags []imap.Flag, flag imap.Flag, expected bool) bool {
 	return slices.Contains(flags, flag) == expected
+}
+
+func requestedFlagStateApplied(flags []imap.Flag, changes []flagChange) bool {
+	for _, change := range changes {
+		if change.value != nil && !flagMutationApplied(flags, change.flag, *change.value) {
+			return false
+		}
+	}
+	return true
 }
 
 func fetchMutationState(client *imapclient.Client, set imap.UIDSet, withModSeq bool) ([]imap.Flag, uint64, error) {

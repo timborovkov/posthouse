@@ -43,6 +43,8 @@ type Service struct {
 	mailAppendRawContext   func(context.Context, model.Connection, string, []byte, []imap.Flag) (uint32, error)
 	mailMarkDeleted        func(model.Connection, string, uint32, postmail.MessagePrecondition) error
 	mailMarkDeletedContext func(context.Context, model.Connection, string, uint32, postmail.MessagePrecondition) error
+	mailGetAttachment      func(model.Connection, string, uint32, string) (model.Attachment, []byte, uint32, error)
+	mailboxUIDValidity     func(context.Context, model.Connection, string) (uint32, error)
 	stateMu                sync.Mutex
 	state                  *state.Store
 	stateErr               error
@@ -54,6 +56,7 @@ func New(store *config.Store) *Service {
 		store: store, calendar: calendar.NewClient(nil), mailSearchContext: postmail.SearchContext,
 		mailSnapshotContext: postmail.SnapshotMessageContext,
 		mailAppendContext:   postmail.AppendContext, mailMarkDeletedContext: postmail.MarkDeletedContext,
+		mailGetAttachment: postmail.GetAttachment, mailboxUIDValidity: postmail.MailboxUIDValidityContext,
 		mailBuild: postmail.BuildMessage, mailSendRawContext: postmail.SendSerializedContext, mailAppendRawContext: postmail.AppendSerializedContext,
 		now: func() time.Time { return time.Now().UTC() },
 	}
@@ -729,6 +732,7 @@ func (s *Service) PrepareMailAction(ctx context.Context, connectionID, kind stri
 	if (kind == "mail.archive" || kind == "mail.trash") && payload.Destination == "" {
 		return model.PreparedOperation{}, fmt.Errorf("connection %s has no discovered destination folder; run connection discover", connection.ID)
 	}
+	payload.Folder = mailFolder(connection, payload.Folder)
 	payload.Precondition, err = s.snapshotMessage(ctx, connection, payload.Folder, payload.UID)
 	if err != nil {
 		return model.PreparedOperation{}, err
@@ -808,9 +812,11 @@ func (s *Service) PrepareCalendarWrite(ctx context.Context, connectionID, kind s
 			return model.PreparedOperation{}, fmt.Errorf("validate recurrence ID: %w", err)
 		}
 	}
-	if _, _, err := calendar.Generate(event); err != nil {
+	generated, _, err := calendar.Generate(event)
+	if err != nil {
 		return model.PreparedOperation{}, fmt.Errorf("validate calendar event: %w", err)
 	}
+	event = generated
 	event.ConnectionID = connection.ID
 	return s.prepare(ctx, kind, connection, event, map[string]any{
 		"acting_identity": connection.Identity, "calendar": event.CollectionID, "title": event.Title,
@@ -1193,16 +1199,36 @@ func (s *Service) GetAttachmentMode(ctx context.Context, connectionID, folder st
 	}
 	if mode == "" {
 		if attachment, data, ok := s.cachedAttachment(ctx, connection.ID, folder, uid, attachmentID); ok {
-			attachment.Stale = false
-			return attachment, data, nil
+			ledger, stateErr := s.ensureState()
+			cachedUIDValidity, validityOK := uint32(0), false
+			if stateErr == nil {
+				cachedUIDValidity, validityOK = s.cachedMailboxUIDValidity(ledger, connection.ID, folder)
+			}
+			liveUIDValidity, validityErr := s.mailboxUIDValidity(ctx, connection, folder)
+			if validityErr != nil {
+				attachment.Stale = true
+				return attachment, data, nil
+			}
+			if validityOK && liveUIDValidity == cachedUIDValidity {
+				attachment.Stale = false
+				return attachment, data, nil
+			}
+			if stateErr == nil {
+				_ = s.cacheMailboxUIDValidity(ledger, connection.ID, folder, liveUIDValidity)
+			}
 		}
 	}
 	if mode != "offline" {
-		attachment, data, uidValidity, fetchErr := postmail.GetAttachment(connection, folder, uid, attachmentID)
+		attachment, data, uidValidity, fetchErr := s.mailGetAttachment(connection, folder, uid, attachmentID)
 		if fetchErr == nil {
 			if ledger, stateErr := s.ensureState(); stateErr == nil {
 				_ = s.cacheMailboxUIDValidity(ledger, connection.ID, folder, uidValidity)
-				_ = ledger.Put(ctx, state.CacheEntry{Namespace: "attachment", Key: messageCacheKey(connection.ID, folder, uidValidity, uid) + "/" + attachmentID, ConnectionID: connection.ID, Kind: "attachment", ProviderID: attachmentID, ExpiresAt: s.now().Add(s.messageBodyTTL()), Value: data})
+				key := messageCacheKey(connection.ID, folder, uidValidity, uid) + "/" + attachmentID
+				expiresAt := s.now().Add(s.messageBodyTTL())
+				_ = ledger.Put(ctx, state.CacheEntry{Namespace: "attachment", Key: key, ConnectionID: connection.ID, Kind: "attachment", ProviderID: attachmentID, ExpiresAt: expiresAt, Value: data})
+				if metadata, metadataErr := json.Marshal(attachment); metadataErr == nil {
+					_ = ledger.Put(ctx, state.CacheEntry{Namespace: "attachment_metadata", Key: key, ConnectionID: connection.ID, Kind: "message_metadata", ProviderID: attachmentID, ExpiresAt: expiresAt, Value: metadata})
+				}
 			}
 			return attachment, data, nil
 		}
@@ -1980,7 +2006,9 @@ func (s *Service) cachedAttachment(ctx context.Context, connectionID, folder str
 		return model.Attachment{}, nil, false
 	}
 	attachment := model.Attachment{ID: attachmentID, Size: int64(len(entry.Value)), CachedAt: entry.CachedAt}
-	if detail, found := s.cachedMessage(connectionID, folder, uid); found {
+	if metadata, found, metadataErr := ledger.Get(ctx, "attachment_metadata", messageCacheKey(connectionID, folder, uidValidity, uid)+"/"+attachmentID, false); metadataErr == nil && found && json.Unmarshal(metadata.Value, &attachment) == nil {
+		attachment.CachedAt = entry.CachedAt
+	} else if detail, found := s.cachedMessage(connectionID, folder, uid); found {
 		for _, candidate := range detail.Attachments {
 			if candidate.ID == attachmentID {
 				attachment = candidate

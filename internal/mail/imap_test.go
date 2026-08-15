@@ -76,6 +76,16 @@ func TestIMAPSearchBoundsCoverExtremeRFC3339Offsets(t *testing.T) {
 	}
 }
 
+func TestSortWindowIsUnboundedForEveryBeforeFilter(t *testing.T) {
+	midnight := time.Date(2026, 8, 15, 0, 0, 0, 0, time.UTC)
+	if !needsUnboundedSortWindow(SearchOptions{Before: midnight}) {
+		t.Fatal("midnight BEFORE filter allowed widened provider results to truncate the SORT window")
+	}
+	if needsUnboundedSortWindow(SearchOptions{}) {
+		t.Fatal("unbounded query disabled safe SORT windowing")
+	}
+}
+
 func TestDialIMAPContextHonorsPreCanceledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

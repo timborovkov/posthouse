@@ -565,6 +565,7 @@ func TestPreserveCollectionReadOnlyPolicy(t *testing.T) {
 func TestOfflineMessageAndAttachmentReads(t *testing.T) {
 	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
 	application := serviceWithConnections(t, mailConnection("work"))
+	application.mailboxUIDValidity = func(context.Context, model.Connection, string) (uint32, error) { return 11, nil }
 	ledger, err := application.ensureState()
 	if err != nil {
 		t.Fatal(err)
@@ -601,6 +602,76 @@ func TestOfflineMessageAndAttachmentReads(t *testing.T) {
 	}
 	if _, _, err := application.GetAttachmentMode(ctx, "work", "INBOX", 7, "file", "offline"); err == nil {
 		t.Fatal("offline read reused a cached attachment after UIDVALIDITY changed")
+	}
+}
+
+func TestLiveAttachmentCacheValidatesUIDValidityAndPreservesMetadata(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	application := serviceWithConnections(t, mailConnection("work"))
+	uidValidity := uint32(11)
+	application.mailboxUIDValidity = func(context.Context, model.Connection, string) (uint32, error) { return uidValidity, nil }
+	fetches := 0
+	application.mailGetAttachment = func(model.Connection, string, uint32, string) (model.Attachment, []byte, uint32, error) {
+		fetches++
+		if uidValidity == 13 {
+			return model.Attachment{}, nil, 0, errors.New("provider message missing")
+		}
+		attachment := model.Attachment{ID: "file", Name: "report.pdf", ContentType: "application/pdf", Inline: true, ContentID: "report"}
+		return attachment, []byte(fmt.Sprintf("content-%d", uidValidity)), uidValidity, nil
+	}
+	ctx := context.Background()
+	for request := 0; request < 2; request++ {
+		attachment, data, err := application.GetAttachmentMode(ctx, "work", "INBOX", 7, "file", "")
+		if err != nil || attachment.Name != "report.pdf" || attachment.ContentType != "application/pdf" || !attachment.Inline || attachment.ContentID != "report" || string(data) != "content-11" {
+			t.Fatalf("attachment request %d = %#v %q, %v", request, attachment, data, err)
+		}
+	}
+	if fetches != 1 {
+		t.Fatalf("same-UIDVALIDITY continuation fetched provider %d times", fetches)
+	}
+	uidValidity = 12
+	_, data, err := application.GetAttachmentMode(ctx, "work", "INBOX", 7, "file", "")
+	if err != nil || string(data) != "content-12" || fetches != 2 {
+		t.Fatalf("changed UIDVALIDITY returned %q after %d fetches: %v", data, fetches, err)
+	}
+	uidValidity = 13
+	if _, staleData, err := application.GetAttachmentMode(ctx, "work", "INBOX", 7, "file", ""); err == nil || len(staleData) != 0 {
+		t.Fatalf("confirmed UIDVALIDITY mismatch returned old bytes %q: %v", staleData, err)
+	}
+}
+
+func TestPrepareMailActionResolvesDefaultFolderInPayloadAndPreview(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	connection := mailConnection("work")
+	connection.Mail.Folders.Inbox = "Primary"
+	application := serviceWithConnections(t, connection)
+	application.mailSnapshot = func(_ model.Connection, folder string, _ uint32) (postmail.MessagePrecondition, error) {
+		if folder != "Primary" {
+			t.Fatalf("snapshot folder = %q", folder)
+		}
+		return postmail.MessagePrecondition{UIDValidity: 1}, nil
+	}
+	seen := true
+	prepared, err := application.PrepareMailAction(context.Background(), "work", "mail.mark", MailAction{UID: 7, Seen: &seen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prepared.Preview["folder"] != "Primary" {
+		t.Fatalf("prepared preview folder = %#v", prepared.Preview["folder"])
+	}
+}
+
+func TestPrepareCalendarCreatePersistsGeneratedID(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	connection := model.Connection{ID: "work", Name: "Work", Calendar: &model.CalendarConfig{Kind: "caldav", URL: "http://localhost:5232", Username: "work", Secret: model.SecretRef{Env: "CALENDAR_PASSWORD"}, Collections: []model.CalendarCollection{{ID: "team", Path: "/work/team/"}}}}
+	application := serviceWithConnections(t, connection)
+	prepared, err := application.PrepareCalendarWrite(context.Background(), "work", "calendar.create", model.Event{CollectionID: "team", Title: "Planning", Start: instant(9), End: instant(10)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed, ok := prepared.Preview["changed_fields"].(model.Event)
+	if !ok || changed.ID == "" || !strings.HasPrefix(changed.ID, "posthouse-") {
+		t.Fatalf("prepared calendar identity = %#v", prepared.Preview["changed_fields"])
 	}
 }
 

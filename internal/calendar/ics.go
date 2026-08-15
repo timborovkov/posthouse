@@ -149,14 +149,24 @@ func ParseRange(data []byte, rangeStart, rangeEnd time.Time) ([]model.Event, err
 			}
 			continue
 		}
+		lookback := rangeStart.Add(-event.End.Sub(event.Start))
+		if event.AllDay {
+			lookback = rangeStart.AddDate(0, 0, -calendarDaySpan(event.Start, event.End))
+		}
 		set := &rrule.Set{}
-		set.DTStart(event.Start)
 		if event.RecurrenceRule != "" {
 			rule, err := rrule.StrToRRule("RRULE:" + event.RecurrenceRule)
 			if err != nil {
 				return nil, fmt.Errorf("parse RRULE for event %s: %w", event.ID, err)
 			}
+			rule.DTStart(event.Start)
+			rule, err = fastForwardRule(rule, lookback)
+			if err != nil {
+				return nil, fmt.Errorf("fast-forward RRULE for event %s: %w", event.ID, err)
+			}
 			set.RRule(rule)
+		} else {
+			set.DTStart(event.Start)
 		}
 		rdates := append([]time.Time{event.Start}, event.RecurrenceDates...)
 		periodEnds := make(map[string]time.Time, len(event.RecurrencePeriods))
@@ -166,10 +176,6 @@ func ParseRange(data []byte, rangeStart, rangeEnd time.Time) ([]model.Event, err
 		}
 		set.SetRDates(rdates)
 		set.SetExDates(event.ExceptionDates)
-		lookback := rangeStart.Add(-event.End.Sub(event.Start))
-		if event.AllDay {
-			lookback = rangeStart.AddDate(0, 0, -calendarDaySpan(event.Start, event.End))
-		}
 		next := set.Iterator()
 		generated := 0
 		for {
@@ -239,6 +245,37 @@ func ParseRange(data []byte, rangeStart, rangeEnd time.Time) ([]model.Event, err
 		return strings.Compare(a.ID, b.ID)
 	})
 	return result, nil
+}
+
+func fastForwardRule(rule *rrule.RRule, lookback time.Time) (*rrule.RRule, error) {
+	options := rule.OrigOptions
+	if options.Count != 0 || !options.Dtstart.Before(lookback) {
+		return rule, nil
+	}
+	var unit time.Duration
+	switch options.Freq {
+	case rrule.SECONDLY:
+		unit = time.Second
+	case rrule.MINUTELY:
+		unit = time.Minute
+	case rrule.HOURLY:
+		unit = time.Hour
+	default:
+		return rule, nil
+	}
+	interval := options.Interval
+	if interval < 1 {
+		interval = 1
+	}
+	steps := int64(lookback.Sub(options.Dtstart)/unit) / int64(interval)
+	if steps > 1 {
+		steps--
+	}
+	if steps == 0 {
+		return rule, nil
+	}
+	options.Dtstart = options.Dtstart.Add(time.Duration(steps*int64(interval)) * unit)
+	return rrule.NewRRule(options)
 }
 
 func clearRecurrenceSet(event *model.Event) {

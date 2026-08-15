@@ -312,6 +312,27 @@ END:VCALENDAR`
 	}
 }
 
+func TestParseRangeFastForwardsOldDenseRecurrence(t *testing.T) {
+	data := `BEGIN:VCALENDAR
+VERSION:2.0
+BEGIN:VEVENT
+UID:old-dense
+DTSTART:20260801T000000Z
+DTEND:20260801T000030Z
+RRULE:FREQ=MINUTELY
+SUMMARY:Old dense series
+END:VEVENT
+END:VCALENDAR`
+	start := time.Date(2026, 8, 15, 0, 0, 0, 0, time.UTC)
+	events, err := ParseRange([]byte(data), start, start.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 60 || !events[0].Start.Equal(start) || !events[59].Start.Equal(start.Add(59*time.Minute)) {
+		t.Fatalf("fast-forwarded recurrence returned %d events from %v to %v", len(events), events[0].Start, events[len(events)-1].Start)
+	}
+}
+
 func TestParseRangeKeepsLocalTimeAcrossDST(t *testing.T) {
 	data := `BEGIN:VCALENDAR
 VERSION:2.0
