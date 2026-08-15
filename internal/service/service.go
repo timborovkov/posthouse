@@ -397,6 +397,7 @@ func (s *Service) ListEvents(ctx context.Context, selection model.Selector, star
 
 func (s *Service) GetEvent(ctx context.Context, selection model.Selector, start, end time.Time, id string) (model.Event, error) {
 	cursor := ""
+	var match *model.Event
 	for {
 		page, err := s.ListEvents(ctx, selection, start, end, "", 500, cursor)
 		if err != nil {
@@ -404,10 +405,17 @@ func (s *Service) GetEvent(ctx context.Context, selection model.Selector, start,
 		}
 		for _, event := range page.Events {
 			if event.ID == id {
-				return event, nil
+				if match != nil {
+					return model.Event{}, fmt.Errorf("event %q is ambiguous across the selected sources; select one connection and collection", id)
+				}
+				matched := event
+				match = &matched
 			}
 		}
 		if page.NextCursor == "" {
+			if match != nil {
+				return *match, nil
+			}
 			return model.Event{}, fmt.Errorf("event %q was not found in the selected range", id)
 		}
 		cursor = page.NextCursor
@@ -511,8 +519,8 @@ func (s *Service) ListEventsMode(ctx context.Context, selection model.Selector, 
 			}
 		} else if mode != "offline" {
 			successfulSources++
-			completeSnapshot := !partialResult && strings.TrimSpace(query) == "" && len(selection.Collections) == 0
-			if cacheErr := s.cacheEvents(connection.ID, scope, events, start, end, completeSnapshot); cacheErr != nil {
+			replaceIndex := !partialResult && strings.TrimSpace(query) == "" && len(selection.Collections) == 0
+			if cacheErr := s.cacheEvents(connection.ID, scope, events, start, end, !partialResult, replaceIndex); cacheErr != nil {
 				pageErrors = append(pageErrors, sourceError(connection.ID, "cache_write_failed", cacheErr))
 			}
 		} else {
@@ -780,6 +788,9 @@ func (s *Service) PrepareCalendarWrite(ctx context.Context, connectionID, kind s
 	}
 	if err := calendar.ValidateCalDAVHref(connection, event.CollectionID, event.Href); err != nil {
 		return model.PreparedOperation{}, err
+	}
+	if _, _, err := calendar.Generate(event); err != nil {
+		return model.PreparedOperation{}, fmt.Errorf("validate calendar event: %w", err)
 	}
 	event.ConnectionID = connection.ID
 	return s.prepare(ctx, kind, connection, event, map[string]any{
@@ -1701,7 +1712,7 @@ func matchesCachedMessage(message model.Message, options postmail.SearchOptions)
 	return strings.Contains(strings.ToLower(searchable.String()), query)
 }
 
-func (s *Service) cacheEvents(connectionID string, scope any, events []model.Event, rangeStart, rangeEnd time.Time, complete bool) error {
+func (s *Service) cacheEvents(connectionID string, scope any, events []model.Event, rangeStart, rangeEnd time.Time, replaceScoped, replaceIndex bool) error {
 	ledger, err := s.ensureState()
 	if err != nil {
 		return err
@@ -1711,7 +1722,7 @@ func (s *Service) cacheEvents(connectionID string, scope any, events []model.Eve
 		events[index].CachedAt = now
 	}
 	scoped := append([]model.Event(nil), events...)
-	if !complete {
+	if !replaceScoped {
 		if entry, ok, getErr := ledger.Get(context.Background(), "events", scopedCacheKey(connectionID, scope), false); getErr == nil && ok {
 			var existing []model.Event
 			if json.Unmarshal(entry.Value, &existing) == nil {
@@ -1730,7 +1741,7 @@ func (s *Service) cacheEvents(connectionID string, scope any, events []model.Eve
 	if entry, ok, getErr := ledger.Get(context.Background(), "event_index", connectionID, false); getErr == nil && ok {
 		var existing []model.Event
 		if json.Unmarshal(entry.Value, &existing) == nil {
-			if complete {
+			if replaceIndex {
 				kept := existing[:0]
 				for _, event := range existing {
 					if !calendarEventOverlaps(event, rangeStart, rangeEnd) {

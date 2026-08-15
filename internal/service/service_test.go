@@ -315,15 +315,54 @@ func TestFilteredEventCacheDoesNotPruneOtherCollections(t *testing.T) {
 	application := serviceWithConnections(t, connection)
 	start, end := instant(8), instant(18)
 	all := []model.Event{{ID: "team", CollectionID: "team-id", Start: instant(9), End: instant(10)}, {ID: "personal", CollectionID: "personal-id", Start: instant(11), End: instant(12)}}
-	if err := application.cacheEvents(connection.ID, "all", all, start, end, true); err != nil {
+	if err := application.cacheEvents(connection.ID, "all", all, start, end, true, true); err != nil {
 		t.Fatal(err)
 	}
-	if err := application.cacheEvents(connection.ID, "team query", all[:1], start, end, false); err != nil {
+	if err := application.cacheEvents(connection.ID, "team query", all[:1], start, end, true, false); err != nil {
 		t.Fatal(err)
 	}
 	events, ok := application.cachedEvents(connection, "different scope", []string{"Personal"}, start, end, "")
 	if !ok || len(events) != 1 || events[0].ID != "personal" {
 		t.Fatalf("offline personal collection = %#v, %v", events, ok)
+	}
+}
+
+func TestFilteredEventCacheReplacesExactScopedResult(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	connection := calendarConnection("calendar", "Calendar")
+	application := serviceWithConnections(t, connection)
+	start, end := instant(8), instant(18)
+	old := []model.Event{{ID: "kept", Start: instant(9), End: instant(10)}, {ID: "deleted", Start: instant(11), End: instant(12)}}
+	if err := application.cacheEvents(connection.ID, "query", old, start, end, true, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.cacheEvents(connection.ID, "query", old[:1], start, end, true, false); err != nil {
+		t.Fatal(err)
+	}
+	events, ok := application.cachedEvents(connection, "query", nil, start, end, "")
+	if !ok || len(events) != 1 || events[0].ID != "kept" {
+		t.Fatalf("exact filtered cache = %#v, %v", events, ok)
+	}
+}
+
+func TestGetEventRejectsAmbiguousID(t *testing.T) {
+	application := serviceWithConnections(t, calendarConnection("work", "Work"), calendarConnection("personal", "Personal"))
+	feed := "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n" + eventFixture("shared", "Shared", "20260814T090000Z") + "END:VCALENDAR\r\n"
+	application.calendar = calendar.NewClient(&http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: make(http.Header), Body: io.NopCloser(strings.NewReader(feed))}, nil
+	})})
+	_, err := application.GetEvent(context.Background(), model.Selector{}, instant(8), instant(12), "shared")
+	if err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("GetEvent returned %v", err)
+	}
+}
+
+func TestPrepareCalendarWriteValidatesEventBeforeToken(t *testing.T) {
+	connection := model.Connection{ID: "work", Name: "Work", Calendar: &model.CalendarConfig{Kind: "caldav", URL: "http://localhost:5232", Username: "work", Secret: model.SecretRef{Env: "CALENDAR_PASSWORD"}, Collections: []model.CalendarCollection{{ID: "team", Path: "/work/team/"}}}}
+	application := serviceWithConnections(t, connection)
+	_, err := application.PrepareCalendarWrite(context.Background(), "work", "calendar.create", model.Event{CollectionID: "team", Start: instant(10), End: instant(9)})
+	if err == nil || !strings.Contains(err.Error(), "validate calendar event") {
+		t.Fatalf("PrepareCalendarWrite error = %v", err)
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"strings"
 	"testing"
@@ -183,9 +184,22 @@ func TestBasicAuthClientRejectsCrossOriginRequest(t *testing.T) {
 func TestCalDAVWriteTransportLossIsUncertain(t *testing.T) {
 	origin, _ := url.Parse("https://calendar.example.test/")
 	client := &basicAuthClient{origin: origin, client: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
-		return nil, fmt.Errorf("connection closed")
+		return nil, fmt.Errorf("connection refused")
 	})}}
 	request, _ := http.NewRequest(http.MethodPut, origin.String()+"team/event.ics", strings.NewReader("calendar"))
+	if _, err := doCalDAVMutation(client, request); err == nil {
+		t.Fatal("pre-send transport failure returned no error")
+	} else {
+		var uncertain *UncertainError
+		if errors.As(err, &uncertain) {
+			t.Fatalf("pre-send failure was uncertain: %v", err)
+		}
+	}
+	client.client.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		trace := httptrace.ContextClientTrace(request.Context())
+		trace.WroteRequest(httptrace.WroteRequestInfo{})
+		return nil, fmt.Errorf("connection closed")
+	})
 	_, err := doCalDAVMutation(client, request)
 	var uncertain *UncertainError
 	if !errors.As(err, &uncertain) {

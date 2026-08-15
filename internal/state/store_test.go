@@ -71,11 +71,14 @@ func TestGetPurgesExpiredEntry(t *testing.T) {
 	if err := store.Put(ctx, state.CacheEntry{Namespace: "message_body", Key: "expired", Kind: "message_body", ExpiresAt: time.Now().Add(-time.Minute), Value: []byte("expired secret")}); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok, err := store.Get(ctx, "message_body", "expired", false); err != nil || ok {
-		t.Fatalf("expired Get ok=%v err=%v", ok, err)
+	if err := store.Put(ctx, state.CacheEntry{Namespace: "message_body", Key: "live", Kind: "message_body", ExpiresAt: time.Now().Add(time.Hour), Value: []byte("live")}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := store.Get(ctx, "message_body", "live", false); err != nil || !ok {
+		t.Fatalf("unrelated live Get ok=%v err=%v", ok, err)
 	}
 	status, err := store.Stats(ctx)
-	if err != nil || status.Entries != 0 {
+	if err != nil || status.Entries != 1 {
 		t.Fatalf("expired entry was not purged: %#v, %v", status, err)
 	}
 }

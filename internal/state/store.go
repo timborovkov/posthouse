@@ -152,6 +152,10 @@ func OpenWithKey(path string, maxBytes int64, key []byte) (*Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	if err := store.purgeExpired(context.Background()); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	if err := os.Chmod(path, 0o600); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("secure state database: %w", err)
@@ -233,6 +237,9 @@ func (s *Store) Put(ctx context.Context, entry CacheEntry) error {
 	if entry.Namespace == "" || entry.Key == "" {
 		return fmt.Errorf("cache namespace and key are required")
 	}
+	if err := s.purgeExpired(ctx); err != nil {
+		return err
+	}
 	if entry.CachedAt.IsZero() {
 		entry.CachedAt = time.Now().UTC()
 	}
@@ -287,6 +294,9 @@ func (s *Store) Put(ctx context.Context, entry CacheEntry) error {
 func (s *Store) Get(ctx context.Context, namespace, key string, allowExpired bool) (CacheEntry, bool, error) {
 	s.keyMu.RLock()
 	defer s.keyMu.RUnlock()
+	if err := s.purgeExpired(ctx); err != nil {
+		return CacheEntry{}, false, err
+	}
 	keyHash := cacheKeyHash(namespace, key)
 	var entry CacheEntry
 	var id, cachedAt, expiresAt int64
@@ -331,6 +341,9 @@ func (s *Store) Get(ctx context.Context, namespace, key string, allowExpired boo
 }
 
 func (s *Store) Stats(ctx context.Context) (Stats, error) {
+	if err := s.purgeExpired(ctx); err != nil {
+		return Stats{}, err
+	}
 	stats := Stats{Path: s.path, MaxBytes: s.maxBytes}
 	var oldest, newest sql.NullInt64
 	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(SUM(size_bytes),0),MIN(cached_at),MAX(cached_at) FROM cache_entries`).Scan(&stats.Entries, &stats.Bytes, &oldest, &newest); err != nil {
@@ -348,6 +361,13 @@ func (s *Store) Stats(ctx context.Context) (Stats, error) {
 		stats.NewestEntry = time.Unix(newest.Int64, 0).UTC()
 	}
 	return stats, nil
+}
+
+func (s *Store) purgeExpired(ctx context.Context) error {
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM cache_entries WHERE expires_at < ?`, time.Now().Unix()); err != nil {
+		return fmt.Errorf("purge expired cache entries: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) Clear(ctx context.Context) error {

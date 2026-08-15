@@ -99,7 +99,8 @@ func SearchContext(ctx context.Context, connection model.Connection, options Sea
 	if options.ExpectedUIDValidity != 0 && selected.UIDValidity != options.ExpectedUIDValidity {
 		return SearchResult{}, fmt.Errorf("mailbox UIDVALIDITY changed; restart pagination")
 	}
-	criteria := &imap.SearchCriteria{Since: options.Since, Before: options.Before}
+	criteriaSince, criteriaBefore := imapSearchDateBounds(options.Since, options.Before)
+	criteria := &imap.SearchCriteria{Since: criteriaSince, Before: criteriaBefore}
 	if !options.CursorTime.IsZero() {
 		year, month, day := options.CursorTime.Date()
 		cursorDayEnd := time.Date(year, month, day+1, 0, 0, 0, 0, options.CursorTime.Location())
@@ -147,7 +148,11 @@ func SearchContext(ctx context.Context, connection model.Connection, options Sea
 		return SearchResult{Messages: []model.Message{}, UIDValidity: selected.UIDValidity, UIDNext: uint32(selected.UIDNext)}, nil
 	}
 	if providerOrdered {
-		uids = orderedUIDWindow(uids, options.CursorUID, options.Limit+1)
+		windowLimit := options.Limit + 1
+		if needsExactTimestampFilter(options.Since) || needsExactTimestampFilter(options.Before) {
+			windowLimit = 0
+		}
+		uids = orderedUIDWindow(uids, options.CursorUID, windowLimit)
 	}
 	candidates, err := fetchSearchCandidates(client, connection.ID, options, uids, providerOrdered)
 	if err != nil {
@@ -206,8 +211,33 @@ func orderedUIDWindow(uids []imap.UID, cursorUID uint32, limit int) []imap.UID {
 			return uids
 		}
 	}
-	end := min(start+limit, len(uids))
+	end := len(uids)
+	if limit > 0 {
+		end = min(start+limit, len(uids))
+	}
 	return uids[start:end]
+}
+
+func imapSearchDateBounds(since, before time.Time) (time.Time, time.Time) {
+	if !since.IsZero() {
+		since = dayStart(since)
+	}
+	if !before.IsZero() {
+		start := dayStart(before)
+		if !before.Equal(start) {
+			start = start.AddDate(0, 0, 1)
+		}
+		before = start
+	}
+	return since, before
+}
+
+func needsExactTimestampFilter(value time.Time) bool {
+	return !value.IsZero() && !value.Equal(dayStart(value))
+}
+
+func dayStart(value time.Time) time.Time {
+	return time.Date(value.Year(), value.Month(), value.Day(), 0, 0, 0, 0, value.Location())
 }
 
 func fetchSearchCandidates(client *imapclient.Client, connectionID string, options SearchOptions, uids []imap.UID, providerOrdered bool) ([]searchCandidate, error) {
@@ -237,6 +267,13 @@ func fetchSearchCandidates(client *imapclient.Client, connectionID string, optio
 				ReceivedAt:   item.InternalDate,
 				Unread:       !slices.Contains(item.Flags, imap.FlagSeen),
 				Flagged:      slices.Contains(item.Flags, imap.FlagFlagged),
+			}
+			when := messageTime(message)
+			if !options.Since.IsZero() && when.Before(options.Since) {
+				continue
+			}
+			if !options.Before.IsZero() && !when.Before(options.Before) {
+				continue
 			}
 			if !options.CursorTime.IsZero() && !messageBefore(boundary, message) {
 				continue

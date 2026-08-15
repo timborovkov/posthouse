@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"path"
 	"strings"
@@ -247,9 +248,18 @@ func DeleteCalDAVEvent(ctx context.Context, connection model.Connection, collect
 }
 
 func doCalDAVMutation(client *basicAuthClient, request *http.Request) (*http.Response, error) {
+	wroteRequest := false
+	trace := &httptrace.ClientTrace{WroteRequest: func(info httptrace.WroteRequestInfo) {
+		wroteRequest = info.Err == nil
+	}}
+	request = request.WithContext(httptrace.WithClientTrace(request.Context(), trace))
 	response, err := client.Do(request)
 	if err != nil {
-		return nil, &UncertainError{Err: safeTransportError("perform CalDAV mutation", err)}
+		wrapped := safeTransportError("perform CalDAV mutation", err)
+		if wroteRequest {
+			return nil, &UncertainError{Err: wrapped}
+		}
+		return nil, wrapped
 	}
 	return response, nil
 }

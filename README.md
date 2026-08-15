@@ -81,7 +81,7 @@ posthouse calendar list --collection team --start 2026-08-01T00:00:00Z
 
 # Fetch one body or attachment
 posthouse mail get --connection work --folder INBOX --uid 42
-posthouse mail attachment --connection work --folder INBOX --uid 42 --id 0 --output report.pdf
+posthouse mail attachment --connection work --folder INBOX --uid 42 --id 'ATTACHMENT_ID_FROM_MAIL_GET' --output report.pdf
 
 # Prepare, inspect, and execute a send
 posthouse mail send --connection work --to teammate@example.test --subject Status --body-file status.txt --attachment report.pdf
