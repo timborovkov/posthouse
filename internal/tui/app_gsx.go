@@ -652,12 +652,13 @@ func (p *posthouseApp) applyOperation(next operationSnapshot) {
 	}
 	p.operationCancel = nil
 	p.executingToken.Set("")
+	canReplaceModal := p.modal.Get() && p.pendingToken.Get() == ""
 	if next.err != nil {
 		p.errorText.Set("Execution failed: " + next.err.Error())
-		if p.modal.Get() {
+		if canReplaceModal {
 			p.modalText.Set("Execution failed\n\n" + next.err.Error())
 		}
-	} else if p.modal.Get() {
+	} else if canReplaceModal {
 		p.modalText.Set(fmt.Sprintf("Operation %s\n\nStatus: %s", next.result.Token, next.result.Status))
 	}
 	p.refresh()

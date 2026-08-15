@@ -104,6 +104,30 @@ END:VCALENDAR`
 	}
 }
 
+func TestLongRDATEPeriodDoesNotWidenDenseRRULEScan(t *testing.T) {
+	data := `BEGIN:VCALENDAR
+VERSION:2.0
+BEGIN:VEVENT
+UID:dense-with-long-period
+DTSTART:20260801T090000Z
+DTEND:20260801T100000Z
+RRULE:FREQ=MINUTELY
+RDATE;VALUE=PERIOD:20260814T090000Z/20260914T090000Z
+SUMMARY:Dense with long period
+END:VEVENT
+END:VCALENDAR`
+	start := time.Date(2026, 9, 14, 8, 0, 0, 0, time.UTC)
+	events, err := ParseRange([]byte(data), start, start.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The 119 minute-based occurrences that overlap the window still use the
+	// master's one-hour duration; the explicit month-long period adds one more.
+	if len(events) != 120 || events[0].Start.Day() != 14 || events[0].Start.Month() != time.August {
+		t.Fatalf("dense RRULE with long period returned %d events, first at %v", len(events), events[0].Start)
+	}
+}
+
 func TestParseMultipleEvents(t *testing.T) {
 	data := "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n" + eventFixture("one", "First", "20260814T090000Z", "20260814T100000Z") + eventFixture("two", "Second", "20260815T090000Z", "20260815T100000Z") + "END:VCALENDAR\r\n"
 	events, err := Parse([]byte(data))

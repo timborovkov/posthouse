@@ -93,6 +93,19 @@ func TestOperationExecutionRunsOffEventLoopAndIsCancellable(t *testing.T) {
 	}
 }
 
+func TestLateOperationResultDoesNotReplaceNewConfirmationPreview(t *testing.T) {
+	app := testApp(t)
+	defer app.close()
+	app.executingToken.Set("old")
+	app.pendingToken.Set("new")
+	app.modal.Set(true)
+	app.modalText.Set("new operation preview")
+	app.applyOperation(operationSnapshot{token: "old", result: model.OperationResult{Token: "old", Status: "succeeded"}})
+	if app.modalText.Get() != "new operation preview" || app.pendingToken.Get() != "new" || app.executingToken.Get() != "" {
+		t.Fatalf("late result changed preview=%q pending=%q executing=%q", app.modalText.Get(), app.pendingToken.Get(), app.executingToken.Get())
+	}
+}
+
 func TestComposePreparesExactPreviewBeforeConfirmation(t *testing.T) {
 	app := testAppWithMailConnection(t)
 	defer app.close()

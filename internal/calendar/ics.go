@@ -290,12 +290,12 @@ func recurrenceCandidateIntervals(master model.Event, overrides []futureOverride
 	if master.AllDay {
 		lookback = rangeStart.AddDate(0, 0, -calendarDaySpan(master.Start, master.End))
 	}
+	intervals := []recurrenceInterval{{start: lookback, end: rangeEnd}}
 	for _, period := range master.RecurrencePeriods {
-		if candidate := rangeStart.Add(-period.End.Sub(period.Start)); candidate.Before(lookback) {
-			lookback = candidate
+		if period.End.After(rangeStart) && period.Start.Before(rangeEnd) {
+			intervals = append(intervals, recurrenceInterval{start: period.Start, end: period.Start})
 		}
 	}
-	intervals := []recurrenceInterval{{start: lookback, end: rangeEnd}}
 	for index, override := range overrides {
 		delta := override.event.Start.Sub(override.original)
 		candidateStart := rangeStart.Add(-override.event.End.Sub(override.event.Start)).Add(-delta)

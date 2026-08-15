@@ -295,7 +295,7 @@ func (p *posthouseApp) confirmModal(ke tui.KeyEvent) {
 }
 
 func (p *posthouseApp) cancelModal() { if p.operationCancel!=nil { p.operationCancel(); p.operationCancel=nil }; p.modal.Set(false); p.pendingToken.Set("") }
-func (p *posthouseApp) applyOperation(next operationSnapshot) { if next.token!=p.executingToken.Get(){return}; p.operationCancel=nil; p.executingToken.Set(""); if next.err!=nil { p.errorText.Set("Execution failed: "+next.err.Error()); if p.modal.Get(){p.modalText.Set("Execution failed\n\n"+next.err.Error())} } else if p.modal.Get(){ p.modalText.Set(fmt.Sprintf("Operation %s\n\nStatus: %s",next.result.Token,next.result.Status)) }; p.refresh() }
+func (p *posthouseApp) applyOperation(next operationSnapshot) { if next.token!=p.executingToken.Get(){return}; p.operationCancel=nil; p.executingToken.Set(""); canReplaceModal:=p.modal.Get()&&p.pendingToken.Get()==""; if next.err!=nil { p.errorText.Set("Execution failed: "+next.err.Error()); if canReplaceModal {p.modalText.Set("Execution failed\n\n"+next.err.Error())} } else if canReplaceModal { p.modalText.Set(fmt.Sprintf("Operation %s\n\nStatus: %s",next.result.Token,next.result.Status)) }; p.refresh() }
 
 func appendError(current string, err error) string { if current=="" { return err.Error() }; return current+" · "+err.Error() }
 func formatDoctor(result model.DoctorResult) string { lines:=[]string{"Connection doctor: "+result.ConnectionID}; for _,check:=range result.Checks { lines=append(lines, fmt.Sprintf("%s  %-20s %s", strings.ToUpper(check.Status),check.Name,check.Message)) }; return strings.Join(lines,"\n") }
