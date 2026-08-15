@@ -1179,6 +1179,14 @@ func TestNormalizeEventRangeBoundsProviderQueries(t *testing.T) {
 	}
 }
 
+func TestListEventsRejectsInvertedRange(t *testing.T) {
+	application := serviceWithConnections(t, calendarConnection("calendar", "Calendar"))
+	_, err := application.ListEventsMode(context.Background(), model.Selector{}, instant(10), instant(9), "", 10, "", "refresh")
+	if err == nil || !strings.Contains(err.Error(), "end must be after start") {
+		t.Fatalf("ListEventsMode accepted inverted range: %v", err)
+	}
+}
+
 func TestDraftUpdateCleanupFailurePreservesAppendedUIDAsUncertain(t *testing.T) {
 	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
 	application := serviceWithConnections(t, mailConnection("work"))

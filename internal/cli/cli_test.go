@@ -64,8 +64,10 @@ func TestCalendarCancelPreservesCurrentSequence(t *testing.T) {
 	if !strings.Contains(output.String(), "METHOD:CANCEL") || !strings.Contains(output.String(), "SEQUENCE:4") {
 		t.Fatalf("cancellation ICS did not preserve sequence:\n%s", output.String())
 	}
-	if err := application.Run(context.Background(), []string{"calendar", "ics", "--id", "planning", "--sequence", "-1", "--title", "Planning", "--start", "2026-08-17T09:00:00Z", "--end", "2026-08-17T10:00:00Z"}); err == nil || !strings.Contains(err.Error(), "non-negative") {
-		t.Fatalf("negative sequence returned %v", err)
+	for _, invalid := range []string{"-1", "2147483648"} {
+		if err := application.Run(context.Background(), []string{"calendar", "ics", "--id", "planning", "--sequence", invalid, "--title", "Planning", "--start", "2026-08-17T09:00:00Z", "--end", "2026-08-17T10:00:00Z"}); err == nil || !strings.Contains(err.Error(), "2147483647") {
+			t.Fatalf("invalid sequence %s returned %v", invalid, err)
+		}
 	}
 }
 

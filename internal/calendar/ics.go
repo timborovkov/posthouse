@@ -580,6 +580,13 @@ func Generate(event model.Event) (model.Event, string, error) {
 	if event.Start.IsZero() || event.End.IsZero() || !event.End.After(event.Start) {
 		return model.Event{}, "", fmt.Errorf("event end must be after start")
 	}
+	if event.AllDay {
+		startDate := time.Date(event.Start.Year(), event.Start.Month(), event.Start.Day(), 0, 0, 0, 0, time.UTC)
+		endDate := time.Date(event.End.Year(), event.End.Month(), event.End.Day(), 0, 0, 0, 0, time.UTC)
+		if !endDate.After(startDate) {
+			return model.Event{}, "", fmt.Errorf("all-day event end date must be after start date")
+		}
+	}
 	if event.RecurrenceRange != "" {
 		if event.RecurrenceID == "" || !strings.EqualFold(event.RecurrenceRange, "THISANDFUTURE") {
 			return model.Event{}, "", fmt.Errorf("recurrence range must be THISANDFUTURE on a recurrence override")

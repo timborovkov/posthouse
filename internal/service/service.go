@@ -465,6 +465,9 @@ func (s *Service) ListEventsMode(ctx context.Context, selection model.Selector, 
 		}
 	}
 	start, end = normalizeEventRange(start, end, s.now())
+	if !end.After(start) {
+		return model.EventPage{}, fmt.Errorf("calendar range end must be after start")
+	}
 	scope := struct {
 		Selector      model.Selector `json:"selector"`
 		ConnectionIDs []string       `json:"connection_ids"`

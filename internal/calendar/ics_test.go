@@ -53,6 +53,17 @@ func TestGenerateUsesDateValuesForAllDayRecurrenceProperties(t *testing.T) {
 	}
 }
 
+func TestGenerateRejectsZeroLengthFormattedAllDayRange(t *testing.T) {
+	event := model.Event{ID: "day", Title: "Day", AllDay: true, Start: time.Date(2026, 8, 15, 9, 0, 0, 0, time.UTC), End: time.Date(2026, 8, 15, 10, 0, 0, 0, time.UTC)}
+	if _, _, err := Generate(event); err == nil || !strings.Contains(err.Error(), "end date") {
+		t.Fatalf("Generate accepted zero-length all-day range: %v", err)
+	}
+	event.End = time.Date(2026, 8, 16, 0, 0, 0, 0, time.UTC)
+	if _, _, err := Generate(event); err != nil {
+		t.Fatalf("Generate rejected one-day all-day range: %v", err)
+	}
+}
+
 func TestParseRangePreservesRDATEPeriodDurations(t *testing.T) {
 	data := `BEGIN:VCALENDAR
 VERSION:2.0
