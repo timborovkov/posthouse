@@ -656,6 +656,42 @@ func TestFilteredEventCacheReplacesExactScopedResult(t *testing.T) {
 	}
 }
 
+func TestEventIndexDoesNotRenewRetainedEventAge(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	connection := calendarConnection("calendar", "Calendar")
+	application := serviceWithConnections(t, connection)
+	cfg, err := application.store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Cache.EventPastDays = 1
+	cfg.Cache.EventFutureDays = 1
+	if err := application.store.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	base := time.Now().UTC().Truncate(time.Hour)
+	now := base
+	application.now = func() time.Time { return now }
+	rangeStart, rangeEnd := base, base.Add(24*time.Hour)
+	old := model.Event{ID: "old", Start: base.Add(9 * time.Hour), End: base.Add(10 * time.Hour)}
+	if err := application.cacheEvents(connection.ID, "old", []model.Event{old}, rangeStart, rangeEnd, true, false); err != nil {
+		t.Fatal(err)
+	}
+	now = base.Add(12 * time.Hour)
+	fresh := model.Event{ID: "fresh", Start: base.Add(11 * time.Hour), End: base.Add(12 * time.Hour)}
+	if err := application.cacheEvents(connection.ID, "fresh", []model.Event{fresh}, rangeStart, rangeEnd, true, false); err != nil {
+		t.Fatal(err)
+	}
+	now = base.Add(25 * time.Hour)
+	events, ok, _ := application.cachedEvents(connection, "missing", nil, rangeStart, rangeEnd, "")
+	if !ok || len(events) != 1 || events[0].ID != "fresh" {
+		t.Fatalf("aged event index = %#v, %v", events, ok)
+	}
+	if !events[0].CachedAt.Equal(base.Add(12 * time.Hour)) {
+		t.Fatalf("fresh event cached_at = %v", events[0].CachedAt)
+	}
+}
+
 func TestGetEventRejectsAmbiguousID(t *testing.T) {
 	application := serviceWithConnections(t, calendarConnection("work", "Work"), calendarConnection("personal", "Personal"))
 	feed := "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n" + eventFixture("shared", "Shared", "20260814T090000Z") + "END:VCALENDAR\r\n"

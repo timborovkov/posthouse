@@ -293,10 +293,7 @@ type recurrenceInterval struct {
 }
 
 func recurrenceCandidateIntervals(master model.Event, overrides []futureOverride, rangeStart, rangeEnd time.Time) []recurrenceInterval {
-	lookback := rangeStart.Add(-master.End.Sub(master.Start))
-	if master.AllDay {
-		lookback = rangeStart.AddDate(0, 0, -calendarDaySpan(master.Start, master.End))
-	}
+	lookback := recurrenceLookback(master, rangeStart)
 	intervals := []recurrenceInterval{{start: lookback, end: rangeEnd}}
 	for _, period := range master.RecurrencePeriods {
 		if period.End.After(rangeStart) && period.Start.Before(rangeEnd) {
@@ -305,7 +302,7 @@ func recurrenceCandidateIntervals(master model.Event, overrides []futureOverride
 	}
 	for index, override := range overrides {
 		delta := override.event.Start.Sub(override.original)
-		candidateStart := rangeStart.Add(-override.event.End.Sub(override.event.Start)).Add(-delta)
+		candidateStart := recurrenceLookback(override.event, rangeStart).Add(-delta)
 		shiftedEnd := rangeEnd.Add(-delta)
 		applicabilityStart := override.original
 		var applicabilityEnd time.Time
@@ -337,6 +334,20 @@ func recurrenceCandidateIntervals(master model.Event, overrides []futureOverride
 		}
 	}
 	return merged
+}
+
+func recurrenceLookback(event model.Event, boundary time.Time) time.Time {
+	if event.AllDay {
+		return boundary.In(event.Start.Location()).AddDate(0, 0, -calendarDaySpan(event.Start, event.End))
+	}
+	if event.Duration != "" {
+		if duration, err := parseDuration(event.Duration); err == nil && duration.sign > 0 {
+			// addDuration applies calendar days before clock time, so invert those
+			// operations in reverse order in the event's timezone.
+			return boundary.In(event.Start.Location()).Add(-duration.clock).AddDate(0, 0, -duration.days)
+		}
+	}
+	return boundary.Add(-event.End.Sub(event.Start))
 }
 
 type futureOverride struct {

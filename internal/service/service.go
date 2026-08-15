@@ -2478,6 +2478,10 @@ func (s *Service) cacheEventsReplacingWithID(connection model.Connection, cacheI
 		index := append([]model.Event(nil), events...)
 		var existing []model.Event
 		if found && json.Unmarshal(current, &existing) == nil {
+			oldest := now.Add(-s.eventTTL())
+			existing = slices.DeleteFunc(existing, func(event model.Event) bool {
+				return event.CachedAt.IsZero() || event.CachedAt.Before(oldest)
+			})
 			if replaceIndex {
 				kept := existing[:0]
 				for _, event := range existing {
@@ -2534,6 +2538,9 @@ func (s *Service) cachedEvents(connection model.Connection, scope any, collectio
 	query = strings.ToLower(strings.TrimSpace(query))
 	collectionIDs := selectedCollectionIDs(connection, collections)
 	for _, event := range events {
+		if fromIndex && (event.CachedAt.IsZero() || event.CachedAt.Before(s.now().Add(-s.eventTTL()))) {
+			continue
+		}
 		if fromIndex && len(collectionIDs) > 0 && !slices.ContainsFunc(collectionIDs, func(value string) bool { return strings.EqualFold(value, event.CollectionID) }) {
 			continue
 		}
@@ -2543,7 +2550,9 @@ func (s *Service) cachedEvents(connection model.Connection, scope any, collectio
 		if query != "" && !strings.Contains(strings.ToLower(event.Title+" "+event.Description+" "+event.Location), query) {
 			continue
 		}
-		event.CachedAt = entry.CachedAt
+		if !fromIndex {
+			event.CachedAt = entry.CachedAt
+		}
 		if len(partialErrors) > 0 {
 			event.Stale = true
 		}

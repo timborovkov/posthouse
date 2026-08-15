@@ -332,6 +332,9 @@ func ValidateCalDAVETag(value string) error {
 }
 
 func GenerateInvitation(event model.Event, cancel bool) (model.Event, string, error) {
+	if cancel {
+		event.Status = "CANCELLED"
+	}
 	generated, data, err := Generate(event)
 	if err != nil {
 		return model.Event{}, "", err
@@ -350,9 +353,6 @@ func GenerateInvitation(event model.Event, cancel bool) (model.Event, string, er
 		if line == "BEGIN:VEVENT" {
 			if event.Sequence == 0 {
 				output = append(output, "SEQUENCE:0")
-			}
-			if cancel {
-				output = append(output, "STATUS:CANCELLED")
 			}
 		}
 	}

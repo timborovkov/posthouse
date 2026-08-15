@@ -931,6 +931,54 @@ func TestRecurringAllDayEndUsesCalendarDaysAcrossDST(t *testing.T) {
 	}
 }
 
+func TestParseRangeLooksBackByCalendarDurationAcrossDST(t *testing.T) {
+	location, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rangeStart := time.Date(2026, 3, 9, 8, 30, 0, 0, location)
+	rangeEnd := time.Date(2026, 3, 9, 8, 45, 0, 0, location)
+	for name, data := range map[string]string{
+		"master": `BEGIN:VCALENDAR
+VERSION:2.0
+BEGIN:VEVENT
+UID:duration-master
+DTSTART;TZID=America/New_York:20260307T090000
+DURATION:P1D
+RRULE:FREQ=DAILY;COUNT=2
+SUMMARY:Calendar day
+END:VEVENT
+END:VCALENDAR`,
+		"future override": `BEGIN:VCALENDAR
+VERSION:2.0
+BEGIN:VEVENT
+UID:duration-override
+DTSTART;TZID=America/New_York:20260301T090000
+DTEND;TZID=America/New_York:20260301T100000
+RRULE:FREQ=DAILY;COUNT=10
+SUMMARY:Short master
+END:VEVENT
+BEGIN:VEVENT
+UID:duration-override
+RECURRENCE-ID;TZID=America/New_York;RANGE=THISANDFUTURE:20260307T090000
+DTSTART;TZID=America/New_York:20260307T090000
+DURATION:P1D
+SUMMARY:Calendar-day override
+END:VEVENT
+END:VCALENDAR`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			events, err := ParseRange([]byte(data), rangeStart, rangeEnd)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(events) != 1 || events[0].Start.Day() != 8 || events[0].Start.Hour() != 9 || events[0].End.Day() != 9 || events[0].End.Hour() != 9 {
+				t.Fatalf("overlapping occurrence = %#v", events)
+			}
+		})
+	}
+}
+
 func TestParseRangeSuppressesCancelledRecurringMaster(t *testing.T) {
 	data := `BEGIN:VCALENDAR
 VERSION:2.0
@@ -1088,6 +1136,20 @@ func TestParseAllDayAndGenerateInvitation(t *testing.T) {
 		if !strings.Contains(invitation, want) {
 			t.Fatalf("invitation missing %q:\n%s", want, invitation)
 		}
+	}
+}
+
+func TestGenerateCancellationReturnsMatchingStatus(t *testing.T) {
+	event := model.Event{ID: "invite", Title: "Planning", Status: "CONFIRMED", Start: time.Date(2026, 8, 20, 9, 0, 0, 0, time.UTC), End: time.Date(2026, 8, 20, 10, 0, 0, 0, time.UTC)}
+	generated, invitation, err := GenerateInvitation(event, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if generated.Status != "CANCELLED" {
+		t.Fatalf("generated cancellation status = %q", generated.Status)
+	}
+	if got := strings.Count(invitation, "STATUS:CANCELLED"); got != 1 || strings.Contains(invitation, "STATUS:CONFIRMED") {
+		t.Fatalf("cancellation status properties = %d:\n%s", got, invitation)
 	}
 }
 
