@@ -158,7 +158,7 @@ export POSTHOUSE_CACHE_KEY='a-base64-or-hex-encoded-32-byte-key'
 posthouse mcp http --address 127.0.0.1:8791
 ```
 
-The endpoint is `/mcp`. `/healthz` reports process liveness; `/readyz` checks configuration, cache migration/key availability, and initialized internal services. Provider connectivity belongs to `connection_doctor` and `sync`, not readiness. The direct server is restricted to loopback because it serves HTTP; expose it remotely only through a TLS-terminating reverse proxy forwarding to the loopback listener, and retain bearer-token authentication.
+The endpoint is `/mcp`. `/healthz` reports process liveness; `/readyz` checks configuration, cache migration/key availability, and initialized internal services. Provider connectivity belongs to `connection_doctor` and `sync`, not readiness. The direct server is restricted to loopback because it serves HTTP; expose it remotely only through a TLS-terminating reverse proxy forwarding to the loopback listener, and retain bearer-token authentication. `--allow-container-listener` exists only for a container whose published port is externally constrained to loopback or protected by TLS; the supplied Compose file uses it with a `127.0.0.1` host publication.
 
 The typed tool surface includes connection listing/doctor; message search/body/attachment reads; send, reply, forward, draft, and message-action preparation; event listing/ICS/CRUD preparation; operation show/execute; sync; and cache status. Tool errors are for invalid requests or total failure; successful multi-source reads carry structured partial errors and stale/cache timestamps in their result.
 
@@ -178,6 +178,7 @@ Development needs no real provider accounts. [docker-compose.test.yml](./docker-
 
 ```sh
 make test              # race-enabled unit tests, no Docker
+make test-container    # production image plus Compose topology
 make test-integration  # SMTP/IMAP and CalDAV protocol suites
 make test-e2e          # built-binary CLI and MCP workflows
 make validate          # Docker-free local gate

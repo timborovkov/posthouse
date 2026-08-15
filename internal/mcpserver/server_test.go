@@ -145,8 +145,16 @@ func TestAuthenticate(t *testing.T) {
 
 func TestRunHTTPRejectsNonLoopbackEvenWithToken(t *testing.T) {
 	server := New(nil)
-	err := server.RunHTTP(context.Background(), "0.0.0.0:8791", "secret", slog.Default())
+	err := server.RunHTTP(context.Background(), "0.0.0.0:8791", "secret", false, slog.Default())
 	if err == nil || !strings.Contains(err.Error(), "must listen on loopback") {
 		t.Fatalf("RunHTTP non-loopback error = %v", err)
+	}
+}
+
+func TestRunHTTPContainerListenerStillRequiresToken(t *testing.T) {
+	server := New(nil)
+	err := server.RunHTTP(context.Background(), "0.0.0.0:8791", "", true, slog.Default())
+	if err == nil || !strings.Contains(err.Error(), "TOKEN is required") {
+		t.Fatalf("RunHTTP container-listener error = %v", err)
 	}
 }

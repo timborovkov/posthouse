@@ -1,6 +1,7 @@
 services:
   posthouse:
     build: .
+    command: ["--config", "/data/config.json", "mcp", "http", "--address", "0.0.0.0:8791", "--allow-container-listener"]
     restart: unless-stopped
     ports:
       - "127.0.0.1:8791:8791"

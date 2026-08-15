@@ -616,11 +616,12 @@ func (c *CLI) mcp(ctx context.Context, args []string) error {
 		flags := flag.NewFlagSet("mcp http", flag.ContinueOnError)
 		flags.SetOutput(c.stderr)
 		address := flags.String("address", "127.0.0.1:8791", "listen address")
+		allowContainerListener := flags.Bool("allow-container-listener", false, "allow cleartext non-loopback binding inside an externally loopback- or TLS-constrained container network")
 		if err := flags.Parse(args[1:]); err != nil {
 			return err
 		}
 		logger := slog.New(slog.NewJSONHandler(c.stderr, nil))
-		return server.RunHTTP(ctx, *address, os.Getenv("POSTHOUSE_MCP_TOKEN"), logger)
+		return server.RunHTTP(ctx, *address, os.Getenv("POSTHOUSE_MCP_TOKEN"), *allowContainerListener, logger)
 	default:
 		return fmt.Errorf("unknown MCP transport %q", args[0])
 	}

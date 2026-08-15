@@ -37,13 +37,16 @@ func (s *Server) RunStdio(ctx context.Context) error {
 	return s.mcp.Run(ctx, &mcp.StdioTransport{})
 }
 
-func (s *Server) RunHTTP(ctx context.Context, address string, token string, logger *slog.Logger) error {
+func (s *Server) RunHTTP(ctx context.Context, address string, token string, allowContainerListener bool, logger *slog.Logger) error {
 	host, _, err := net.SplitHostPort(address)
 	if err != nil {
 		return fmt.Errorf("invalid HTTP address %q: %w", address, err)
 	}
-	if !isLoopback(host) {
+	if !isLoopback(host) && !allowContainerListener {
 		return fmt.Errorf("direct MCP HTTP must listen on loopback; use a TLS-terminating reverse proxy for remote access")
+	}
+	if !isLoopback(host) && token == "" {
+		return fmt.Errorf("POSTHOUSE_MCP_TOKEN is required for an explicitly allowed container listener")
 	}
 	handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return s.mcp }, &mcp.StreamableHTTPOptions{
 		Stateless: true, JSONResponse: true, Logger: logger, SessionTimeout: 5 * time.Minute,

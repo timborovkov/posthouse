@@ -1,4 +1,4 @@
-.PHONY: build generate generate-check format test test-integration test-e2e vet validate validate-all clean
+.PHONY: build generate generate-check format test test-container test-integration test-e2e vet validate validate-all clean
 
 GOCACHE ?= /tmp/posthouse-go-cache
 
@@ -18,6 +18,10 @@ format:
 test:
 	GOCACHE=$(GOCACHE) go test -race ./...
 
+test-container:
+	POSTHOUSE_MCP_TOKEN=test-token POSTHOUSE_CACHE_KEY=0000000000000000000000000000000000000000000000000000000000000000 docker compose config --quiet
+	docker build -t posthouse:validate .
+
 test-integration:
 	./scripts/test-protocols.sh integration
 
@@ -31,7 +35,7 @@ validate: vet test
 	test -z "$$(gofmt -l cmd internal)"
 	CGO_ENABLED=0 GOCACHE=$(GOCACHE) go build -o /tmp/posthouse-validate ./cmd/posthouse
 
-validate-all: validate generate-check test-integration test-e2e
+validate-all: validate generate-check test-container test-integration test-e2e
 
 clean:
 	rm -rf bin

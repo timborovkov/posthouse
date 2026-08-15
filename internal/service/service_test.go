@@ -32,7 +32,7 @@ func TestListConnectionsCursorPagination(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first page returned error: %v", err)
 	}
-	if len(first.Connections) != 2 || first.Connections[0].ID != "a" || first.Connections[1].ID != "b" || first.NextCursor == "" {
+	if len(first.Connections) != 2 || first.Connections[0].ID != "a" || first.Connections[1].ID != "b" || first.NextCursor == "" || first.Connections[0].Calendar.URL != "" {
 		t.Fatalf("first page is %#v", first)
 	}
 	second, err := application.ListConnections(model.Selector{}, 2, first.NextCursor)
@@ -284,7 +284,21 @@ func TestReplacingProviderAndRemovingConnectionInvalidateCachedContent(t *testin
 	if _, found, err := ledger.Get(context.Background(), "message_body", "work-old-provider", true); err != nil || !found {
 		t.Fatalf("metadata-only update removed cache: found=%v err=%v", found, err)
 	}
+	invalid := work
+	mailCopy := *work.Mail
+	invalid.Mail = &mailCopy
+	invalid.Mail.SentCopy = "always"
+	if err := application.UpsertConnection(invalid, true); err == nil {
+		t.Fatal("invalid provider replacement succeeded")
+	}
+	if _, found, err := ledger.Get(context.Background(), "message_body", "work-old-provider", true); err != nil || !found {
+		t.Fatalf("invalid replacement removed cache: found=%v err=%v", found, err)
+	}
 
+	oldProvider, err := application.exactConnection("work", "mail.read")
+	if err != nil {
+		t.Fatal(err)
+	}
 	work.Mail.IMAP.Address = "localhost:1143"
 	if err := application.UpsertConnection(work, true); err != nil {
 		t.Fatal(err)
@@ -295,6 +309,13 @@ func TestReplacingProviderAndRemovingConnectionInvalidateCachedContent(t *testin
 	if _, found, err := ledger.Get(context.Background(), "message_body", "personal", true); err != nil || !found {
 		t.Fatalf("provider replacement removed unrelated cache: found=%v err=%v", found, err)
 	}
+	options := postmail.SearchOptions{}
+	if err := application.cacheMailResultFor(oldProvider, "INBOX", "old in-flight request", options, postmail.SearchResult{UIDValidity: 1, Messages: []model.Message{{ConnectionID: "work", UID: 1, Subject: "old provider"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if result, found := application.cachedMailResult("work", "INBOX", "old in-flight request", options, mailCursorState{}, 10); found || len(result.Messages) != 0 {
+		t.Fatalf("replacement read old in-flight cache: found=%v result=%#v", found, result)
+	}
 
 	put("work-before-remove", "work")
 	if err := application.RemoveConnection("work"); err != nil {
@@ -302,6 +323,53 @@ func TestReplacingProviderAndRemovingConnectionInvalidateCachedContent(t *testin
 	}
 	if _, found, err := ledger.Get(context.Background(), "message_body", "work-before-remove", true); err != nil || found {
 		t.Fatalf("connection removal retained cache: found=%v err=%v", found, err)
+	}
+}
+
+func TestCanonicalProviderDefaultsDoNotInvalidateCache(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	connection := calendarConnection("calendar", "Calendar")
+	application := serviceWithConnections(t, connection)
+	ledger, err := application.ensureState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ledger.Put(context.Background(), state.CacheEntry{Namespace: "events", Key: "calendar-cache", ConnectionID: "calendar", Kind: "event", Value: []byte("private event")}); err != nil {
+		t.Fatal(err)
+	}
+	connection.Calendar.Kind = "feed"
+	connection.Calendar.Collections = []model.CalendarCollection{}
+	if err := application.UpsertConnection(connection, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := ledger.Get(context.Background(), "events", "calendar-cache", true); err != nil || !found {
+		t.Fatalf("canonical defaults removed cache: found=%v err=%v", found, err)
+	}
+}
+
+func TestInFlightCalendarWriteCannotPopulateReplacementCache(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	connection := calendarConnection("calendar", "Calendar")
+	application := serviceWithConnections(t, connection)
+	oldProvider, err := application.exactConnection("calendar", "calendar.read")
+	if err != nil {
+		t.Fatal(err)
+	}
+	connection.Calendar.URL = "http://localhost/replacement.ics"
+	if err := application.UpsertConnection(connection, true); err != nil {
+		t.Fatal(err)
+	}
+	start, end := instant(8), instant(12)
+	events := []model.Event{{ConnectionID: "calendar", ID: "old", Title: "Old provider", Start: instant(9), End: instant(10)}}
+	if err := application.cacheEventsReplacingFor(oldProvider, "race", events, start, end, true, true, nil); err != nil {
+		t.Fatal(err)
+	}
+	current, err := application.exactConnection("calendar", "calendar.read")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cached, found := application.cachedEvents(current, "race", nil, start, end, ""); found || len(cached) != 0 {
+		t.Fatalf("replacement read old in-flight events: found=%v events=%#v", found, cached)
 	}
 }
 
@@ -669,16 +737,21 @@ func TestOfflineMessageAndAttachmentReads(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	connection, err := application.exactConnection("work", "mail.read")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cacheID := providerCacheID(connection)
 	detail := model.MessageDetail{Message: model.Message{ConnectionID: "work", Folder: "INBOX", UID: 7, Subject: "cached"}, Text: "offline body", Attachments: []model.Attachment{{ID: "file", Name: "file.txt", ContentType: "text/plain", Size: 7}}}
 	data, _ := json.Marshal(detail)
 	ctx := context.Background()
 	if err := application.cacheMailboxUIDValidity(ledger, "work", "INBOX", 11); err != nil {
 		t.Fatal(err)
 	}
-	if err := ledger.Put(ctx, state.CacheEntry{Namespace: "message_body", Key: messageCacheKey("work", "INBOX", 11, 7), Kind: "message_body", CachedAt: time.Now(), Value: data}); err != nil {
+	if err := ledger.Put(ctx, state.CacheEntry{Namespace: "message_body", Key: messageCacheKey(cacheID, "INBOX", 11, 7), Kind: "message_body", CachedAt: time.Now(), Value: data}); err != nil {
 		t.Fatal(err)
 	}
-	if err := ledger.Put(ctx, state.CacheEntry{Namespace: "attachment", Key: messageCacheKey("work", "INBOX", 11, 7) + "/file", Kind: "attachment", CachedAt: time.Now(), Value: []byte("content")}); err != nil {
+	if err := ledger.Put(ctx, state.CacheEntry{Namespace: "attachment", Key: messageCacheKey(cacheID, "INBOX", 11, 7) + "/file", Kind: "attachment", CachedAt: time.Now(), Value: []byte("content")}); err != nil {
 		t.Fatal(err)
 	}
 	cachedAttachment, cachedContent, err := application.GetAttachmentMode(ctx, "work", "INBOX", 7, "file", "")
@@ -725,7 +798,11 @@ func TestMailboxUIDValidityLivesAsLongAsBodyCache(t *testing.T) {
 	if err := application.cacheMailboxUIDValidity(ledger, "work", "INBOX", 11); err != nil {
 		t.Fatal(err)
 	}
-	entry, ok, err := ledger.Get(context.Background(), "mailbox_uidvalidity", mailboxCacheKey("work", "INBOX"), true)
+	connection, err := application.exactConnection("work", "mail.read")
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry, ok, err := ledger.Get(context.Background(), "mailbox_uidvalidity", mailboxCacheKey(providerCacheID(connection), "INBOX"), true)
 	if err != nil || !ok {
 		t.Fatalf("UIDVALIDITY cache entry = %#v, %v", entry, err)
 	}
@@ -791,9 +868,13 @@ func TestMessageFetchReceivesContextAndRejectsOldMailboxCache(t *testing.T) {
 	if err := application.cacheMailboxUIDValidity(ledger, "work", "INBOX", 11); err != nil {
 		t.Fatal(err)
 	}
+	connection, err := application.exactConnection("work", "mail.read")
+	if err != nil {
+		t.Fatal(err)
+	}
 	cached := model.MessageDetail{Message: model.Message{ConnectionID: "work", Folder: "INBOX", UID: 7, Subject: "old mailbox"}}
 	data, _ := json.Marshal(cached)
-	if err := ledger.Put(context.Background(), state.CacheEntry{Namespace: "message_body", Key: messageCacheKey("work", "INBOX", 11, 7), Kind: "message_body", ExpiresAt: time.Now().Add(time.Hour), Value: data}); err != nil {
+	if err := ledger.Put(context.Background(), state.CacheEntry{Namespace: "message_body", Key: messageCacheKey(providerCacheID(connection), "INBOX", 11, 7), Kind: "message_body", ExpiresAt: time.Now().Add(time.Hour), Value: data}); err != nil {
 		t.Fatal(err)
 	}
 	application.mailboxUIDValidity = func(context.Context, model.Connection, string) (uint32, error) { return 12, nil }

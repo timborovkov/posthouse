@@ -69,18 +69,17 @@ func (s *Store) Load() (model.Config, error) {
 	if cfg.Version != currentVersion {
 		return model.Config{}, fmt.Errorf("unsupported config version %d", cfg.Version)
 	}
-	applyDefaults(&cfg)
-	if err := Validate(cfg); err != nil {
+	cfg, err = Normalize(cfg)
+	if err != nil {
 		return model.Config{}, err
 	}
 	return cfg, nil
 }
 
 func (s *Store) Save(cfg model.Config) error {
-	cfg.Version = currentVersion
-	normalizeLegacyRefs(&cfg)
-	applyDefaults(&cfg)
-	if err := Validate(cfg); err != nil {
+	var err error
+	cfg, err = Normalize(cfg)
+	if err != nil {
 		return err
 	}
 	sort.Slice(cfg.Connections, func(i, j int) bool { return cfg.Connections[i].ID < cfg.Connections[j].ID })
@@ -123,6 +122,23 @@ func (s *Store) Save(cfg model.Config) error {
 	}
 	removeTemporary = false
 	return nil
+}
+
+// Normalize returns the canonical configuration representation used for
+// validation, persistence, and provider-identity comparisons.
+func Normalize(cfg model.Config) (model.Config, error) {
+	cfg.Version = currentVersion
+	normalizeLegacyRefs(&cfg)
+	applyDefaults(&cfg)
+	for index := range cfg.Connections {
+		if cfg.Connections[index].Calendar != nil && len(cfg.Connections[index].Calendar.Collections) == 0 {
+			cfg.Connections[index].Calendar.Collections = nil
+		}
+	}
+	if err := Validate(cfg); err != nil {
+		return model.Config{}, err
+	}
+	return cfg, nil
 }
 
 func (s *Store) backupV1(data []byte) error {

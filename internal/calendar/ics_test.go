@@ -128,6 +128,18 @@ END:VCALENDAR`
 	}
 }
 
+func TestGenerateRejectsInvalidRecurrencePeriods(t *testing.T) {
+	at := func(hour int) time.Time { return time.Date(2026, 8, 14, hour, 0, 0, 0, time.UTC) }
+	event := model.Event{Title: "Invalid period", Start: at(9), End: at(10), RecurrencePeriods: []model.RecurrencePeriod{{Start: at(12), End: at(11)}}}
+	if _, _, err := Generate(event); err == nil || !strings.Contains(err.Error(), "recurrence period 1 end must be after start") {
+		t.Fatalf("Generate invalid period error = %v", err)
+	}
+	event.RecurrencePeriods[0] = model.RecurrencePeriod{Start: at(12)}
+	if _, _, err := Generate(event); err == nil || !strings.Contains(err.Error(), "recurrence period 1 end must be after start") {
+		t.Fatalf("Generate zero period end error = %v", err)
+	}
+}
+
 func TestParseMultipleEvents(t *testing.T) {
 	data := "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n" + eventFixture("one", "First", "20260814T090000Z", "20260814T100000Z") + eventFixture("two", "Second", "20260815T090000Z", "20260815T100000Z") + "END:VCALENDAR\r\n"
 	events, err := Parse([]byte(data))

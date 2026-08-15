@@ -12,7 +12,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -115,7 +114,7 @@ func (s *Service) Connections(selection model.Selector) ([]model.Connection, err
 		result := make([]model.Connection, 0, len(cfg.Connections))
 		for _, connection := range cfg.Connections {
 			if !connection.Disabled {
-				result = append(result, publicConnection(connection))
+				result = append(result, connection)
 			}
 		}
 		return result, nil
@@ -123,9 +122,6 @@ func (s *Service) Connections(selection model.Selector) ([]model.Connection, err
 	matches, err := selector.Match(cfg.Connections, selection)
 	if err != nil {
 		return nil, err
-	}
-	for index := range matches {
-		matches[index] = publicConnection(matches[index])
 	}
 	return matches, nil
 }
@@ -165,7 +161,10 @@ func (s *Service) ListConnections(selection model.Selector, requestedPageSize in
 		}
 	}
 	end := min(start+pageSize, len(connections))
-	page := model.ConnectionPage{Connections: connections[start:end]}
+	page := model.ConnectionPage{Connections: slices.Clone(connections[start:end])}
+	for index := range page.Connections {
+		page.Connections[index] = publicConnection(page.Connections[index])
+	}
 	if end < len(connections) {
 		position.AfterID = page.Connections[len(page.Connections)-1].ID
 		page.NextCursor, err = pagination.Encode("connections", scope, position)
@@ -188,7 +187,15 @@ func (s *Service) UpsertConnection(connection model.Connection, replace bool) er
 		if !replace {
 			return fmt.Errorf("connection %s already exists; pass --replace to update it", connection.ID)
 		}
-		if !reflect.DeepEqual(existing.Mail, connection.Mail) || !reflect.DeepEqual(existing.Calendar, connection.Calendar) {
+		proposed := cfg
+		proposed.Connections = slices.Clone(cfg.Connections)
+		proposed.Connections[index] = connection
+		proposed, err = config.Normalize(proposed)
+		if err != nil {
+			return err
+		}
+		connection = proposed.Connections[index]
+		if providerCacheID(existing) != providerCacheID(connection) {
 			ledger, err := s.ensureState()
 			if err != nil {
 				return fmt.Errorf("open cache before replacing connection %s: %w", connection.ID, err)
@@ -197,8 +204,7 @@ func (s *Service) UpsertConnection(connection model.Connection, replace bool) er
 				return fmt.Errorf("invalidate cache before replacing connection %s: %w", connection.ID, err)
 			}
 		}
-		cfg.Connections[index] = connection
-		return s.store.Save(cfg)
+		return s.store.Save(proposed)
 	}
 	cfg.Connections = append(cfg.Connections, connection)
 	return s.store.Save(cfg)
@@ -326,7 +332,7 @@ func (s *Service) SearchMessagesContext(ctx context.Context, selection model.Sel
 				continue
 			}
 		} else if options.Mode != "offline" {
-			if cacheErr := s.cacheMailResult(connection.ID, mailFolder(connection, connectionOptions.Folder), scope, connectionOptions, result); cacheErr != nil {
+			if cacheErr := s.cacheMailResultFor(connection, mailFolder(connection, connectionOptions.Folder), scope, connectionOptions, result); cacheErr != nil {
 				pageErrors = append(pageErrors, sourceError(connection.ID, "cache_write_failed", cacheErr))
 			}
 		} else {
@@ -552,7 +558,7 @@ func (s *Service) ListEventsMode(ctx context.Context, selection model.Selector, 
 		} else if mode != "offline" {
 			successfulSources++
 			replaceIndex := strings.TrimSpace(query) == "" && ((!partialResult && len(selection.Collections) == 0) || len(successfulCollections) > 0)
-			if cacheErr := s.cacheEventsReplacing(connection.ID, scope, events, start, end, !partialResult, replaceIndex, successfulCollections); cacheErr != nil {
+			if cacheErr := s.cacheEventsReplacingFor(connection, scope, events, start, end, !partialResult, replaceIndex, successfulCollections); cacheErr != nil {
 				pageErrors = append(pageErrors, sourceError(connection.ID, "cache_write_failed", cacheErr))
 			}
 		} else {
@@ -1202,11 +1208,11 @@ func (s *Service) GetMessageModeContext(ctx context.Context, connectionID, folde
 	}
 	confirmedUIDMismatch := false
 	if mode == "" {
-		if cached, ok := s.cachedMessage(connection.ID, folder, uid); ok {
+		if cached, ok := s.cachedMessageFor(connection, folder, uid); ok {
 			ledger, stateErr := s.ensureState()
 			cachedUIDValidity, validityOK := uint32(0), false
 			if stateErr == nil {
-				cachedUIDValidity, validityOK = s.cachedMailboxUIDValidity(ledger, connection.ID, folder)
+				cachedUIDValidity, validityOK = s.cachedMailboxUIDValidityFor(ledger, connection, folder)
 			}
 			liveUIDValidity, validityErr := s.mailboxUIDValidity(ctx, connection, folder)
 			if validityErr != nil {
@@ -1215,7 +1221,7 @@ func (s *Service) GetMessageModeContext(ctx context.Context, connectionID, folde
 			}
 			confirmedUIDMismatch = validityOK && liveUIDValidity != cachedUIDValidity
 			if confirmedUIDMismatch && stateErr == nil {
-				_ = s.cacheMailboxUIDValidity(ledger, connection.ID, folder, liveUIDValidity)
+				_ = s.cacheMailboxUIDValidityFor(ledger, connection, folder, liveUIDValidity)
 			}
 		}
 	}
@@ -1224,8 +1230,8 @@ func (s *Service) GetMessageModeContext(ctx context.Context, connectionID, folde
 		if fetchErr == nil {
 			if ledger, stateErr := s.ensureState(); stateErr == nil {
 				data, _ := json.Marshal(fetched.Detail)
-				_ = s.cacheMailboxUIDValidity(ledger, connection.ID, folder, fetched.UIDValidity)
-				_ = ledger.Put(context.Background(), state.CacheEntry{Namespace: "message_body", Key: messageCacheKey(connection.ID, folder, fetched.UIDValidity, uid), ConnectionID: connection.ID, Kind: "message_body", ProviderID: fmt.Sprintf("%s/%d", folder, uid), ExpiresAt: s.now().Add(s.messageBodyTTL()), Value: data})
+				_ = s.cacheMailboxUIDValidityFor(ledger, connection, folder, fetched.UIDValidity)
+				_ = ledger.Put(context.Background(), state.CacheEntry{Namespace: "message_body", Key: messageCacheKey(providerCacheID(connection), folder, fetched.UIDValidity, uid), ConnectionID: connection.ID, Kind: "message_body", ProviderID: fmt.Sprintf("%s/%d", folder, uid), ExpiresAt: s.now().Add(s.messageBodyTTL()), Value: data})
 			}
 			return fetched.Detail, nil
 		}
@@ -1235,7 +1241,7 @@ func (s *Service) GetMessageModeContext(ctx context.Context, connectionID, folde
 		err = fetchErr
 	}
 	if !confirmedUIDMismatch {
-		if cached, ok := s.cachedMessage(connection.ID, folder, uid); ok {
+		if cached, ok := s.cachedMessageFor(connection, folder, uid); ok {
 			cached.Stale = true
 			return cached, nil
 		}
@@ -1263,11 +1269,11 @@ func (s *Service) GetAttachmentMode(ctx context.Context, connectionID, folder st
 	}
 	confirmedUIDMismatch := false
 	if mode == "" {
-		if attachment, data, ok := s.cachedAttachment(ctx, connection.ID, folder, uid, attachmentID); ok {
+		if attachment, data, ok := s.cachedAttachmentFor(ctx, connection, folder, uid, attachmentID); ok {
 			ledger, stateErr := s.ensureState()
 			cachedUIDValidity, validityOK := uint32(0), false
 			if stateErr == nil {
-				cachedUIDValidity, validityOK = s.cachedMailboxUIDValidity(ledger, connection.ID, folder)
+				cachedUIDValidity, validityOK = s.cachedMailboxUIDValidityFor(ledger, connection, folder)
 			}
 			liveUIDValidity, validityErr := s.mailboxUIDValidity(ctx, connection, folder)
 			if validityErr != nil {
@@ -1280,7 +1286,7 @@ func (s *Service) GetAttachmentMode(ctx context.Context, connectionID, folder st
 			}
 			confirmedUIDMismatch = validityOK && liveUIDValidity != cachedUIDValidity
 			if stateErr == nil {
-				_ = s.cacheMailboxUIDValidity(ledger, connection.ID, folder, liveUIDValidity)
+				_ = s.cacheMailboxUIDValidityFor(ledger, connection, folder, liveUIDValidity)
 			}
 		}
 	}
@@ -1288,8 +1294,8 @@ func (s *Service) GetAttachmentMode(ctx context.Context, connectionID, folder st
 		attachment, data, uidValidity, fetchErr := s.mailGetAttachment(ctx, connection, folder, uid, attachmentID)
 		if fetchErr == nil {
 			if ledger, stateErr := s.ensureState(); stateErr == nil {
-				_ = s.cacheMailboxUIDValidity(ledger, connection.ID, folder, uidValidity)
-				key := messageCacheKey(connection.ID, folder, uidValidity, uid) + "/" + attachmentID
+				_ = s.cacheMailboxUIDValidityFor(ledger, connection, folder, uidValidity)
+				key := messageCacheKey(providerCacheID(connection), folder, uidValidity, uid) + "/" + attachmentID
 				expiresAt := s.now().Add(s.messageBodyTTL())
 				_ = ledger.Put(ctx, state.CacheEntry{Namespace: "attachment", Key: key, ConnectionID: connection.ID, Kind: "attachment", ProviderID: attachmentID, ExpiresAt: expiresAt, Value: data})
 				if metadata, metadataErr := json.Marshal(attachment); metadataErr == nil {
@@ -1304,7 +1310,7 @@ func (s *Service) GetAttachmentMode(ctx context.Context, connectionID, folder st
 		err = fetchErr
 	}
 	if !confirmedUIDMismatch {
-		if attachment, data, ok := s.cachedAttachment(ctx, connection.ID, folder, uid, attachmentID); ok {
+		if attachment, data, ok := s.cachedAttachmentFor(ctx, connection, folder, uid, attachmentID); ok {
 			attachment.Stale = true
 			return attachment, data, nil
 		}
@@ -1726,18 +1732,28 @@ func sourceError(connectionID, code string, err error) model.SourceError {
 }
 
 func (s *Service) cacheMailResult(connectionID, folder string, scope any, options postmail.SearchOptions, result postmail.SearchResult) error {
+	connection, err := s.exactConnection(connectionID, "mail.read")
+	if err != nil {
+		return err
+	}
+	return s.cacheMailResultFor(connection, folder, scope, options, result)
+}
+
+func (s *Service) cacheMailResultFor(connection model.Connection, folder string, scope any, options postmail.SearchOptions, result postmail.SearchResult) error {
 	ledger, err := s.ensureState()
 	if err != nil {
 		return err
 	}
+	connectionID := connection.ID
+	cacheID := providerCacheID(connection)
 	now := s.now()
 	result.Messages = slices.Clone(result.Messages)
-	if err := s.cacheMailboxUIDValidity(ledger, connectionID, folder, result.UIDValidity); err != nil {
+	if err := s.cacheMailboxUIDValidityFor(ledger, connection, folder, result.UIDValidity); err != nil {
 		return err
 	}
 	combined := result
 	continuation := !options.CursorTime.IsZero() || options.CursorUID != 0
-	pendingKey := scopedCacheKey(connectionID, scope)
+	pendingKey := scopedCacheKey(cacheID, scope)
 	if continuation {
 		entry, ok, getErr := ledger.Get(context.Background(), "message_metadata_pending", pendingKey, false)
 		if getErr == nil && !ok {
@@ -1768,7 +1784,7 @@ func (s *Service) cacheMailResult(connectionID, folder string, scope any, option
 		}
 	}
 	index := result
-	indexKey := mailboxCacheKey(connectionID, folder)
+	indexKey := mailboxCacheKey(cacheID, folder)
 	if entry, ok, getErr := ledger.Get(context.Background(), "message_metadata_index", indexKey, false); getErr == nil && ok {
 		var existing postmail.SearchResult
 		if json.Unmarshal(entry.Value, &existing) == nil && existing.UIDValidity == result.UIDValidity {
@@ -1792,14 +1808,19 @@ func (s *Service) cacheMailResult(connectionID, folder string, scope any, option
 }
 
 func (s *Service) cachedMailResult(connectionID, folder string, scope any, options postmail.SearchOptions, cursorState mailCursorState, limit int) (postmail.SearchResult, bool) {
+	connection, connectionErr := s.exactConnection(connectionID, "mail.read")
+	if connectionErr != nil {
+		return postmail.SearchResult{}, false
+	}
 	ledger, err := s.ensureState()
 	if err != nil {
 		return postmail.SearchResult{}, false
 	}
-	entry, ok, err := ledger.Get(context.Background(), "message_metadata", scopedCacheKey(connectionID, scope), false)
+	cacheID := providerCacheID(connection)
+	entry, ok, err := ledger.Get(context.Background(), "message_metadata", scopedCacheKey(cacheID, scope), false)
 	scopedResult := ok
 	if err == nil && !ok {
-		entry, ok, err = ledger.Get(context.Background(), "message_metadata_index", mailboxCacheKey(connectionID, folder), false)
+		entry, ok, err = ledger.Get(context.Background(), "message_metadata_index", mailboxCacheKey(cacheID, folder), false)
 		scopedResult = false
 	}
 	if err != nil || !ok {
@@ -1902,17 +1923,27 @@ func (s *Service) cacheEvents(connectionID string, scope any, events []model.Eve
 }
 
 func (s *Service) cacheEventsReplacing(connectionID string, scope any, events []model.Event, rangeStart, rangeEnd time.Time, replaceScoped, replaceIndex bool, replaceCollections []string) error {
+	connection, err := s.exactConnection(connectionID, "calendar.read")
+	if err != nil {
+		return err
+	}
+	return s.cacheEventsReplacingFor(connection, scope, events, rangeStart, rangeEnd, replaceScoped, replaceIndex, replaceCollections)
+}
+
+func (s *Service) cacheEventsReplacingFor(connection model.Connection, scope any, events []model.Event, rangeStart, rangeEnd time.Time, replaceScoped, replaceIndex bool, replaceCollections []string) error {
 	ledger, err := s.ensureState()
 	if err != nil {
 		return err
 	}
+	connectionID := connection.ID
+	cacheID := providerCacheID(connection)
 	now := s.now()
 	for index := range events {
 		events[index].CachedAt = now
 	}
 	scoped := append([]model.Event(nil), events...)
 	if !replaceScoped {
-		if entry, ok, getErr := ledger.Get(context.Background(), "events", scopedCacheKey(connectionID, scope), false); getErr == nil && ok {
+		if entry, ok, getErr := ledger.Get(context.Background(), "events", scopedCacheKey(cacheID, scope), false); getErr == nil && ok {
 			var existing []model.Event
 			if json.Unmarshal(entry.Value, &existing) == nil {
 				if len(replaceCollections) > 0 {
@@ -1926,11 +1957,11 @@ func (s *Service) cacheEventsReplacing(connectionID string, scope any, events []
 	if err != nil {
 		return err
 	}
-	if err := ledger.Put(context.Background(), state.CacheEntry{Namespace: "events", Key: scopedCacheKey(connectionID, scope), ConnectionID: connectionID, Kind: "event", CachedAt: now, ExpiresAt: now.Add(s.eventTTL()), Value: data}); err != nil {
+	if err := ledger.Put(context.Background(), state.CacheEntry{Namespace: "events", Key: scopedCacheKey(cacheID, scope), ConnectionID: connectionID, Kind: "event", CachedAt: now, ExpiresAt: now.Add(s.eventTTL()), Value: data}); err != nil {
 		return err
 	}
 	index := append([]model.Event(nil), events...)
-	if entry, ok, getErr := ledger.Get(context.Background(), "event_index", connectionID, false); getErr == nil && ok {
+	if entry, ok, getErr := ledger.Get(context.Background(), "event_index", cacheID, false); getErr == nil && ok {
 		var existing []model.Event
 		if json.Unmarshal(entry.Value, &existing) == nil {
 			if replaceIndex {
@@ -1950,7 +1981,7 @@ func (s *Service) cacheEventsReplacing(connectionID string, scope any, events []
 	if err != nil {
 		return err
 	}
-	return ledger.Put(context.Background(), state.CacheEntry{Namespace: "event_index", Key: connectionID, ConnectionID: connectionID, Kind: "event", CachedAt: now, ExpiresAt: now.Add(s.eventTTL()), Value: indexData})
+	return ledger.Put(context.Background(), state.CacheEntry{Namespace: "event_index", Key: cacheID, ConnectionID: connectionID, Kind: "event", CachedAt: now, ExpiresAt: now.Add(s.eventTTL()), Value: indexData})
 }
 
 func (s *Service) cachedEvents(connection model.Connection, scope any, collections []string, start, end time.Time, query string) ([]model.Event, bool) {
@@ -1958,10 +1989,11 @@ func (s *Service) cachedEvents(connection model.Connection, scope any, collectio
 	if err != nil {
 		return nil, false
 	}
-	entry, ok, err := ledger.Get(context.Background(), "events", scopedCacheKey(connection.ID, scope), false)
+	cacheID := providerCacheID(connection)
+	entry, ok, err := ledger.Get(context.Background(), "events", scopedCacheKey(cacheID, scope), false)
 	fromIndex := false
 	if err == nil && !ok {
-		entry, ok, err = ledger.Get(context.Background(), "event_index", connection.ID, false)
+		entry, ok, err = ledger.Get(context.Background(), "event_index", cacheID, false)
 		fromIndex = ok
 	}
 	if err != nil || !ok {
@@ -2054,15 +2086,23 @@ func normalizeEventRange(start, end, now time.Time) (time.Time, time.Time) {
 }
 
 func (s *Service) cachedMessage(connectionID, folder string, uid uint32) (model.MessageDetail, bool) {
+	connection, err := s.exactConnection(connectionID, "mail.read")
+	if err != nil {
+		return model.MessageDetail{}, false
+	}
+	return s.cachedMessageFor(connection, folder, uid)
+}
+
+func (s *Service) cachedMessageFor(connection model.Connection, folder string, uid uint32) (model.MessageDetail, bool) {
 	ledger, err := s.ensureState()
 	if err != nil {
 		return model.MessageDetail{}, false
 	}
-	uidValidity, ok := s.cachedMailboxUIDValidity(ledger, connectionID, folder)
+	uidValidity, ok := s.cachedMailboxUIDValidityFor(ledger, connection, folder)
 	if !ok {
 		return model.MessageDetail{}, false
 	}
-	entry, ok, err := ledger.Get(context.Background(), "message_body", messageCacheKey(connectionID, folder, uidValidity, uid), false)
+	entry, ok, err := ledger.Get(context.Background(), "message_body", messageCacheKey(providerCacheID(connection), folder, uidValidity, uid), false)
 	if err != nil || !ok {
 		return model.MessageDetail{}, false
 	}
@@ -2075,22 +2115,31 @@ func (s *Service) cachedMessage(connectionID, folder string, uid uint32) (model.
 }
 
 func (s *Service) cachedAttachment(ctx context.Context, connectionID, folder string, uid uint32, attachmentID string) (model.Attachment, []byte, bool) {
+	connection, err := s.exactConnection(connectionID, "mail.read")
+	if err != nil {
+		return model.Attachment{}, nil, false
+	}
+	return s.cachedAttachmentFor(ctx, connection, folder, uid, attachmentID)
+}
+
+func (s *Service) cachedAttachmentFor(ctx context.Context, connection model.Connection, folder string, uid uint32, attachmentID string) (model.Attachment, []byte, bool) {
 	ledger, err := s.ensureState()
 	if err != nil {
 		return model.Attachment{}, nil, false
 	}
-	uidValidity, ok := s.cachedMailboxUIDValidity(ledger, connectionID, folder)
+	uidValidity, ok := s.cachedMailboxUIDValidityFor(ledger, connection, folder)
 	if !ok {
 		return model.Attachment{}, nil, false
 	}
-	entry, ok, err := ledger.Get(ctx, "attachment", messageCacheKey(connectionID, folder, uidValidity, uid)+"/"+attachmentID, false)
+	cacheID := providerCacheID(connection)
+	entry, ok, err := ledger.Get(ctx, "attachment", messageCacheKey(cacheID, folder, uidValidity, uid)+"/"+attachmentID, false)
 	if err != nil || !ok {
 		return model.Attachment{}, nil, false
 	}
 	attachment := model.Attachment{ID: attachmentID, Size: int64(len(entry.Value)), CachedAt: entry.CachedAt}
-	if metadata, found, metadataErr := ledger.Get(ctx, "attachment_metadata", messageCacheKey(connectionID, folder, uidValidity, uid)+"/"+attachmentID, false); metadataErr == nil && found && json.Unmarshal(metadata.Value, &attachment) == nil {
+	if metadata, found, metadataErr := ledger.Get(ctx, "attachment_metadata", messageCacheKey(cacheID, folder, uidValidity, uid)+"/"+attachmentID, false); metadataErr == nil && found && json.Unmarshal(metadata.Value, &attachment) == nil {
 		attachment.CachedAt = entry.CachedAt
-	} else if detail, found := s.cachedMessage(connectionID, folder, uid); found {
+	} else if detail, found := s.cachedMessageFor(connection, folder, uid); found {
 		for _, candidate := range detail.Attachments {
 			if candidate.ID == attachmentID {
 				attachment = candidate
@@ -2128,6 +2177,50 @@ func scopedCacheKey(connectionID string, scope any) string {
 	return hex.EncodeToString(digest[:])
 }
 
+func providerCacheID(connection model.Connection) string {
+	type collectionIdentity struct {
+		ID   string `json:"id"`
+		Path string `json:"path"`
+	}
+	type mailIdentity struct {
+		Username string           `json:"username"`
+		Secret   model.SecretRef  `json:"secret"`
+		IMAP     model.IMAPConfig `json:"imap"`
+	}
+	type calendarIdentity struct {
+		Kind        string               `json:"kind"`
+		URL         string               `json:"url"`
+		URLSecret   model.SecretRef      `json:"url_secret"`
+		Username    string               `json:"username"`
+		Secret      model.SecretRef      `json:"secret"`
+		Collections []collectionIdentity `json:"collections,omitempty"`
+		Insecure    bool                 `json:"insecure,omitempty"`
+	}
+	provider := struct {
+		Mail     *mailIdentity     `json:"mail,omitempty"`
+		Calendar *calendarIdentity `json:"calendar,omitempty"`
+	}{}
+	if connection.Mail != nil {
+		provider.Mail = &mailIdentity{Username: connection.Mail.Username, Secret: connection.Mail.Secret, IMAP: connection.Mail.IMAP}
+	}
+	if connection.Calendar != nil {
+		calendar := connection.Calendar
+		provider.Calendar = &calendarIdentity{Kind: calendar.Kind, URL: calendar.URL, URLSecret: calendar.URLSecret, Username: calendar.Username, Secret: calendar.Secret, Insecure: calendar.Insecure}
+		for _, collection := range calendar.Collections {
+			provider.Calendar.Collections = append(provider.Calendar.Collections, collectionIdentity{ID: collection.ID, Path: collection.Path})
+		}
+		slices.SortFunc(provider.Calendar.Collections, func(a, b collectionIdentity) int {
+			if compared := strings.Compare(a.ID, b.ID); compared != 0 {
+				return compared
+			}
+			return strings.Compare(a.Path, b.Path)
+		})
+	}
+	data, _ := json.Marshal(provider)
+	digest := sha256.Sum256(data)
+	return framedCacheKey(connection.ID, hex.EncodeToString(digest[:]))
+}
+
 func messageCacheKey(connectionID, folder string, uidValidity, uid uint32) string {
 	return framedCacheKey(connectionID, folder, fmt.Sprint(uidValidity), fmt.Sprint(uid))
 }
@@ -2145,16 +2238,32 @@ func framedCacheKey(parts ...string) string {
 }
 
 func (s *Service) cacheMailboxUIDValidity(ledger *state.Store, connectionID, folder string, uidValidity uint32) error {
+	connection, err := s.exactConnection(connectionID, "mail.read")
+	if err != nil {
+		return err
+	}
+	return s.cacheMailboxUIDValidityFor(ledger, connection, folder, uidValidity)
+}
+
+func (s *Service) cacheMailboxUIDValidityFor(ledger *state.Store, connection model.Connection, folder string, uidValidity uint32) error {
 	data, err := json.Marshal(uidValidity)
 	if err != nil {
 		return err
 	}
 	ttl := max(s.messageMetadataTTL(), s.messageBodyTTL())
-	return ledger.Put(context.Background(), state.CacheEntry{Namespace: "mailbox_uidvalidity", Key: mailboxCacheKey(connectionID, folder), ConnectionID: connectionID, Kind: "sync_state", ProviderID: folder, ExpiresAt: s.now().Add(ttl), Value: data})
+	return ledger.Put(context.Background(), state.CacheEntry{Namespace: "mailbox_uidvalidity", Key: mailboxCacheKey(providerCacheID(connection), folder), ConnectionID: connection.ID, Kind: "sync_state", ProviderID: folder, ExpiresAt: s.now().Add(ttl), Value: data})
 }
 
 func (s *Service) cachedMailboxUIDValidity(ledger *state.Store, connectionID, folder string) (uint32, bool) {
-	entry, ok, err := ledger.Get(context.Background(), "mailbox_uidvalidity", mailboxCacheKey(connectionID, folder), false)
+	connection, err := s.exactConnection(connectionID, "mail.read")
+	if err != nil {
+		return 0, false
+	}
+	return s.cachedMailboxUIDValidityFor(ledger, connection, folder)
+}
+
+func (s *Service) cachedMailboxUIDValidityFor(ledger *state.Store, connection model.Connection, folder string) (uint32, bool) {
+	entry, ok, err := ledger.Get(context.Background(), "mailbox_uidvalidity", mailboxCacheKey(providerCacheID(connection), folder), false)
 	if err != nil || !ok {
 		return 0, false
 	}

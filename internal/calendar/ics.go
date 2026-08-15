@@ -653,6 +653,9 @@ func Generate(event model.Event) (model.Event, string, error) {
 	if len(event.RecurrencePeriods) > 0 {
 		values := make([]string, len(event.RecurrencePeriods))
 		for index, period := range event.RecurrencePeriods {
+			if period.Start.IsZero() || period.End.IsZero() || !period.End.After(period.Start) {
+				return model.Event{}, "", fmt.Errorf("recurrence period %d end must be after start", index+1)
+			}
 			values[index] = period.Start.UTC().Format("20060102T150405Z") + "/" + period.End.UTC().Format("20060102T150405Z")
 		}
 		lines = append(lines, "RDATE;VALUE=PERIOD:"+strings.Join(values, ","))
