@@ -93,6 +93,66 @@ func TestOperationExecutionRunsOffEventLoopAndIsCancellable(t *testing.T) {
 	}
 }
 
+func TestProviderReadsRunOffEventLoopAndAreCancellable(t *testing.T) {
+	for _, kind := range []string{"doctor", "message", "attachment"} {
+		t.Run(kind, func(t *testing.T) {
+			app := testApp(t)
+			defer app.close()
+			if app.refreshCancel != nil {
+				app.refreshCancel()
+				app.wg.Wait()
+			}
+			started, canceled := make(chan struct{}), make(chan struct{})
+			wait := func(ctx context.Context) {
+				close(started)
+				<-ctx.Done()
+				close(canceled)
+			}
+			switch kind {
+			case "doctor":
+				app.view.Set(0)
+				app.connections.Set([]model.Connection{{ID: "work"}})
+				app.doctorConnection = func(ctx context.Context, _ string) (model.DoctorResult, error) {
+					wait(ctx)
+					return model.DoctorResult{}, ctx.Err()
+				}
+			case "message":
+				app.view.Set(1)
+				app.messages.Set([]model.Message{{ConnectionID: "work", Folder: "INBOX", UID: 1}})
+				app.getMessage = func(ctx context.Context, _, _ string, _ uint32) (model.MessageDetail, error) {
+					wait(ctx)
+					return model.MessageDetail{}, ctx.Err()
+				}
+			case "attachment":
+				app.view.Set(2)
+				app.detail.Set(model.MessageDetail{Message: model.Message{ConnectionID: "work", Folder: "INBOX", UID: 1}, Attachments: []model.Attachment{{ID: "one"}}})
+				app.getAttachment = func(ctx context.Context, _, _ string, _ uint32, _ string) (model.Attachment, []byte, error) {
+					wait(ctx)
+					return model.Attachment{}, nil, ctx.Err()
+				}
+			}
+			app.openSelected(tui.KeyEvent{})
+			select {
+			case <-started:
+			case <-time.After(time.Second):
+				t.Fatal("provider read did not start in the background")
+			}
+			if !app.modal.Get() || !app.loading.Get() {
+				t.Fatalf("provider read state modal=%v loading=%v", app.modal.Get(), app.loading.Get())
+			}
+			app.cancelModal()
+			select {
+			case <-canceled:
+			case <-time.After(time.Second):
+				t.Fatal("provider read context was not canceled")
+			}
+			if app.modal.Get() || app.loading.Get() {
+				t.Fatalf("canceled provider read state modal=%v loading=%v", app.modal.Get(), app.loading.Get())
+			}
+		})
+	}
+}
+
 func TestLateOperationResultDoesNotReplaceNewConfirmationPreview(t *testing.T) {
 	app := testApp(t)
 	defer app.close()

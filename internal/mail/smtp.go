@@ -18,6 +18,7 @@ import (
 	"time"
 
 	gomail "github.com/emersion/go-message/mail"
+	messageproto "github.com/emersion/go-message/textproto"
 	"github.com/timborovkov/posthouse/internal/model"
 )
 
@@ -50,6 +51,34 @@ func BuildDraftMessage(connection model.Connection, message model.SendMessage) (
 		from = connection.Mail.Username
 	}
 	return buildMessageWithBCC(connection.Identity, from, message, true)
+}
+
+// BuildSentCopy adds the confirmed blind-recipient list to an already
+// serialized SMTP message without regenerating its Date, Message-ID, MIME
+// boundaries, body, or attachments.
+func BuildSentCopy(data []byte, bcc []string) ([]byte, error) {
+	if len(bcc) == 0 {
+		return data, nil
+	}
+	var header gomail.Header
+	if err := setAddresses(&header, "Bcc", bcc); err != nil {
+		return nil, err
+	}
+	separator := []byte("\r\n\r\n")
+	index := bytes.Index(data, separator)
+	if index < 0 {
+		return nil, fmt.Errorf("serialized message has no header boundary")
+	}
+	var rendered bytes.Buffer
+	if err := messageproto.WriteHeader(&rendered, header.Header.Header); err != nil {
+		return nil, fmt.Errorf("serialize archival Bcc header: %w", err)
+	}
+	line := append([]byte("\r\n"), bytes.TrimSuffix(rendered.Bytes(), separator)...)
+	result := make([]byte, 0, len(data)+len(line))
+	result = append(result, data[:index]...)
+	result = append(result, line...)
+	result = append(result, data[index:]...)
+	return result, nil
 }
 
 func ValidateMessage(message model.SendMessage) error { return validateMessage(message) }

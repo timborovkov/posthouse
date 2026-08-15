@@ -6,7 +6,7 @@ services:
     ports:
       - "127.0.0.1:8791:8791"
     volumes:
-      - ./data:/data
+      - posthouse-data:/data
     environment:
       POSTHOUSE_MCP_TOKEN: ${POSTHOUSE_MCP_TOKEN:?set POSTHOUSE_MCP_TOKEN in .env}
       POSTHOUSE_CACHE_KEY: ${POSTHOUSE_CACHE_KEY:?set POSTHOUSE_CACHE_KEY in .env}
@@ -17,3 +17,6 @@ services:
       interval: 30s
       timeout: 3s
       retries: 3
+
+volumes:
+  posthouse-data:

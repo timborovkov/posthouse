@@ -78,6 +78,27 @@ func TestBuildDraftMessagePreservesBCC(t *testing.T) {
 	}
 }
 
+func TestBuildSentCopyPreservesBCCWithoutChangingSerializedMessage(t *testing.T) {
+	connection := model.Connection{Identity: model.Identity{Email: "sender@example.com"}}
+	message := model.SendMessage{To: []string{"one@example.com"}, BCC: []string{"Hidden Person <hidden@example.com>"}, Subject: "Sent", Text: "body"}
+	smtpData, err := BuildMessage(connection, message)
+	if err != nil {
+		t.Fatal(err)
+	}
+	copyData, err := BuildSentCopy(smtpData, message.BCC)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bccHeader := "\r\nBcc: \"Hidden Person\" <hidden@example.com>"
+	if !strings.Contains(string(copyData), bccHeader) {
+		t.Fatalf("sent copy omitted Bcc header: %q", copyData)
+	}
+	withoutBCC := strings.Replace(string(copyData), bccHeader, "", 1)
+	if withoutBCC != string(smtpData) {
+		t.Fatal("adding Bcc regenerated or changed other serialized message bytes")
+	}
+}
+
 func TestSMTPHost(t *testing.T) {
 	got, err := smtpHost("smtp.example.com:465")
 	if err != nil || got != "smtp.example.com" {

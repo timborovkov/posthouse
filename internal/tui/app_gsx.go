@@ -35,36 +35,52 @@ type operationSnapshot struct {
 	err    error
 }
 
+type providerReadSnapshot struct {
+	generation uint64
+	kind       string
+	doctor     model.DoctorResult
+	detail     model.MessageDetail
+	attachment model.Attachment
+	data       []byte
+	err        error
+}
+
 type posthouseApp struct {
-	service           *service.Service
-	view              *tui.State[int]
-	selected          *tui.State[int]
-	loading           *tui.State[bool]
-	errorText         *tui.State[string]
-	status            *tui.State[string]
-	connections       *tui.State[[]model.Connection]
-	messages          *tui.State[[]model.Message]
-	events            *tui.State[[]model.Event]
-	detail            *tui.State[model.MessageDetail]
-	searching         *tui.State[bool]
-	query             *tui.State[string]
-	modal             *tui.State[bool]
-	modalText         *tui.State[string]
-	pendingToken      *tui.State[string]
-	executingToken    *tui.State[string]
-	editor            *tui.State[bool]
-	editorKind        *tui.State[string]
-	editorStep        *tui.State[int]
-	editorValues      *tui.State[[]string]
-	updates           chan snapshot
-	operationUpdates  chan operationSnapshot
-	executeOperation  func(context.Context, string) (model.OperationResult, error)
-	ctx               context.Context
-	cancel            context.CancelFunc
-	refreshCancel     context.CancelFunc
-	operationCancel   context.CancelFunc
-	refreshGeneration *atomic.Uint64
-	wg                *sync.WaitGroup
+	service                *service.Service
+	view                   *tui.State[int]
+	selected               *tui.State[int]
+	loading                *tui.State[bool]
+	errorText              *tui.State[string]
+	status                 *tui.State[string]
+	connections            *tui.State[[]model.Connection]
+	messages               *tui.State[[]model.Message]
+	events                 *tui.State[[]model.Event]
+	detail                 *tui.State[model.MessageDetail]
+	searching              *tui.State[bool]
+	query                  *tui.State[string]
+	modal                  *tui.State[bool]
+	modalText              *tui.State[string]
+	pendingToken           *tui.State[string]
+	executingToken         *tui.State[string]
+	editor                 *tui.State[bool]
+	editorKind             *tui.State[string]
+	editorStep             *tui.State[int]
+	editorValues           *tui.State[[]string]
+	updates                chan snapshot
+	operationUpdates       chan operationSnapshot
+	providerReadUpdates    chan providerReadSnapshot
+	executeOperation       func(context.Context, string) (model.OperationResult, error)
+	doctorConnection       func(context.Context, string) (model.DoctorResult, error)
+	getMessage             func(context.Context, string, string, uint32) (model.MessageDetail, error)
+	getAttachment          func(context.Context, string, string, uint32, string) (model.Attachment, []byte, error)
+	ctx                    context.Context
+	cancel                 context.CancelFunc
+	refreshCancel          context.CancelFunc
+	operationCancel        context.CancelFunc
+	providerReadCancel     context.CancelFunc
+	refreshGeneration      *atomic.Uint64
+	providerReadGeneration *atomic.Uint64
+	wg                     *sync.WaitGroup
 }
 
 func New(application *service.Service) *posthouseApp {
@@ -79,9 +95,11 @@ func New(application *service.Service) *posthouseApp {
 		modalText: tui.NewState(""), pendingToken: tui.NewState(""),
 		executingToken: tui.NewState(""),
 		editor:         tui.NewState(false), editorKind: tui.NewState(""), editorStep: tui.NewState(0), editorValues: tui.NewState([]string{}),
-		updates: make(chan snapshot, 4), operationUpdates: make(chan operationSnapshot, 1), executeOperation: application.ExecuteOperation, ctx: ctx, cancel: cancel,
-		refreshGeneration: &atomic.Uint64{},
-		wg:                &sync.WaitGroup{},
+		updates: make(chan snapshot, 4), operationUpdates: make(chan operationSnapshot, 1), providerReadUpdates: make(chan providerReadSnapshot, 1),
+		executeOperation: application.ExecuteOperation, doctorConnection: application.DoctorConnection, getMessage: application.GetMessageContext, getAttachment: application.GetAttachment,
+		ctx: ctx, cancel: cancel,
+		refreshGeneration: &atomic.Uint64{}, providerReadGeneration: &atomic.Uint64{},
+		wg: &sync.WaitGroup{},
 	}
 	app.refresh()
 	return app
@@ -100,7 +118,7 @@ func Run(application *service.Service) error {
 }
 
 func (p *posthouseApp) Watchers() []tui.Watcher {
-	return []tui.Watcher{tui.Watch(p.updates, p.applySnapshot), tui.Watch(p.operationUpdates, p.applyOperation)}
+	return []tui.Watcher{tui.Watch(p.updates, p.applySnapshot), tui.Watch(p.operationUpdates, p.applyOperation), tui.Watch(p.providerReadUpdates, p.applyProviderRead)}
 }
 
 func (p *posthouseApp) KeyMap() tui.KeyMap {
@@ -145,6 +163,7 @@ func (p *posthouseApp) KeyMap() tui.KeyMap {
 		return tui.KeyMap{
 			tui.OnPreemptStop(tui.KeyEnter, p.confirmModal),
 			tui.OnPreemptStop(tui.KeyEscape, func(ke tui.KeyEvent) { p.cancelModal() }),
+			tui.OnPreemptStop(tui.Rune('q'), func(ke tui.KeyEvent) { p.cancel(); ke.App().Stop() }),
 		}
 	}
 	return tui.KeyMap{
@@ -231,6 +250,9 @@ func (p *posthouseApp) close() {
 	if p.operationCancel != nil {
 		p.operationCancel()
 	}
+	if p.providerReadCancel != nil {
+		p.providerReadCancel()
+	}
 	p.wg.Wait()
 }
 
@@ -292,27 +314,21 @@ func (p *posthouseApp) openSelected(ke tui.KeyEvent) {
 		if len(items) == 0 {
 			return
 		}
-		result, err := p.service.DoctorConnection(p.ctx, items[p.selected.Get()].ID)
-		if err != nil {
-			p.modalText.Set(err.Error())
-		} else {
-			p.modalText.Set(formatDoctor(result))
-		}
-		p.modal.Set(true)
+		id := items[p.selected.Get()].ID
+		p.startProviderRead("doctor", func(ctx context.Context) providerReadSnapshot {
+			result, err := p.doctorConnection(ctx, id)
+			return providerReadSnapshot{doctor: result, err: err}
+		})
 	case 1:
 		items := p.messages.Get()
 		if len(items) == 0 {
 			return
 		}
 		item := items[p.selected.Get()]
-		detail, err := p.service.GetMessageContext(p.ctx, item.ConnectionID, item.Folder, item.UID)
-		if err != nil {
-			p.errorText.Set(err.Error())
-			return
-		}
-		p.detail.Set(detail)
-		p.view.Set(2)
-		p.selected.Set(0)
+		p.startProviderRead("message", func(ctx context.Context) providerReadSnapshot {
+			detail, err := p.getMessage(ctx, item.ConnectionID, item.Folder, item.UID)
+			return providerReadSnapshot{detail: detail, err: err}
+		})
 	case 2:
 		detail := p.detail.Get()
 		attachments := detail.Attachments
@@ -320,16 +336,64 @@ func (p *posthouseApp) openSelected(ke tui.KeyEvent) {
 			return
 		}
 		attachment := attachments[p.selected.Get()]
-		metadata, data, err := p.service.GetAttachment(p.ctx, detail.ConnectionID, detail.Folder, detail.UID, attachment.ID)
-		if err != nil {
-			p.errorText.Set(err.Error())
-			return
+		p.startProviderRead("attachment", func(ctx context.Context) providerReadSnapshot {
+			metadata, data, err := p.getAttachment(ctx, detail.ConnectionID, detail.Folder, detail.UID, attachment.ID)
+			return providerReadSnapshot{attachment: metadata, data: data, err: err}
+		})
+	}
+}
+
+func (p *posthouseApp) startProviderRead(kind string, read func(context.Context) providerReadSnapshot) {
+	if p.providerReadCancel != nil {
+		p.providerReadCancel()
+	}
+	ctx, cancel := context.WithCancel(p.ctx)
+	p.providerReadCancel = cancel
+	generation := p.providerReadGeneration.Add(1)
+	p.loading.Set(true)
+	p.errorText.Set("")
+	p.modalText.Set("Loading provider data…\n\nEsc cancels this request.")
+	p.modal.Set(true)
+	p.wg.Add(1)
+	go func() {
+		defer p.wg.Done()
+		next := read(ctx)
+		next.generation = generation
+		next.kind = kind
+		select {
+		case p.providerReadUpdates <- next:
+		case <-ctx.Done():
 		}
+	}()
+}
+
+func (p *posthouseApp) applyProviderRead(next providerReadSnapshot) {
+	if next.generation != p.providerReadGeneration.Load() {
+		return
+	}
+	p.providerReadCancel = nil
+	p.loading.Set(false)
+	if next.err != nil {
+		p.errorText.Set(next.err.Error())
+		p.modalText.Set("Provider read failed\n\n" + next.err.Error())
+		p.modal.Set(true)
+		return
+	}
+	switch next.kind {
+	case "doctor":
+		p.modalText.Set(formatDoctor(next.doctor))
+		p.modal.Set(true)
+	case "message":
+		p.detail.Set(next.detail)
+		p.view.Set(2)
+		p.selected.Set(0)
+		p.modal.Set(false)
+	case "attachment":
 		preview := ""
-		if strings.HasPrefix(strings.ToLower(metadata.ContentType), "text/") {
-			preview = string(data[:min(len(data), 16<<10)])
+		if strings.HasPrefix(strings.ToLower(next.attachment.ContentType), "text/") {
+			preview = string(next.data[:min(len(next.data), 16<<10)])
 		}
-		p.modalText.Set(fmt.Sprintf("Attachment loaded\n\n%s\n%s · %d bytes\n\n%s", metadata.Name, metadata.ContentType, len(data), preview))
+		p.modalText.Set(fmt.Sprintf("Attachment loaded\n\n%s\n%s · %d bytes\n\n%s", next.attachment.Name, next.attachment.ContentType, len(next.data), preview))
 		p.modal.Set(true)
 	}
 }
@@ -641,6 +705,12 @@ func (p *posthouseApp) cancelModal() {
 	if p.operationCancel != nil {
 		p.operationCancel()
 		p.operationCancel = nil
+	}
+	if p.providerReadCancel != nil {
+		p.providerReadCancel()
+		p.providerReadCancel = nil
+		p.providerReadGeneration.Add(1)
+		p.loading.Set(false)
 	}
 	p.modal.Set(false)
 	p.pendingToken.Set("")
@@ -1020,7 +1090,9 @@ func (p *posthouseApp) updatePropsFields(fresh tui.Component) {
 	p.cancel = f.cancel
 	p.refreshCancel = f.refreshCancel
 	p.operationCancel = f.operationCancel
+	p.providerReadCancel = f.providerReadCancel
 	p.refreshGeneration = f.refreshGeneration
+	p.providerReadGeneration = f.providerReadGeneration
 	p.wg = f.wg
 }
 

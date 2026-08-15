@@ -324,6 +324,23 @@ END:VCALENDAR`)
 	}
 }
 
+func TestMergeUpdatedEventPreservesUnmodeledPropertiesAndAlarms(t *testing.T) {
+	existing := []byte("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:event\r\nDTSTART:20260815T090000Z\r\nDTEND:20260815T100000Z\r\nSUMMARY:Old title\r\nDESCRIPTION:Remove me\r\nTRANSP:TRANSPARENT\r\nCATEGORIES:Planning\r\nATTACH:https://example.test/slides\r\nX-CONFERENCE:https://meet.example.test/room\r\nBEGIN:VALARM\r\nACTION:DISPLAY\r\nTRIGGER:-PT15M\r\nDESCRIPTION:Reminder\r\nEND:VALARM\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n")
+	replacement := "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:event\r\nDTSTAMP:20260815T080000Z\r\nDTSTART:20260815T110000Z\r\nDTEND:20260815T120000Z\r\nSUMMARY:New title\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+	merged, err := mergeUpdatedEvent(existing, replacement, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, preserved := range []string{"TRANSP:TRANSPARENT", "CATEGORIES:Planning", "ATTACH:https://example.test/slides", "X-CONFERENCE:https://meet.example.test/room", "BEGIN:VALARM", "TRIGGER:-PT15M"} {
+		if !strings.Contains(merged, preserved) {
+			t.Fatalf("updated event lost %q:\n%s", preserved, merged)
+		}
+	}
+	if strings.Contains(merged, "Old title") || strings.Contains(merged, "Remove me") || !strings.Contains(merged, "SUMMARY:New title") || !strings.Contains(merged, "DTSTART:20260815T110000Z") {
+		t.Fatalf("modeled fields were not replaced:\n%s", merged)
+	}
+}
+
 func TestFilename(t *testing.T) {
 	if got := Filename(model.Event{Title: "Team Planning / Q3"}); got != "team-planning-q3.ics" {
 		t.Fatalf("Filename returned %q", got)

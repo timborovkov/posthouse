@@ -91,7 +91,7 @@ func DefaultPath(configPath, configured string) string {
 }
 
 func Open(path string, maxBytes int64) (*Store, error) {
-	key, err := serializedMasterKey()
+	key, err := serializedMasterKey(path)
 	if err != nil {
 		return nil, err
 	}
@@ -111,7 +111,7 @@ func Open(path string, maxBytes int64) (*Store, error) {
 	if err != nil {
 		return nil, openErr
 	}
-	if err := credentialSet(keyringService, cacheKeyName, base64.RawURLEncoding.EncodeToString(recoveredKey)); err != nil {
+	if err := credentialSet(keyringService, cacheKeyCredentialName(path), base64.RawURLEncoding.EncodeToString(recoveredKey)); err != nil {
 		_ = store.Close()
 		return nil, fmt.Errorf("recover rekeyed cache master key in OS keychain: %w", err)
 	}
@@ -119,9 +119,9 @@ func Open(path string, maxBytes int64) (*Store, error) {
 	return store, nil
 }
 
-func serializedMasterKey() ([]byte, error) {
+func serializedMasterKey(path string) ([]byte, error) {
 	if os.Getenv("POSTHOUSE_CACHE_KEY") != "" {
-		return masterKey()
+		return masterKey(path)
 	}
 	lockPath, err := cacheKeyLockPath()
 	if err != nil {
@@ -130,7 +130,7 @@ func serializedMasterKey() ([]byte, error) {
 	var key []byte
 	err = filelock.Exclusive(lockPath, func() error {
 		var keyErr error
-		key, keyErr = masterKey()
+		key, keyErr = masterKey(path)
 		return keyErr
 	})
 	return key, err
@@ -788,7 +788,7 @@ func (s *Store) Rekey(ctx context.Context, newKey []byte) error {
 	}
 	s.key = append(s.key[:0], newKey...)
 	if useKeychain {
-		if err := credentialSet(keyringService, cacheKeyName, base64.RawURLEncoding.EncodeToString(newKey)); err != nil {
+		if err := credentialSet(keyringService, cacheKeyCredentialName(s.path), base64.RawURLEncoding.EncodeToString(newKey)); err != nil {
 			return fmt.Errorf("cache was rekeyed but OS keychain activation failed; restart Posthouse to recover the committed key: %w", err)
 		}
 		_, _ = s.db.ExecContext(ctx, `DELETE FROM state_meta WHERE name=?`, rekeyRecoveryName)
@@ -917,16 +917,40 @@ func (s *Store) evict(ctx context.Context) error {
 	return nil
 }
 
-func masterKey() ([]byte, error) {
+func cacheKeyCredentialName(path string) string {
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		absolute = filepath.Clean(path)
+	}
+	digest := sha256.Sum256([]byte(filepath.Clean(absolute)))
+	return cacheKeyName + "-" + hex.EncodeToString(digest[:])
+}
+
+func masterKey(path string) ([]byte, error) {
 	if encoded := os.Getenv("POSTHOUSE_CACHE_KEY"); encoded != "" {
 		return decodeKey(encoded)
 	}
-	encoded, err := credentialGet(keyringService, cacheKeyName)
+	credentialName := cacheKeyCredentialName(path)
+	encoded, err := credentialGet(keyringService, credentialName)
 	if err == nil {
 		return decodeKey(encoded)
 	}
 	if !errors.Is(err, keyring.ErrNotFound) {
 		return nil, fmt.Errorf("resolve cache key from OS keychain (or set POSTHOUSE_CACHE_KEY for headless use): %w", err)
+	}
+	encoded, err = credentialGet(keyringService, cacheKeyName)
+	if err == nil {
+		key, decodeErr := decodeKey(encoded)
+		if decodeErr != nil {
+			return nil, fmt.Errorf("migrate shared cache key: %w", decodeErr)
+		}
+		if err := credentialSet(keyringService, credentialName, encoded); err != nil {
+			return nil, fmt.Errorf("pin shared cache key to state path: %w", err)
+		}
+		return key, nil
+	}
+	if !errors.Is(err, keyring.ErrNotFound) {
+		return nil, fmt.Errorf("resolve shared cache key: %w", err)
 	}
 	encoded, err = credentialGet(legacyKeyringService, cacheKeyName)
 	if err == nil {
@@ -934,7 +958,7 @@ func masterKey() ([]byte, error) {
 		if decodeErr != nil {
 			return nil, fmt.Errorf("migrate legacy cache key: %w", decodeErr)
 		}
-		if err := credentialSet(keyringService, cacheKeyName, encoded); err != nil {
+		if err := credentialSet(keyringService, credentialName, encoded); err != nil {
 			return nil, fmt.Errorf("migrate cache key to isolated credential namespace: %w", err)
 		}
 		return key, nil
@@ -946,7 +970,7 @@ func masterKey() ([]byte, error) {
 	if _, err := rand.Read(key); err != nil {
 		return nil, fmt.Errorf("generate cache key: %w", err)
 	}
-	if err := credentialSet(keyringService, cacheKeyName, base64.RawURLEncoding.EncodeToString(key)); err != nil {
+	if err := credentialSet(keyringService, credentialName, base64.RawURLEncoding.EncodeToString(key)); err != nil {
 		return nil, fmt.Errorf("store cache key in OS keychain (or set POSTHOUSE_CACHE_KEY for headless use): %w", err)
 	}
 	return key, nil

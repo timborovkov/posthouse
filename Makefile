@@ -20,7 +20,8 @@ test:
 
 test-container:
 	POSTHOUSE_MCP_TOKEN=test-token POSTHOUSE_CACHE_KEY=0000000000000000000000000000000000000000000000000000000000000000 docker compose config --quiet
-	docker build -t posthouse:validate .
+	POSTHOUSE_MCP_TOKEN=test-token POSTHOUSE_CACHE_KEY=0000000000000000000000000000000000000000000000000000000000000000 docker compose run --rm --build --no-deps --entrypoint sh posthouse -c 'test -w /data && touch /data/.posthouse-write-test && rm /data/.posthouse-write-test'
+	POSTHOUSE_MCP_TOKEN=test-token POSTHOUSE_CACHE_KEY=0000000000000000000000000000000000000000000000000000000000000000 docker compose down --volumes --remove-orphans
 
 test-integration:
 	./scripts/test-protocols.sh integration

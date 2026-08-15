@@ -52,6 +52,8 @@ type Service struct {
 	now                    func() time.Time
 }
 
+const maxOutboundAttachmentBytes int64 = 25 << 20
+
 func New(store *config.Store) *Service {
 	return &Service{
 		store: store, calendar: calendar.NewClient(nil), mailSearchContext: postmail.SearchContext,
@@ -1135,6 +1137,13 @@ func (s *Service) execute(ctx context.Context, connection model.Connection, kind
 		if err != nil {
 			return nil, err
 		}
+		sentCopyData := data
+		if connection.Mail.SentCopy == "always" {
+			sentCopyData, err = postmail.BuildSentCopy(data, message.BCC)
+			if err != nil {
+				return nil, fmt.Errorf("build sent copy: %w", err)
+			}
+		}
 		var sendErr error
 		if s.mailSendRaw != nil {
 			sendErr = s.mailSendRaw(connection, message, data)
@@ -1148,9 +1157,9 @@ func (s *Service) execute(ctx context.Context, connection model.Connection, kind
 		if connection.Mail.SentCopy == "always" {
 			var uid uint32
 			if s.mailAppendRaw != nil {
-				uid, err = s.mailAppendRaw(connection, connection.Mail.Folders.Sent, data, []imap.Flag{imap.FlagSeen})
+				uid, err = s.mailAppendRaw(connection, connection.Mail.Folders.Sent, sentCopyData, []imap.Flag{imap.FlagSeen})
 			} else {
-				uid, err = s.mailAppendRawContext(ctx, connection, connection.Mail.Folders.Sent, data, []imap.Flag{imap.FlagSeen})
+				uid, err = s.mailAppendRawContext(ctx, connection, connection.Mail.Folders.Sent, sentCopyData, []imap.Flag{imap.FlagSeen})
 			}
 			if err != nil {
 				result["sent_copy"] = "failed"
@@ -1500,22 +1509,22 @@ func digestPayload(kind string, payload []byte) (string, error) {
 			return "", err
 		}
 		_, _ = digest.Write(canonicalPayload)
+		var attachmentBytes int64
 		for index, attachment := range message.Attachments {
 			attachmentDigest := sha256.New()
 			if attachment.Path == "" || attachment.Data != nil {
+				attachmentBytes += int64(len(attachment.Data))
 				_, _ = attachmentDigest.Write(attachment.Data)
 			} else {
-				file, err := os.Open(attachment.Path)
+				data, err := readRegularAttachment(attachment.Path, maxOutboundAttachmentBytes)
 				if err != nil {
 					return "", fmt.Errorf("read attachment %s for operation digest: %w", attachment.Path, err)
 				}
-				if _, err := io.Copy(attachmentDigest, file); err != nil {
-					_ = file.Close()
-					return "", err
-				}
-				if err := file.Close(); err != nil {
-					return "", err
-				}
+				attachmentBytes += int64(len(data))
+				_, _ = attachmentDigest.Write(data)
+			}
+			if attachmentBytes > maxOutboundAttachmentBytes {
+				return "", fmt.Errorf("outbound attachments exceed the 25 MiB total limit")
 			}
 			_, _ = fmt.Fprintf(digest, "\x00attachment:%d:%x", index, attachmentDigest.Sum(nil))
 		}
@@ -1541,22 +1550,68 @@ func snapshotAttachmentPayload(kind string, payload []byte) ([]byte, error) {
 		}
 		message = draft.Message
 	}
+	var total int64
+	for _, attachment := range message.Attachments {
+		if attachment.Path == "" || attachment.Data != nil {
+			total += int64(len(attachment.Data))
+		}
+	}
+	if total > maxOutboundAttachmentBytes {
+		return nil, fmt.Errorf("outbound attachments exceed the 25 MiB total limit")
+	}
 	for index := range message.Attachments {
 		attachment := &message.Attachments[index]
 		if attachment.Path == "" || attachment.Data != nil {
 			continue
 		}
-		data, err := os.ReadFile(attachment.Path)
+		data, err := readRegularAttachment(attachment.Path, maxOutboundAttachmentBytes-total)
 		if err != nil {
 			return nil, fmt.Errorf("snapshot attachment %s for operation execution: %w", attachment.Path, err)
 		}
 		attachment.Data = data
+		total += int64(len(data))
 	}
 	if kind == "mail.send" {
 		return json.Marshal(message)
 	}
 	draft.Message = message
 	return json.Marshal(draft)
+}
+
+func readRegularAttachment(path string, limit int64) ([]byte, error) {
+	pathInfo, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !pathInfo.Mode().IsRegular() {
+		return nil, fmt.Errorf("attachment path must reference a regular file")
+	}
+	if pathInfo.Size() > limit {
+		return nil, fmt.Errorf("attachment exceeds the 25 MiB total limit")
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("attachment path must reference a regular file")
+	}
+	if info.Size() > limit {
+		return nil, fmt.Errorf("attachment exceeds the 25 MiB total limit")
+	}
+	data, err := io.ReadAll(io.LimitReader(file, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("attachment exceeds the 25 MiB total limit")
+	}
+	return data, nil
 }
 
 func digestResolvedConnection(connection model.Connection) (string, error) {
@@ -2142,23 +2197,19 @@ func (s *Service) cacheEventsReplacingWithID(connection model.Connection, cacheI
 	for index := range events {
 		events[index].CachedAt = now
 	}
-	scoped := append([]model.Event(nil), events...)
-	if !replaceScoped {
-		if entry, ok, getErr := ledger.Get(context.Background(), "events", scopedCacheKey(cacheID, scope), false); getErr == nil && ok {
+	if err := ledger.Mutate(context.Background(), state.CacheEntry{Namespace: "events", Key: scopedCacheKey(cacheID, scope), ConnectionID: connectionID, Kind: "event", CachedAt: now, ExpiresAt: now.Add(s.eventTTL())}, func(current []byte, found bool) ([]byte, error) {
+		scoped := append([]model.Event(nil), events...)
+		if !replaceScoped && found {
 			var existing []model.Event
-			if json.Unmarshal(entry.Value, &existing) == nil {
+			if json.Unmarshal(current, &existing) == nil {
 				if len(replaceCollections) > 0 {
 					existing = slices.DeleteFunc(existing, func(event model.Event) bool { return containsFolded(replaceCollections, event.CollectionID) })
 				}
 				scoped = mergeEvents(existing, scoped)
 			}
 		}
-	}
-	data, err := json.Marshal(scoped)
-	if err != nil {
-		return err
-	}
-	if err := ledger.Put(context.Background(), state.CacheEntry{Namespace: "events", Key: scopedCacheKey(cacheID, scope), ConnectionID: connectionID, Kind: "event", CachedAt: now, ExpiresAt: now.Add(s.eventTTL()), Value: data}); err != nil {
+		return json.Marshal(scoped)
+	}); err != nil {
 		return err
 	}
 	return ledger.Mutate(context.Background(), state.CacheEntry{Namespace: "event_index", Key: cacheID, ConnectionID: connectionID, Kind: "event", CachedAt: now, ExpiresAt: now.Add(s.eventTTL())}, func(current []byte, found bool) ([]byte, error) {

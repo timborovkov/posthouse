@@ -69,7 +69,7 @@ Store a keychain value without putting it on a command line:
 printf '%s' "$ACME_MAIL_PASSWORD" | posthouse connection secret set acme-mail --file -
 ```
 
-Config v1 is migrated atomically to v2 on load and backed up beside the config as `*.v1.bak`. Headless MCP and Docker deployments must use environment references and set `POSTHOUSE_CACHE_KEY` to a base64- or hex-encoded 32-byte key. Desktop use creates and stores the cache master key in an isolated OS-credential namespace when possible; plaintext fallback is never used. State opening verifies an encrypted key marker, so `/readyz` fails instead of accepting a wrong key.
+Config v1 is migrated atomically to v2 on load and backed up beside the config as `*.v1.bak`. Headless MCP and Docker deployments must use environment references and set `POSTHOUSE_CACHE_KEY` to a base64- or hex-encoded 32-byte key. Desktop use creates a path-scoped cache master key in an isolated OS-credential namespace, so rekeying one configured SQLite database cannot strand another; existing shared desktop keys migrate to the path-scoped slot when opened. Plaintext fallback is never used. State opening verifies an encrypted key marker, so `/readyz` fails instead of accepting a wrong key.
 
 ## CLI workflows
 
@@ -110,6 +110,8 @@ posthouse cache rekey --key-env POSTHOUSE_CACHE_KEY_NEW
 # Full-screen keyboard interface
 posthouse tui
 ```
+
+Outbound attachment payloads are limited to 25 MiB total per prepared mail or draft operation. Path-backed attachments must be regular files; directories, devices, pipes, and files that grow past the limit are rejected before provider I/O.
 
 For a headless rekey, the command cannot modify its parent shell or deployment secret. Keep both values available until the command succeeds, then replace the active key before starting any other Posthouse process:
 
@@ -174,7 +176,7 @@ cp .env.example .env
 docker compose up --build
 ```
 
-The service binds `127.0.0.1:8791`, mounts `./data` at `/data`, and uses `/data/config.json` plus `/data/posthouse.db` by default.
+The service binds `127.0.0.1:8791`, mounts the Docker-managed `posthouse-data` volume at `/data`, and uses `/data/config.json` plus `/data/posthouse.db` by default. The named volume remains writable by the image's non-root Posthouse user; inspect or back it up with standard Docker volume commands rather than replacing it with an unowned host bind mount.
 
 Development needs no real provider accounts. [docker-compose.test.yml](./docker-compose.test.yml) pins GreenMail `2.1.11` and Radicale `3.7.3`, binds them only to loopback, seeds isolated `work` and `personal` principals, and discards state after each suite:
 

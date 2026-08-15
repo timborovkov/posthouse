@@ -742,6 +742,28 @@ func TestConcurrentSharedCacheIndexMergesRetainEveryResult(t *testing.T) {
 		if !ok || len(cached) != 40 {
 			t.Fatalf("calendar index retained %d events, found=%v", len(cached), ok)
 		}
+		for index := range 20 {
+			ready := make(chan struct{})
+			errors := make(chan error, 2)
+			for offset, application := range []*Service{first, second} {
+				go func(offset int, application *Service) {
+					<-ready
+					collection := fmt.Sprintf("collection-%d-%d", index, offset)
+					event := model.Event{ConnectionID: connection.ID, CollectionID: collection, ID: collection, Start: instant(9 + offset), End: instant(10 + offset)}
+					errors <- application.cacheEventsReplacing(connection.ID, "shared-partial-scope", []model.Event{event}, start, end, false, false, []string{collection})
+				}(offset, application)
+			}
+			close(ready)
+			for range 2 {
+				if err := <-errors; err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		cached, ok = first.cachedEvents(connection, "shared-partial-scope", nil, start, end, "")
+		if !ok || len(cached) != 40 {
+			t.Fatalf("calendar scoped cache retained %d events, found=%v", len(cached), ok)
+		}
 	})
 	t.Run("mail", func(t *testing.T) {
 		connection := mailConnection("work")
@@ -1326,6 +1348,35 @@ func TestOperationDigestFramesAttachmentContent(t *testing.T) {
 	}
 }
 
+func TestPrepareRejectsUnsafeOutboundAttachmentSources(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	connection := mailConnection("work")
+	connection.Mail.SMTP = model.SMTPConfig{Address: "localhost:3025", Insecure: true}
+	application := serviceWithConnections(t, connection)
+	prepare := func(path string) error {
+		_, err := application.PrepareSend(context.Background(), model.SendMessage{ConnectionID: "work", To: []string{"person@example.test"}, Attachments: []model.AttachmentInput{{Path: path}}})
+		return err
+	}
+	large := filepath.Join(t.TempDir(), "large.bin")
+	file, err := os.Create(large)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Truncate(maxOutboundAttachmentBytes + 1); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := prepare(large); err == nil || !strings.Contains(err.Error(), "25 MiB") {
+		t.Fatalf("oversized attachment error = %v", err)
+	}
+	if err := prepare(t.TempDir()); err == nil || !strings.Contains(err.Error(), "regular file") {
+		t.Fatalf("non-regular attachment error = %v", err)
+	}
+}
+
 func TestSyncSkipsProtocolAbsentFromSelection(t *testing.T) {
 	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
 	application := serviceWithConnections(t, mailConnection("work"))
@@ -1753,6 +1804,40 @@ func TestSentCopyUsesDeliveredBytesAndAppendFailureIsUncertain(t *testing.T) {
 	replayed, replayErr := application.ExecuteOperation(context.Background(), prepared.Token)
 	if replayErr != nil || replayed.Status != "uncertain" || builds != 1 || sends != 1 || appends != 1 {
 		t.Fatalf("replay=%#v err=%v counts=%d/%d/%d", replayed, replayErr, builds, sends, appends)
+	}
+}
+
+func TestSentCopyPreservesBCCWithoutExposingItToSMTP(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	connection := mailConnection("work")
+	connection.Identity = model.Identity{Email: "work@example.test"}
+	connection.Mail.SMTP = model.SMTPConfig{Address: "localhost:3025", Insecure: true}
+	connection.Mail.SentCopy = "always"
+	connection.Mail.Folders.Sent = "Sent"
+	application := serviceWithConnections(t, connection)
+	var delivered, archived []byte
+	application.mailSendRaw = func(_ model.Connection, _ model.SendMessage, data []byte) error {
+		delivered = append([]byte(nil), data...)
+		return nil
+	}
+	application.mailAppendRaw = func(_ model.Connection, _ string, data []byte, _ []imap.Flag) (uint32, error) {
+		archived = append([]byte(nil), data...)
+		return 9, nil
+	}
+	message := model.SendMessage{ConnectionID: "work", To: []string{"person@example.test"}, BCC: []string{"hidden@example.test"}, Subject: "subject", Text: "body"}
+	prepared, err := application.PrepareSend(context.Background(), message)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := application.ExecuteOperation(context.Background(), prepared.Token); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(delivered), "hidden@example.test") || !strings.Contains(string(archived), "Bcc: <hidden@example.test>") {
+		t.Fatalf("delivered=%q archived=%q", delivered, archived)
+	}
+	withoutBCC := strings.Replace(string(archived), "\r\nBcc: <hidden@example.test>", "", 1)
+	if withoutBCC != string(delivered) {
+		t.Fatal("sent copy changed bytes other than the archival Bcc header")
 	}
 }
 

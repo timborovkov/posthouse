@@ -178,12 +178,12 @@ func PutCalDAVEvent(ctx context.Context, connection model.Connection, event mode
 	if err != nil {
 		return model.Event{}, err
 	}
-	if !create && event.RecurrenceID != "" {
+	if !create {
 		existing, _, err := getCalendarObject(ctx, httpClient, endpoint, target)
 		if err != nil {
 			return model.Event{}, err
 		}
-		data, err = mergeOccurrence(existing, data, event.RecurrenceID)
+		data, err = mergeUpdatedEvent(existing, data, event.RecurrenceID)
 		if err != nil {
 			return model.Event{}, err
 		}
@@ -331,74 +331,86 @@ func GenerateInvitation(event model.Event, cancel bool) (model.Event, string, er
 }
 
 func mergeOccurrence(existing []byte, replacement, recurrenceID string) (string, error) {
-	recurrenceTime, err := time.Parse(time.RFC3339, recurrenceID)
-	if err != nil {
-		return "", fmt.Errorf("invalid recurrence ID: %w", err)
-	}
-	target := recurrenceTime.UTC().Format(time.RFC3339)
+	return mergeUpdatedEvent(existing, replacement, recurrenceID)
+}
+
+func mergeUpdatedEvent(existing []byte, replacement, recurrenceID string) (string, error) {
 	parsedCalendar, err := ics.ParseCalendar(bytes.NewReader(existing))
 	if err != nil {
 		return "", fmt.Errorf("parse existing CalDAV object: %w", err)
 	}
+	replacementCalendar, err := ics.ParseCalendar(strings.NewReader(replacement))
+	if err != nil {
+		return "", fmt.Errorf("parse replacement CalDAV object: %w", err)
+	}
+	replacementEvents := replacementCalendar.Events()
+	if len(replacementEvents) != 1 {
+		return "", fmt.Errorf("replacement calendar must contain exactly one VEVENT")
+	}
+	replacementEvent := replacementEvents[0]
 	locations, err := embeddedTimezones(parsedCalendar)
 	if err != nil {
 		return "", err
 	}
-	lines := unfold(string(existing))
-	replacementLines := unfold(replacement)
-	var replacementEvent []string
-	inReplacement := false
-	for _, line := range replacementLines {
-		if line == "BEGIN:VEVENT" {
-			inReplacement = true
+	targetRecurrence := ""
+	if recurrenceID != "" {
+		recurrenceTime, err := time.Parse(time.RFC3339, recurrenceID)
+		if err != nil {
+			return "", fmt.Errorf("invalid recurrence ID: %w", err)
 		}
-		if inReplacement {
-			replacementEvent = append(replacementEvent, line)
-		}
-		if line == "END:VEVENT" && inReplacement {
-			break
-		}
+		targetRecurrence = recurrenceTime.UTC().Format(time.RFC3339)
 	}
-	if len(replacementEvent) == 0 {
-		return "", fmt.Errorf("replacement event is missing VEVENT")
-	}
-	output := make([]string, 0, len(lines)+len(replacementEvent))
-	for index := 0; index < len(lines); {
-		if lines[index] != "BEGIN:VEVENT" {
-			if lines[index] == "END:VCALENDAR" {
-				output = append(output, replacementEvent...)
-			}
-			output = append(output, lines[index])
-			index++
+	for _, current := range parsedCalendar.Events() {
+		if current.Id() != replacementEvent.Id() {
 			continue
 		}
-		end := index + 1
-		for end < len(lines) && lines[end] != "END:VEVENT" {
-			end++
+		currentRecurrence, err := eventRecurrenceKey(current, locations)
+		if err != nil {
+			return "", err
 		}
-		if end >= len(lines) {
-			return "", fmt.Errorf("existing CalDAV object has an unterminated VEVENT")
+		if currentRecurrence != targetRecurrence {
+			continue
 		}
-		matches := false
-		for _, line := range lines[index : end+1] {
-			nameAndParams, value, ok := strings.Cut(line, ":")
-			if !ok || !strings.EqualFold(strings.Split(nameAndParams, ";")[0], "RECURRENCE-ID") {
-				continue
-			}
-			parsed, _, parseErr := parseTimeWithLocations(nameAndParams, value, locations)
-			if parseErr == nil && parsed.UTC().Format(time.RFC3339) == target {
-				matches = true
-			}
-		}
-		if !matches {
-			output = append(output, lines[index:end+1]...)
-		}
-		index = end + 1
+		mergeModeledEventProperties(current, replacementEvent)
+		return parsedCalendar.Serialize(ics.WithNewLine("\r\n")), nil
 	}
-	for index := range output {
-		output[index] = fold(output[index])
+	if targetRecurrence == "" {
+		return "", fmt.Errorf("existing CalDAV object does not contain the event series master")
 	}
-	return strings.Join(output, "\r\n") + "\r\n", nil
+	parsedCalendar.AddVEvent(replacementEvent)
+	return parsedCalendar.Serialize(ics.WithNewLine("\r\n")), nil
+}
+
+func eventRecurrenceKey(event *ics.VEvent, locations map[string]*time.Location) (string, error) {
+	property := event.GetProperty(ics.ComponentPropertyRecurrenceId)
+	if property == nil {
+		return "", nil
+	}
+	value, err := propertyTime(property, locations)
+	if err != nil {
+		return "", fmt.Errorf("parse existing RECURRENCE-ID: %w", err)
+	}
+	return value.UTC().Format(time.RFC3339), nil
+}
+
+func mergeModeledEventProperties(current, replacement *ics.VEvent) {
+	modeled := map[string]struct{}{
+		"UID": {}, "DTSTAMP": {}, "DTSTART": {}, "DTEND": {}, "DURATION": {},
+		"SUMMARY": {}, "RECURRENCE-ID": {}, "RRULE": {}, "RDATE": {}, "EXDATE": {},
+		"SEQUENCE": {}, "STATUS": {}, "DESCRIPTION": {}, "LOCATION": {}, "ORGANIZER": {}, "ATTENDEE": {},
+	}
+	kept := current.Properties[:0]
+	for _, property := range current.Properties {
+		if _, replace := modeled[strings.ToUpper(property.IANAToken)]; !replace {
+			kept = append(kept, property)
+		}
+	}
+	current.Properties = kept
+	for _, property := range replacement.Properties {
+		if _, replace := modeled[strings.ToUpper(property.IANAToken)]; replace {
+			current.Properties = append(current.Properties, property)
+		}
+	}
 }
 
 func calDAVClient(connection model.Connection) (*caldav.Client, *basicAuthClient, string, error) {
