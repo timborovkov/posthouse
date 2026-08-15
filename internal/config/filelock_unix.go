@@ -1,16 +1,17 @@
-//go:build aix || darwin || dragonfly || freebsd || linux || netbsd || openbsd || solaris
+//go:build darwin || dragonfly || freebsd || linux || netbsd || openbsd || solaris
 
 package config
 
 import (
 	"os"
-	"syscall"
+
+	"golang.org/x/sys/unix"
 )
 
 func lockConfigFile(file *os.File) error {
-	return syscall.Flock(int(file.Fd()), syscall.LOCK_EX)
+	return unix.Flock(int(file.Fd()), unix.LOCK_EX)
 }
 
 func unlockConfigFile(file *os.File) error {
-	return syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
+	return unix.Flock(int(file.Fd()), unix.LOCK_UN)
 }
