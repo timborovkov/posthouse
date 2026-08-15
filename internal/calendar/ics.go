@@ -160,10 +160,7 @@ func ParseRange(data []byte, rangeStart, rangeEnd time.Time) ([]model.Event, err
 			}
 			continue
 		}
-		lookback := rangeStart.Add(-event.End.Sub(event.Start))
-		if event.AllDay {
-			lookback = rangeStart.AddDate(0, 0, -calendarDaySpan(event.Start, event.End))
-		}
+		lookback, candidateEnd := recurrenceCandidateBounds(event, futureOverrides[event.ID], rangeStart, rangeEnd)
 		set := &rrule.Set{}
 		if event.RecurrenceRule != "" {
 			rule, err := rrule.StrToRRule("RRULE:" + event.RecurrenceRule)
@@ -193,7 +190,7 @@ func ParseRange(data []byte, rangeStart, rangeEnd time.Time) ([]model.Event, err
 		generated := 0
 		for {
 			occurrenceStart, ok := next()
-			if !ok || occurrenceStart.After(rangeEnd) {
+			if !ok || occurrenceStart.After(candidateEnd) {
 				break
 			}
 			generated++
@@ -273,6 +270,26 @@ func ParseRange(data []byte, rangeStart, rangeEnd time.Time) ([]model.Event, err
 		return strings.Compare(a.ID, b.ID)
 	})
 	return result, nil
+}
+
+func recurrenceCandidateBounds(master model.Event, overrides []futureOverride, rangeStart, rangeEnd time.Time) (time.Time, time.Time) {
+	lookback := rangeStart.Add(-master.End.Sub(master.Start))
+	if master.AllDay {
+		lookback = rangeStart.AddDate(0, 0, -calendarDaySpan(master.Start, master.End))
+	}
+	candidateEnd := rangeEnd
+	for _, override := range overrides {
+		delta := override.event.Start.Sub(override.original)
+		candidateStart := rangeStart.Add(-override.event.End.Sub(override.event.Start)).Add(-delta)
+		if candidateStart.Before(lookback) {
+			lookback = candidateStart
+		}
+		shiftedEnd := rangeEnd.Add(-delta)
+		if shiftedEnd.After(candidateEnd) {
+			candidateEnd = shiftedEnd
+		}
+	}
+	return lookback, candidateEnd
 }
 
 type futureOverride struct {
@@ -527,6 +544,12 @@ func Generate(event model.Event) (model.Event, string, error) {
 	}
 	if event.Start.IsZero() || event.End.IsZero() || !event.End.After(event.Start) {
 		return model.Event{}, "", fmt.Errorf("event end must be after start")
+	}
+	if event.RecurrenceRange != "" {
+		if event.RecurrenceID == "" || !strings.EqualFold(event.RecurrenceRange, "THISANDFUTURE") {
+			return model.Event{}, "", fmt.Errorf("recurrence range must be THISANDFUTURE on a recurrence override")
+		}
+		event.RecurrenceRange = "THISANDFUTURE"
 	}
 	if event.ID == "" {
 		event.ID = "posthouse-" + rand.Text()

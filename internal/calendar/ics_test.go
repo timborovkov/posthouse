@@ -390,6 +390,53 @@ END:VCALENDAR`
 	}
 }
 
+func TestThisAndFutureShiftWidensCandidateBoundaries(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		overrideStart string
+		rangeStart    time.Time
+		rangeEnd      time.Time
+		wantHour      int
+	}{
+		{name: "positive shift across start", overrideStart: "20260816T210000Z", rangeStart: time.Date(2026, 8, 17, 20, 30, 0, 0, time.UTC), rangeEnd: time.Date(2026, 8, 17, 22, 30, 0, 0, time.UTC), wantHour: 21},
+		{name: "negative shift across end", overrideStart: "20260816T010000Z", rangeStart: time.Date(2026, 8, 17, 0, 30, 0, 0, time.UTC), rangeEnd: time.Date(2026, 8, 17, 2, 30, 0, 0, time.UTC), wantHour: 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			data := fmt.Sprintf(`BEGIN:VCALENDAR
+VERSION:2.0
+BEGIN:VEVENT
+UID:boundary
+DTSTART:20260815T090000Z
+DTEND:20260815T100000Z
+RRULE:FREQ=DAILY;COUNT=4
+SUMMARY:Original
+END:VEVENT
+BEGIN:VEVENT
+UID:boundary
+RECURRENCE-ID;RANGE=THISANDFUTURE:20260816T090000Z
+DTSTART:%s
+DURATION:PT1H
+SUMMARY:Shifted
+END:VEVENT
+END:VCALENDAR`, test.overrideStart)
+			events, err := ParseRange([]byte(data), test.rangeStart, test.rangeEnd)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(events) != 1 || events[0].Start.Hour() != test.wantHour || events[0].Title != "Shifted" {
+				t.Fatalf("boundary-shifted events = %#v", events)
+			}
+		})
+	}
+}
+
+func TestGenerateRejectsInvalidRecurrenceRange(t *testing.T) {
+	event := model.Event{ID: "range", Title: "Range", Start: time.Date(2026, 8, 15, 9, 0, 0, 0, time.UTC), End: time.Date(2026, 8, 15, 10, 0, 0, 0, time.UTC), RecurrenceID: "2026-08-15T09:00:00Z", RecurrenceRange: "THISANDFUTURE\r\nATTENDEE:mailto:attacker@example.test"}
+	if _, _, err := Generate(event); err == nil || !strings.Contains(err.Error(), "recurrence range") {
+		t.Fatalf("Generate accepted invalid recurrence range: %v", err)
+	}
+}
+
 func TestParseRejectsDenseTimezoneRecurrence(t *testing.T) {
 	data := `BEGIN:VCALENDAR
 VERSION:2.0
