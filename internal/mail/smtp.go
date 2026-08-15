@@ -263,6 +263,13 @@ func validateMessage(message model.SendMessage) error {
 			return fmt.Errorf("attachment name is required")
 		}
 		if attachment.Path != "" && attachment.Data == nil {
+			info, err := os.Stat(attachment.Path)
+			if err != nil {
+				return fmt.Errorf("inspect attachment %s: %w", name, err)
+			}
+			if !info.Mode().IsRegular() {
+				return fmt.Errorf("attachment %s must be a regular file", name)
+			}
 			file, err := os.Open(attachment.Path)
 			if err != nil {
 				return fmt.Errorf("open attachment %s: %w", name, err)

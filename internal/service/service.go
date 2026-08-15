@@ -691,6 +691,9 @@ func (s *Service) prepareSendWithConnection(ctx context.Context, connection mode
 		return model.PreparedOperation{}, fmt.Errorf("connection %s requires a sent-copy folder; run connection discover or configure folders.sent", connection.ID)
 	}
 	message.ConnectionID = connection.ID
+	if err := validateOutboundAttachmentInputs(message.Attachments); err != nil {
+		return model.PreparedOperation{}, err
+	}
 	if err := postmail.ValidateMessage(message); err != nil {
 		return model.PreparedOperation{}, fmt.Errorf("validate message: %w", err)
 	}
@@ -850,6 +853,9 @@ func (s *Service) PrepareDraft(ctx context.Context, connectionID, kind string, f
 	}
 	message.ConnectionID = connection.ID
 	if kind != "mail.draft.delete" {
+		if err := validateOutboundAttachmentInputs(message.Attachments); err != nil {
+			return model.PreparedOperation{}, err
+		}
 		if err := postmail.ValidateMessage(message); err != nil {
 			return model.PreparedOperation{}, fmt.Errorf("validate draft message: %w", err)
 		}
@@ -1612,6 +1618,28 @@ func readRegularAttachment(path string, limit int64) ([]byte, error) {
 		return nil, fmt.Errorf("attachment exceeds the 25 MiB total limit")
 	}
 	return data, nil
+}
+
+func validateOutboundAttachmentInputs(attachments []model.AttachmentInput) error {
+	var total int64
+	for _, attachment := range attachments {
+		if attachment.Path == "" || attachment.Data != nil {
+			total += int64(len(attachment.Data))
+		} else {
+			info, err := os.Stat(attachment.Path)
+			if err != nil {
+				return fmt.Errorf("inspect attachment %s: %w", attachment.Path, err)
+			}
+			if !info.Mode().IsRegular() {
+				return fmt.Errorf("attachment path must reference a regular file")
+			}
+			total += info.Size()
+		}
+		if total > maxOutboundAttachmentBytes {
+			return fmt.Errorf("outbound attachments exceed the 25 MiB total limit")
+		}
+	}
+	return nil
 }
 
 func digestResolvedConnection(connection model.Connection) (string, error) {
