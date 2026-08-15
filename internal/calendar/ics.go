@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"slices"
@@ -741,7 +742,9 @@ func resolveFeedURL(connection model.Connection) (string, error) {
 	if err != nil || parsed.Host == "" {
 		return "", fmt.Errorf("connection %s has an invalid calendar feed URL", connection.ID)
 	}
-	if parsed.Scheme != "https" && parsed.Hostname() != "localhost" && parsed.Hostname() != "127.0.0.1" {
+	host := parsed.Hostname()
+	ip := net.ParseIP(host)
+	if parsed.Scheme != "https" && host != "localhost" && (ip == nil || !ip.IsLoopback()) {
 		return "", fmt.Errorf("connection %s calendar feed URL must use HTTPS", connection.ID)
 	}
 	return feedURL, nil

@@ -166,6 +166,13 @@ func TestClientFiltersFeed(t *testing.T) {
 	}
 }
 
+func TestResolveFeedURLAcceptsIPv6LoopbackHTTP(t *testing.T) {
+	connection := model.Connection{ID: "local", Calendar: &model.CalendarConfig{Kind: "feed", URL: "http://[::1]:8080/calendar.ics"}}
+	if resolved, err := resolveFeedURL(connection); err != nil || resolved != connection.Calendar.URL {
+		t.Fatalf("resolveFeedURL returned %q, %v", resolved, err)
+	}
+}
+
 func TestClientDoesNotExposeProviderErrorBody(t *testing.T) {
 	client := NewClient(&http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 		return response(http.StatusBadGateway, "private calendar content and secret-token"), nil
