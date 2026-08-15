@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/timborovkov/posthouse/internal/model"
 	"github.com/zalando/go-keyring"
@@ -24,6 +25,8 @@ const (
 type Store struct {
 	path string
 }
+
+var configUpdateLocks sync.Map
 
 func New(path string) (*Store, error) {
 	if path == "" {
@@ -44,6 +47,16 @@ func (s *Store) Path() string {
 }
 
 func (s *Store) Load() (model.Config, error) {
+	var cfg model.Config
+	err := s.withConfigLock(func() error {
+		var err error
+		cfg, err = s.loadUnlocked()
+		return err
+	})
+	return cfg, err
+}
+
+func (s *Store) loadUnlocked() (model.Config, error) {
 	data, err := os.ReadFile(s.path)
 	if errors.Is(err, os.ErrNotExist) {
 		cfg := model.Config{Version: currentVersion}
@@ -62,7 +75,7 @@ func (s *Store) Load() (model.Config, error) {
 		if err := s.backupV1(data); err != nil {
 			return model.Config{}, err
 		}
-		if err := s.Save(cfg); err != nil {
+		if err := s.saveUnlocked(cfg); err != nil {
 			return model.Config{}, fmt.Errorf("save migrated config: %w", err)
 		}
 	}
@@ -77,6 +90,46 @@ func (s *Store) Load() (model.Config, error) {
 }
 
 func (s *Store) Save(cfg model.Config) error {
+	return s.withConfigLock(func() error { return s.saveUnlocked(cfg) })
+}
+
+// Update serializes a complete load-modify-save transaction across goroutines
+// and processes using the same configuration path.
+func (s *Store) Update(change func(model.Config) (model.Config, error)) error {
+	return s.withConfigLock(func() error {
+		cfg, err := s.loadUnlocked()
+		if err != nil {
+			return err
+		}
+		cfg, err = change(cfg)
+		if err != nil {
+			return err
+		}
+		return s.saveUnlocked(cfg)
+	})
+}
+
+func (s *Store) withConfigLock(action func() error) error {
+	if err := os.MkdirAll(filepath.Dir(s.path), 0o700); err != nil {
+		return fmt.Errorf("create config directory: %w", err)
+	}
+	value, _ := configUpdateLocks.LoadOrStore(s.path, &sync.Mutex{})
+	mutex := value.(*sync.Mutex)
+	mutex.Lock()
+	defer mutex.Unlock()
+	lock, err := os.OpenFile(s.path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return fmt.Errorf("open config lock: %w", err)
+	}
+	defer lock.Close()
+	if err := lockConfigFile(lock); err != nil {
+		return fmt.Errorf("lock config: %w", err)
+	}
+	defer unlockConfigFile(lock)
+	return action()
+}
+
+func (s *Store) saveUnlocked(cfg model.Config) error {
 	var err error
 	cfg, err = Normalize(cfg)
 	if err != nil {

@@ -2,10 +2,13 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/timborovkov/posthouse/internal/model"
 )
@@ -38,6 +41,58 @@ func TestLoadMigratesV1AtomicallyAndKeepsBackup(t *testing.T) {
 	}
 	if original.Version != 1 || original.Connections[0].Mail.SecretEnv != "WORK_PASSWORD" {
 		t.Fatalf("backup changed: %#v", original)
+	}
+}
+
+func TestStoreUpdateSerializesAcrossProcesses(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	store, err := New(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(model.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	commands := []*exec.Cmd{
+		exec.Command(os.Args[0], "-test.run=^TestStoreUpdateHelperProcess$"),
+		exec.Command(os.Args[0], "-test.run=^TestStoreUpdateHelperProcess$"),
+	}
+	for index, command := range commands {
+		command.Env = append(os.Environ(), "POSTHOUSE_CONFIG_UPDATE_HELPER=1", "POSTHOUSE_CONFIG_UPDATE_PATH="+path, fmt.Sprintf("POSTHOUSE_CONFIG_UPDATE_ID=connection-%d", index))
+		if err := command.Start(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, command := range commands {
+		if err := command.Wait(); err != nil {
+			t.Fatalf("config update helper failed: %v", err)
+		}
+	}
+	cfg, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Connections) != 2 {
+		t.Fatalf("concurrent updates retained %d connections, want 2: %#v", len(cfg.Connections), cfg.Connections)
+	}
+}
+
+func TestStoreUpdateHelperProcess(t *testing.T) {
+	if os.Getenv("POSTHOUSE_CONFIG_UPDATE_HELPER") != "1" {
+		return
+	}
+	store, err := New(os.Getenv("POSTHOUSE_CONFIG_UPDATE_PATH"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = store.Update(func(cfg model.Config) (model.Config, error) {
+		time.Sleep(100 * time.Millisecond)
+		id := os.Getenv("POSTHOUSE_CONFIG_UPDATE_ID")
+		cfg.Connections = append(cfg.Connections, model.Connection{ID: id, Name: id, Calendar: &model.CalendarConfig{URL: "https://calendar.example.test/events.ics"}})
+		return cfg, nil
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 }
 

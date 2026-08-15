@@ -176,66 +176,65 @@ func (s *Service) ListConnections(selection model.Selector, requestedPageSize in
 }
 
 func (s *Service) UpsertConnection(connection model.Connection, replace bool) error {
-	cfg, err := s.store.Load()
+	providerChanged := false
+	err := s.store.Update(func(cfg model.Config) (model.Config, error) {
+		for index, existing := range cfg.Connections {
+			if existing.ID != connection.ID {
+				continue
+			}
+			if !replace {
+				return model.Config{}, fmt.Errorf("connection %s already exists; pass --replace to update it", connection.ID)
+			}
+			proposed := cfg
+			proposed.Connections = slices.Clone(cfg.Connections)
+			proposed.Connections[index] = connection
+			proposed, err := config.Normalize(proposed)
+			if err != nil {
+				return model.Config{}, err
+			}
+			connection = proposed.Connections[index]
+			providerChanged = providerConfigID(existing) != providerConfigID(connection)
+			return proposed, nil
+		}
+		cfg.Connections = append(cfg.Connections, connection)
+		return cfg, nil
+	})
 	if err != nil {
 		return err
 	}
-	for index, existing := range cfg.Connections {
-		if existing.ID != connection.ID {
-			continue
-		}
-		if !replace {
-			return fmt.Errorf("connection %s already exists; pass --replace to update it", connection.ID)
-		}
-		proposed := cfg
-		proposed.Connections = slices.Clone(cfg.Connections)
-		proposed.Connections[index] = connection
-		proposed, err = config.Normalize(proposed)
+	if providerChanged {
+		ledger, err := s.ensureState()
 		if err != nil {
-			return err
+			return fmt.Errorf("open cache after replacing connection %s: %w", connection.ID, err)
 		}
-		connection = proposed.Connections[index]
-		providerChanged := providerConfigID(existing) != providerConfigID(connection)
-		if err := s.store.Save(proposed); err != nil {
-			return err
+		if err := ledger.ClearConnection(context.Background(), connection.ID); err != nil {
+			return fmt.Errorf("invalidate cache after replacing connection %s: %w", connection.ID, err)
 		}
-		if providerChanged {
-			ledger, err := s.ensureState()
-			if err != nil {
-				return fmt.Errorf("open cache after replacing connection %s: %w", connection.ID, err)
-			}
-			if err := ledger.ClearConnection(context.Background(), connection.ID); err != nil {
-				return fmt.Errorf("invalidate cache after replacing connection %s: %w", connection.ID, err)
-			}
-		}
-		return nil
 	}
-	cfg.Connections = append(cfg.Connections, connection)
-	return s.store.Save(cfg)
+	return nil
 }
 
 func (s *Service) RemoveConnection(id string) error {
-	cfg, err := s.store.Load()
+	err := s.store.Update(func(cfg model.Config) (model.Config, error) {
+		for index, connection := range cfg.Connections {
+			if connection.ID == id {
+				cfg.Connections = append(cfg.Connections[:index], cfg.Connections[index+1:]...)
+				return cfg, nil
+			}
+		}
+		return model.Config{}, fmt.Errorf("connection %s does not exist", id)
+	})
 	if err != nil {
 		return err
 	}
-	for index, connection := range cfg.Connections {
-		if connection.ID == id {
-			cfg.Connections = append(cfg.Connections[:index], cfg.Connections[index+1:]...)
-			if err := s.store.Save(cfg); err != nil {
-				return err
-			}
-			ledger, err := s.ensureState()
-			if err != nil {
-				return fmt.Errorf("open cache after removing connection %s: %w", id, err)
-			}
-			if err := ledger.ClearConnection(context.Background(), id); err != nil {
-				return fmt.Errorf("invalidate cache after removing connection %s: %w", id, err)
-			}
-			return nil
-		}
+	ledger, err := s.ensureState()
+	if err != nil {
+		return fmt.Errorf("open cache after removing connection %s: %w", id, err)
 	}
-	return fmt.Errorf("connection %s does not exist", id)
+	if err := ledger.ClearConnection(context.Background(), id); err != nil {
+		return fmt.Errorf("invalidate cache after removing connection %s: %w", id, err)
+	}
+	return nil
 }
 
 type mailCursorState struct {
@@ -1664,6 +1663,7 @@ func (s *Service) DiscoverConnection(ctx context.Context, id string) (model.Conn
 	if err != nil {
 		return model.Connection{}, err
 	}
+	providerID := providerConfigID(connection)
 	if connection.Mail != nil && connection.Mail.IMAP.Address != "" {
 		discovery, err := postmail.DiscoverContext(ctx, connection)
 		if err != nil {
@@ -1679,10 +1679,36 @@ func (s *Service) DiscoverConnection(ctx context.Context, id string) (model.Conn
 		}
 		connection.Calendar.Collections = preserveCollectionPolicies(existingCollections, discovery.Calendars)
 	}
-	if err := s.UpsertConnection(connection, true); err != nil {
+	discovered := connection
+	err = s.store.Update(func(current model.Config) (model.Config, error) {
+		for index, latest := range current.Connections {
+			if latest.ID != id {
+				continue
+			}
+			if providerConfigID(latest) != providerID {
+				return model.Config{}, fmt.Errorf("connection %s changed during discovery; run discovery again", id)
+			}
+			updated := latest
+			if discovered.Mail != nil && updated.Mail != nil {
+				mailConfig := *updated.Mail
+				mailConfig.Folders = discovered.Mail.Folders
+				updated.Mail = &mailConfig
+			}
+			if discovered.Calendar != nil && updated.Calendar != nil && discovered.Calendar.Kind == "caldav" {
+				calendarConfig := *updated.Calendar
+				calendarConfig.Collections = slices.Clone(discovered.Calendar.Collections)
+				updated.Calendar = &calendarConfig
+			}
+			current.Connections[index] = updated
+			discovered = updated
+			return current, nil
+		}
+		return model.Config{}, fmt.Errorf("connection %s was removed during discovery", id)
+	})
+	if err != nil {
 		return model.Connection{}, err
 	}
-	return publicConnection(connection), nil
+	return publicConnection(discovered), nil
 }
 
 func preserveCollectionPolicies(existing, discovered []model.CalendarCollection) []model.CalendarCollection {
