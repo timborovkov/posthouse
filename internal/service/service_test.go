@@ -399,7 +399,7 @@ func TestProviderCacheIdentityUsesResolvedSecretValues(t *testing.T) {
 	}
 }
 
-func TestSecretRotationDuringCalendarFetchSkipsCacheWrite(t *testing.T) {
+func TestCalendarFetchUsesOneResolvedProviderSnapshot(t *testing.T) {
 	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
 	t.Setenv("SECRET_FEED_URL", "https://calendar-one.example.test/feed.ics")
 	connection := model.Connection{ID: "calendar", Name: "Calendar", Calendar: &model.CalendarConfig{Kind: "feed", URLSecret: model.SecretRef{Env: "SECRET_FEED_URL"}}}
@@ -409,16 +409,57 @@ func TestSecretRotationDuringCalendarFetchSkipsCacheWrite(t *testing.T) {
 			t.Fatalf("provider request URL = %s", request.URL)
 		}
 		t.Setenv("SECRET_FEED_URL", "https://calendar-two.example.test/feed.ics")
+		t.Setenv("SECRET_FEED_URL", "https://calendar-one.example.test/feed.ics")
 		feed := "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n" + eventFixture("old", "Old provider", "20260814T090000Z") + "END:VCALENDAR\r\n"
 		return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: make(http.Header), Body: io.NopCloser(strings.NewReader(feed))}, nil
 	})})
 	start, end := instant(8), instant(12)
 	page, err := application.ListEventsMode(context.Background(), model.Selector{}, start, end, "", 10, "", "refresh")
-	if err != nil || len(page.Events) != 1 || len(page.Errors) != 1 || page.Errors[0].Code != "cache_write_skipped" {
-		t.Fatalf("rotated fetch page = %#v, %v", page, err)
+	if err != nil || len(page.Events) != 1 || len(page.Errors) != 0 {
+		t.Fatalf("snapshot fetch page = %#v, %v", page, err)
 	}
-	if _, err := application.ListEventsMode(context.Background(), model.Selector{}, start, end, "", 10, "", "offline"); err == nil {
-		t.Fatal("offline read found content fetched under the previous secret URL")
+	offline, err := application.ListEventsMode(context.Background(), model.Selector{}, start, end, "", 10, "", "offline")
+	if err != nil || len(offline.Events) != 1 || offline.Events[0].Title != "Old provider" {
+		t.Fatalf("offline snapshot = %#v, %v", offline, err)
+	}
+}
+
+func TestMailFetchUsesOneResolvedProviderSnapshot(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	connection := mailConnection("work")
+	application := serviceWithConnections(t, connection)
+	application.mailSearch = func(connection model.Connection, _ postmail.SearchOptions) (postmail.SearchResult, error) {
+		if connection.Mail.ResolvedSecret != "test-password" {
+			t.Fatalf("provider secret snapshot = %q", connection.Mail.ResolvedSecret)
+		}
+		t.Setenv("PASSWORD", "briefly-rotated")
+		t.Setenv("PASSWORD", "test-password")
+		return postmail.SearchResult{Messages: []model.Message{{ConnectionID: "work", Folder: "INBOX", UID: 1, Subject: "snapshot", Date: instant(9)}}, UIDValidity: 7, UIDNext: 2}, nil
+	}
+	page, err := application.SearchMessages(model.Selector{}, postmail.SearchOptions{Mode: "refresh"}, 10, "")
+	if err != nil || len(page.Messages) != 1 || len(page.Errors) != 0 {
+		t.Fatalf("snapshot search = %#v, %v", page, err)
+	}
+	offline, err := application.SearchMessages(model.Selector{}, postmail.SearchOptions{Mode: "offline"}, 10, "")
+	if err != nil || len(offline.Messages) != 1 || offline.Messages[0].Subject != "snapshot" {
+		t.Fatalf("offline snapshot = %#v, %v", offline, err)
+	}
+}
+
+func TestMailResolutionFailureKeepsSourceIdentity(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	t.Setenv("MISSING_PASSWORD", "")
+	good := mailConnection("good")
+	bad := mailConnection("bad")
+	bad.Mail.SecretEnv = ""
+	bad.Mail.Secret = model.SecretRef{Env: "MISSING_PASSWORD"}
+	application := serviceWithConnections(t, good, bad)
+	application.mailSearch = func(connection model.Connection, _ postmail.SearchOptions) (postmail.SearchResult, error) {
+		return postmail.SearchResult{Messages: []model.Message{{ConnectionID: connection.ID, Folder: "INBOX", UID: 1, Date: instant(9)}}, UIDValidity: 7, UIDNext: 2}, nil
+	}
+	page, err := application.SearchMessages(model.Selector{}, postmail.SearchOptions{Mode: "refresh"}, 10, "")
+	if err != nil || len(page.Messages) != 1 || len(page.Errors) != 1 || page.Errors[0].ConnectionID != "bad" {
+		t.Fatalf("partial resolution page = %#v, %v", page, err)
 	}
 }
 
@@ -434,6 +475,34 @@ func TestPreparedOperationRejectsRotatedProviderSecret(t *testing.T) {
 	t.Setenv("PASSWORD", "rotated-password")
 	if _, err := application.ExecuteOperation(context.Background(), prepared.Token); err == nil || !strings.Contains(err.Error(), "preconditions changed") {
 		t.Fatalf("ExecuteOperation error = %v", err)
+	}
+}
+
+func TestOperationExecutionUsesPrecheckedProviderSnapshot(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	connection := mailConnection("work")
+	connection.Mail.SMTP = model.SMTPConfig{Address: "localhost:3025", Insecure: true}
+	application := serviceWithConnections(t, connection)
+	prepared, err := application.PrepareSend(context.Background(), model.SendMessage{ConnectionID: "work", To: []string{"person@example.test"}, Subject: "subject", Text: "body"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	application.mailBuild = func(connection model.Connection, _ model.SendMessage) ([]byte, error) {
+		if connection.Mail.ResolvedSecret != "test-password" {
+			t.Fatalf("build provider secret snapshot = %q", connection.Mail.ResolvedSecret)
+		}
+		t.Setenv("PASSWORD", "rotated-after-precheck")
+		return []byte("message"), nil
+	}
+	application.mailSendRaw = func(connection model.Connection, _ model.SendMessage, _ []byte) error {
+		if connection.Mail.ResolvedSecret != "test-password" {
+			t.Fatalf("send provider secret snapshot = %q", connection.Mail.ResolvedSecret)
+		}
+		return nil
+	}
+	result, err := application.ExecuteOperation(context.Background(), prepared.Token)
+	if err != nil || result.Status != "succeeded" {
+		t.Fatalf("ExecuteOperation = %#v, %v", result, err)
 	}
 }
 

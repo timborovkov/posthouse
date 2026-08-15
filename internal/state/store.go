@@ -83,7 +83,7 @@ func DefaultPath(configPath, configured string) string {
 }
 
 func Open(path string, maxBytes int64) (*Store, error) {
-	key, err := masterKey()
+	key, err := serializedMasterKey(path)
 	if err != nil {
 		return nil, err
 	}
@@ -109,6 +109,38 @@ func Open(path string, maxBytes int64) (*Store, error) {
 	}
 	_, _ = store.db.Exec(`DELETE FROM state_meta WHERE name=?`, rekeyRecoveryName)
 	return store, nil
+}
+
+func serializedMasterKey(path string) ([]byte, error) {
+	if os.Getenv("POSTHOUSE_CACHE_KEY") != "" {
+		return masterKey()
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return nil, fmt.Errorf("create state directory: %w", err)
+	}
+	db, err := openDatabase(path)
+	if err != nil {
+		return nil, fmt.Errorf("open state database for cache-key initialization: %w", err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	connection, err := db.Conn(context.Background())
+	if err != nil {
+		return nil, fmt.Errorf("reserve cache-key initialization connection: %w", err)
+	}
+	defer connection.Close()
+	if _, err := connection.ExecContext(context.Background(), `BEGIN EXCLUSIVE`); err != nil {
+		return nil, fmt.Errorf("serialize cache-key initialization: %w", err)
+	}
+	key, keyErr := masterKey()
+	if keyErr != nil {
+		_, _ = connection.ExecContext(context.Background(), `ROLLBACK`)
+		return nil, keyErr
+	}
+	if _, err := connection.ExecContext(context.Background(), `COMMIT`); err != nil {
+		return nil, fmt.Errorf("commit cache-key initialization: %w", err)
+	}
+	return key, nil
 }
 
 func recoverRekeyKey(path string, oldKey []byte) ([]byte, error) {

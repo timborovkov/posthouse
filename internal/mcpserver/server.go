@@ -45,8 +45,8 @@ func (s *Server) RunHTTP(ctx context.Context, address string, token string, allo
 	if !isLoopback(host) && !allowContainerListener {
 		return fmt.Errorf("direct MCP HTTP must listen on loopback; use a TLS-terminating reverse proxy for remote access")
 	}
-	if !isLoopback(host) && token == "" {
-		return fmt.Errorf("POSTHOUSE_MCP_TOKEN is required for an explicitly allowed container listener")
+	if token == "" {
+		return fmt.Errorf("POSTHOUSE_MCP_TOKEN is required for HTTP transport")
 	}
 	handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return s.mcp }, &mcp.StreamableHTTPOptions{
 		Stateless: true, JSONResponse: true, Logger: logger, SessionTimeout: 5 * time.Minute,

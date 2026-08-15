@@ -65,7 +65,7 @@ func SearchContext(ctx context.Context, connection model.Connection, options Sea
 	if options.Folder == "" {
 		options.Folder = "INBOX"
 	}
-	secret, err := config.ResolveSecret(connection.Mail.Secret)
+	secret, err := resolvedMailSecret(connection)
 	if err != nil {
 		return SearchResult{}, err
 	}
@@ -200,6 +200,13 @@ func SearchContext(ctx context.Context, connection model.Connection, options Sea
 		}
 	}
 	return SearchResult{Messages: messages, UIDValidity: selected.UIDValidity, UIDNext: uint32(selected.UIDNext), HasMore: hasMore}, nil
+}
+
+func resolvedMailSecret(connection model.Connection) (string, error) {
+	if connection.Mail != nil && connection.Mail.ResolvedSecret != "" {
+		return connection.Mail.ResolvedSecret, nil
+	}
+	return config.ResolveSecret(connection.Mail.Secret)
 }
 
 func safePreviewSize(size, limit int64) bool { return size > 0 && size <= limit }

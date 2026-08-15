@@ -409,7 +409,10 @@ func calDAVClient(connection model.Connection) (*caldav.Client, *basicAuthClient
 	if err != nil {
 		return nil, nil, "", err
 	}
-	password, err := config.ResolveSecret(connection.Calendar.Secret)
+	password := connection.Calendar.ResolvedSecret
+	if password == "" {
+		password, err = config.ResolveSecret(connection.Calendar.Secret)
+	}
 	if err != nil {
 		return nil, nil, "", err
 	}
@@ -472,6 +475,9 @@ func getCalendarObject(ctx context.Context, client *basicAuthClient, endpoint, h
 }
 
 func resolveCalendarURL(connection model.Connection) (string, error) {
+	if connection.Calendar.ResolvedURL != "" {
+		return connection.Calendar.ResolvedURL, nil
+	}
 	if connection.Calendar.URL != "" {
 		return connection.Calendar.URL, nil
 	}

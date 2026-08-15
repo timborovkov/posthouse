@@ -336,6 +336,11 @@ func Validate(cfg model.Config) error {
 			if hasURL == hasSecretURL {
 				return fmt.Errorf("%s.calendar requires exactly one of url or url_secret", prefix)
 			}
+			if hasURL {
+				if err := validateCalendarURL(cal.URL); err != nil {
+					return fmt.Errorf("%s.calendar.url %w", prefix, err)
+				}
+			}
 			if cal.Insecure && hasSecretURL {
 				return fmt.Errorf("%s.calendar.insecure cannot be used with url_secret because loopback cannot be verified", prefix)
 			}
@@ -367,6 +372,31 @@ func Validate(cfg model.Config) error {
 		}
 	}
 	return nil
+}
+
+func validateCalendarURL(value string) error {
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Host == "" || parsed.Hostname() == "" {
+		return fmt.Errorf("is invalid")
+	}
+	if parsed.User != nil {
+		return fmt.Errorf("must not contain credentials")
+	}
+	if parsed.Scheme == "https" {
+		return nil
+	}
+	if parsed.Scheme == "http" && isLoopbackHostname(parsed.Hostname()) {
+		return nil
+	}
+	return fmt.Errorf("must use HTTPS, except for loopback HTTP development endpoints")
+}
+
+func isLoopbackHostname(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func validSecretRef(ref model.SecretRef) bool {

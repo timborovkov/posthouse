@@ -18,7 +18,6 @@ import (
 	"time"
 
 	gomail "github.com/emersion/go-message/mail"
-	"github.com/timborovkov/posthouse/internal/config"
 	"github.com/timborovkov/posthouse/internal/model"
 )
 
@@ -69,7 +68,7 @@ func SendSerializedContext(ctx context.Context, connection model.Connection, mes
 	if len(data) == 0 {
 		return fmt.Errorf("serialized message is empty")
 	}
-	secret, err := config.ResolveSecret(connection.Mail.Secret)
+	secret, err := resolvedMailSecret(connection)
 	if err != nil {
 		return err
 	}

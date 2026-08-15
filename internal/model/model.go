@@ -42,6 +42,9 @@ type MailConfig struct {
 	SMTP      SMTPConfig   `json:"smtp"`
 	Folders   FolderConfig `json:"folders,omitempty"`
 	SentCopy  string       `json:"sent_copy,omitempty"`
+	// ResolvedSecret is request-scoped provider state. It is never persisted or
+	// returned through public JSON surfaces.
+	ResolvedSecret string `json:"-"`
 }
 
 type SecretRef struct {
@@ -81,6 +84,10 @@ type CalendarConfig struct {
 	Secret       SecretRef            `json:"secret,omitempty"`
 	Collections  []CalendarCollection `json:"collections,omitempty"`
 	Insecure     bool                 `json:"insecure,omitempty"`
+	// ResolvedURL and ResolvedSecret freeze provider state for one request. They
+	// are deliberately excluded from configuration and public JSON.
+	ResolvedURL    string `json:"-"`
+	ResolvedSecret string `json:"-"`
 }
 
 type CalendarCollection struct {

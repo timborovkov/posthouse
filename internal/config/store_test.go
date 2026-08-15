@@ -79,6 +79,26 @@ func TestValidateRejectsRemoteInsecureCalDAVTLS(t *testing.T) {
 	}
 }
 
+func TestValidateCalendarLiteralURLSecurity(t *testing.T) {
+	connection := model.Connection{ID: "work", Name: "Work", Calendar: &model.CalendarConfig{Kind: "feed", URL: "https://calendar.example.test/events.ics"}}
+	cfg := model.Config{Version: 2, Connections: []model.Connection{connection}}
+	if err := Validate(cfg); err != nil {
+		t.Fatalf("Validate rejected HTTPS calendar URL: %v", err)
+	}
+	for _, value := range []string{"calendar.example.test/events.ics", "://bad", "http://calendar.example.test/events.ics", "ftp://calendar.example.test/events.ics", "https://user:pass@calendar.example.test/events.ics"} {
+		cfg.Connections[0].Calendar.URL = value
+		if err := Validate(cfg); err == nil {
+			t.Fatalf("Validate accepted unsafe calendar URL %q", value)
+		}
+	}
+	for _, value := range []string{"http://localhost:5232/events.ics", "http://127.0.0.1:5232/events.ics", "http://[::1]:5232/events.ics"} {
+		cfg.Connections[0].Calendar.URL = value
+		if err := Validate(cfg); err != nil {
+			t.Fatalf("Validate rejected loopback URL %q: %v", value, err)
+		}
+	}
+}
+
 func TestValidateRejectsNegativeCacheRetention(t *testing.T) {
 	for name, mutate := range map[string]func(*model.CacheConfig){
 		"metadata": func(cache *model.CacheConfig) { cache.MessageMetadataDays = -1 },

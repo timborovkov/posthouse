@@ -6,6 +6,7 @@ import (
 	"errors"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/zalando/go-keyring"
@@ -67,5 +68,55 @@ func TestKeychainRekeyRecoversAfterActivationFailure(t *testing.T) {
 	var recoveryRows int
 	if err := recovered.db.QueryRow(`SELECT COUNT(*) FROM state_meta WHERE name=?`, rekeyRecoveryName).Scan(&recoveryRows); err != nil || recoveryRows != 0 {
 		t.Fatalf("recovery record count=%d err=%v", recoveryRows, err)
+	}
+}
+
+func TestConcurrentFirstOpenUsesOneKeychainKey(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", "")
+	oldGet, oldSet := credentialGet, credentialSet
+	t.Cleanup(func() { credentialGet, credentialSet = oldGet, oldSet })
+	var mu sync.Mutex
+	secrets := make(map[string]string)
+	sets := 0
+	credentialGet = func(service, name string) (string, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		value, ok := secrets[service+"\x00"+name]
+		if !ok {
+			return "", keyring.ErrNotFound
+		}
+		return value, nil
+	}
+	credentialSet = func(service, name, value string) error {
+		mu.Lock()
+		defer mu.Unlock()
+		sets++
+		secrets[service+"\x00"+name] = value
+		return nil
+	}
+
+	path := filepath.Join(t.TempDir(), "posthouse.db")
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	for range 2 {
+		go func() {
+			<-start
+			store, err := Open(path, 2<<20)
+			if err == nil {
+				err = store.Close()
+			}
+			results <- err
+		}()
+	}
+	close(start)
+	for range 2 {
+		if err := <-results; err != nil {
+			t.Fatalf("concurrent Open returned %v", err)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if sets != 1 {
+		t.Fatalf("cache key stored %d times, want 1", sets)
 	}
 }

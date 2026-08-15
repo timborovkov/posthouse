@@ -20,7 +20,6 @@ import (
 	gomail "github.com/emersion/go-message/mail"
 	"github.com/microcosm-cc/bluemonday"
 
-	"github.com/timborovkov/posthouse/internal/config"
 	"github.com/timborovkov/posthouse/internal/model"
 )
 
@@ -704,7 +703,7 @@ func authenticatedIMAPContext(ctx context.Context, connection model.Connection) 
 	if connection.Mail == nil || connection.Mail.IMAP.Address == "" {
 		return nil, func() {}, fmt.Errorf("connection %s has no IMAP capability", connection.ID)
 	}
-	secret, err := config.ResolveSecret(connection.Mail.Secret)
+	secret, err := resolvedMailSecret(connection)
 	if err != nil {
 		return nil, func() {}, err
 	}
@@ -737,7 +736,7 @@ func DoctorSMTP(ctx context.Context, connection model.Connection) error {
 	if connection.Mail == nil || connection.Mail.SMTP.Address == "" {
 		return nil
 	}
-	secret, err := config.ResolveSecret(connection.Mail.Secret)
+	secret, err := resolvedMailSecret(connection)
 	if err != nil {
 		return err
 	}

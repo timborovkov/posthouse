@@ -158,3 +158,11 @@ func TestRunHTTPContainerListenerStillRequiresToken(t *testing.T) {
 		t.Fatalf("RunHTTP container-listener error = %v", err)
 	}
 }
+
+func TestRunHTTPLoopbackStillRequiresToken(t *testing.T) {
+	server := New(nil)
+	err := server.RunHTTP(context.Background(), "127.0.0.1:8791", "", false, slog.Default())
+	if err == nil || !strings.Contains(err.Error(), "POSTHOUSE_MCP_TOKEN") {
+		t.Fatalf("RunHTTP loopback error = %v", err)
+	}
+}

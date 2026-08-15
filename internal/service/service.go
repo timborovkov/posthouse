@@ -313,8 +313,13 @@ func (s *Service) SearchMessagesContext(ctx context.Context, selection model.Sel
 				err = fmt.Errorf("no cached result for this source and query")
 			}
 		} else {
-			requestCacheID = mailCacheID(connection)
-			if s.mailSearch != nil {
+			connection, err = resolveMailConnection(connection)
+			if err == nil {
+				requestCacheID = mailCacheID(connection)
+			}
+			if err != nil {
+				// handled by the normal stale-cache fallback below
+			} else if s.mailSearch != nil {
 				result, err = s.mailSearch(connection, connectionOptions)
 			} else {
 				result, err = s.mailSearchContext(ctx, connection, connectionOptions)
@@ -341,8 +346,8 @@ func (s *Service) SearchMessagesContext(ctx context.Context, selection model.Sel
 				continue
 			}
 		} else if options.Mode != "offline" {
-			if requestCacheID == "" || mailCacheID(connection) != requestCacheID {
-				pageErrors = append(pageErrors, sourceError(connection.ID, "cache_write_skipped", fmt.Errorf("provider identity changed or could not be resolved during read")))
+			if requestCacheID == "" {
+				pageErrors = append(pageErrors, sourceError(connection.ID, "cache_write_skipped", fmt.Errorf("provider identity could not be resolved during read")))
 			} else if cacheErr := s.cacheMailResultWithID(connection, requestCacheID, mailFolder(connection, connectionOptions.Folder), scope, connectionOptions, result); cacheErr != nil {
 				pageErrors = append(pageErrors, sourceError(connection.ID, "cache_write_failed", cacheErr))
 			}
@@ -532,12 +537,16 @@ func (s *Service) ListEventsMode(ctx context.Context, selection model.Selector, 
 			if !ok {
 				err = fmt.Errorf("no cached result for this source and query")
 			}
-		} else if connection.Calendar != nil && connection.Calendar.Kind == "caldav" {
-			requestCacheID = calendarCacheID(connection)
-			events, err = s.calendar.ListCalDAV(ctx, connection, selection.Collections, start, end, query)
 		} else {
-			requestCacheID = calendarCacheID(connection)
-			events, err = s.calendar.List(ctx, connection, start, end, query)
+			connection, err = resolveCalendarConnection(connection)
+			if err == nil {
+				requestCacheID = calendarCacheID(connection)
+				if connection.Calendar.Kind == "caldav" {
+					events, err = s.calendar.ListCalDAV(ctx, connection, selection.Collections, start, end, query)
+				} else {
+					events, err = s.calendar.List(ctx, connection, start, end, query)
+				}
+			}
 		}
 		var partial *calendar.PartialError
 		if errors.As(err, &partial) {
@@ -572,8 +581,8 @@ func (s *Service) ListEventsMode(ctx context.Context, selection model.Selector, 
 		} else if mode != "offline" {
 			successfulSources++
 			replaceIndex := strings.TrimSpace(query) == "" && ((!partialResult && len(selection.Collections) == 0) || len(successfulCollections) > 0)
-			if requestCacheID == "" || calendarCacheID(connection) != requestCacheID {
-				pageErrors = append(pageErrors, sourceError(connection.ID, "cache_write_skipped", fmt.Errorf("provider identity changed or could not be resolved during read")))
+			if requestCacheID == "" {
+				pageErrors = append(pageErrors, sourceError(connection.ID, "cache_write_skipped", fmt.Errorf("provider identity could not be resolved during read")))
 			} else if cacheErr := s.cacheEventsReplacingWithID(connection, requestCacheID, scope, events, start, end, !partialResult, replaceIndex, successfulCollections); cacheErr != nil {
 				pageErrors = append(pageErrors, sourceError(connection.ID, "cache_write_failed", cacheErr))
 			}
@@ -923,7 +932,11 @@ func (s *Service) prepare(ctx context.Context, kind string, connection model.Con
 		Token: base64.RawURLEncoding.EncodeToString(tokenBytes), Kind: kind, ConnectionID: connection.ID,
 		Identity: connection.Identity, Preview: preview, CreatedAt: now, ExpiresAt: now.Add(10 * time.Minute), Status: "prepared",
 	}
-	connectionPrecondition, err := digestConnection(connection)
+	resolvedConnection, err := resolveProviderConnection(connection)
+	if err != nil {
+		return model.PreparedOperation{}, err
+	}
+	connectionPrecondition, err := digestResolvedConnection(resolvedConnection)
 	if err != nil {
 		return model.PreparedOperation{}, err
 	}
@@ -978,7 +991,11 @@ func (s *Service) ExecuteOperation(ctx context.Context, token string) (model.Ope
 	if connection.Identity != record.Public.Identity {
 		return model.OperationResult{}, fmt.Errorf("prepared operation acting identity changed; prepare it again")
 	}
-	connectionPrecondition, err := digestConnection(connection)
+	connection, err = resolveProviderConnection(connection)
+	if err != nil {
+		return model.OperationResult{}, fmt.Errorf("resolve prepared operation provider: %w", err)
+	}
+	connectionPrecondition, err := digestResolvedConnection(connection)
 	if err != nil || connectionPrecondition != record.Precondition {
 		return model.OperationResult{}, fmt.Errorf("prepared operation connection or provider preconditions changed; prepare it again")
 	}
@@ -1222,8 +1239,14 @@ func (s *Service) GetMessageModeContext(ctx context.Context, connectionID, folde
 			folder = "INBOX"
 		}
 	}
+	if mode != "offline" {
+		connection, err = resolveMailConnection(connection)
+		if err != nil && mode == "refresh" {
+			return model.MessageDetail{}, err
+		}
+	}
 	confirmedUIDMismatch := false
-	if mode == "" {
+	if mode == "" && err == nil {
 		if _, ok := s.cachedMessageFor(connection, folder, uid); ok {
 			ledger, stateErr := s.ensureState()
 			cachedUIDValidity, validityOK := uint32(0), false
@@ -1239,11 +1262,11 @@ func (s *Service) GetMessageModeContext(ctx context.Context, connectionID, folde
 			}
 		}
 	}
-	if mode != "offline" {
+	if mode != "offline" && err == nil {
 		requestCacheID := mailCacheID(connection)
 		fetched, fetchErr := s.mailGetMessage(ctx, connection, folder, uid)
 		if fetchErr == nil {
-			if ledger, stateErr := s.ensureState(); stateErr == nil && requestCacheID != "" && mailCacheID(connection) == requestCacheID {
+			if ledger, stateErr := s.ensureState(); stateErr == nil && requestCacheID != "" {
 				if cacheID := requestCacheID; cacheID != "" {
 					data, _ := json.Marshal(fetched.Detail)
 					_ = s.cacheMailboxUIDValidityWithID(ledger, connection, cacheID, folder, fetched.UIDValidity)
@@ -1284,8 +1307,14 @@ func (s *Service) GetAttachmentMode(ctx context.Context, connectionID, folder st
 			folder = "INBOX"
 		}
 	}
+	if mode != "offline" {
+		connection, err = resolveMailConnection(connection)
+		if err != nil && mode == "refresh" {
+			return model.Attachment{}, nil, err
+		}
+	}
 	confirmedUIDMismatch := false
-	if mode == "" {
+	if mode == "" && err == nil {
 		if _, _, ok := s.cachedAttachmentFor(ctx, connection, folder, uid, attachmentID); ok {
 			ledger, stateErr := s.ensureState()
 			cachedUIDValidity, validityOK := uint32(0), false
@@ -1301,11 +1330,11 @@ func (s *Service) GetAttachmentMode(ctx context.Context, connectionID, folder st
 			}
 		}
 	}
-	if mode != "offline" {
+	if mode != "offline" && err == nil {
 		requestCacheID := mailCacheID(connection)
 		attachment, data, uidValidity, fetchErr := s.mailGetAttachment(ctx, connection, folder, uid, attachmentID)
 		if fetchErr == nil {
-			if ledger, stateErr := s.ensureState(); stateErr == nil && requestCacheID != "" && mailCacheID(connection) == requestCacheID {
+			if ledger, stateErr := s.ensureState(); stateErr == nil && requestCacheID != "" {
 				if cacheID := requestCacheID; cacheID != "" {
 					_ = s.cacheMailboxUIDValidityWithID(ledger, connection, cacheID, folder, uidValidity)
 					key := messageCacheKey(cacheID, folder, uidValidity, uid) + "/" + attachmentID
@@ -1486,46 +1515,108 @@ func snapshotAttachmentPayload(kind string, payload []byte) ([]byte, error) {
 	return json.Marshal(draft)
 }
 
-func digestConnection(connection model.Connection) (string, error) {
+func digestResolvedConnection(connection model.Connection) (string, error) {
 	data, err := json.Marshal(connection)
 	if err != nil {
 		return "", fmt.Errorf("encode connection precondition: %w", err)
 	}
 	digest := sha256.New()
 	_, _ = digest.Write(data)
-	writeSecret := func(label string, ref model.SecretRef, legacyEnv string) error {
-		if ref.Env == "" && ref.Keychain == "" && legacyEnv == "" {
+	writeSecret := func(label, value string) error {
+		if value == "" {
 			return nil
-		}
-		var value string
-		var resolveErr error
-		if ref.Env != "" || ref.Keychain != "" {
-			value, resolveErr = config.ResolveSecret(ref)
-		} else {
-			value, resolveErr = config.Secret(legacyEnv)
-		}
-		if resolveErr != nil {
-			return fmt.Errorf("resolve %s precondition: %w", label, resolveErr)
 		}
 		_, _ = digest.Write([]byte("\x00" + label + "\x00" + value))
 		return nil
 	}
 	if connection.Mail != nil {
-		if err := writeSecret("mail.secret", connection.Mail.Secret, connection.Mail.SecretEnv); err != nil {
+		if err := writeSecret("mail.secret", connection.Mail.ResolvedSecret); err != nil {
 			return "", err
 		}
 	}
 	if connection.Calendar != nil {
-		if err := writeSecret("calendar.url", connection.Calendar.URLSecret, connection.Calendar.URLSecretEnv); err != nil {
+		if err := writeSecret("calendar.url", connection.Calendar.ResolvedURL); err != nil {
 			return "", err
 		}
 		if connection.Calendar.Kind == "caldav" {
-			if err := writeSecret("calendar.secret", connection.Calendar.Secret, ""); err != nil {
+			if err := writeSecret("calendar.secret", connection.Calendar.ResolvedSecret); err != nil {
 				return "", err
 			}
 		}
 	}
 	return hex.EncodeToString(digest.Sum(nil)), nil
+}
+
+func resolveProviderConnection(connection model.Connection) (model.Connection, error) {
+	var err error
+	if connection.Mail != nil {
+		connection, err = resolveMailConnection(connection)
+		if err != nil {
+			return connection, fmt.Errorf("resolve mail provider: %w", err)
+		}
+	}
+	if connection.Calendar != nil {
+		connection, err = resolveCalendarConnection(connection)
+		if err != nil {
+			return connection, fmt.Errorf("resolve calendar provider: %w", err)
+		}
+	}
+	return connection, nil
+}
+
+func resolveMailConnection(connection model.Connection) (model.Connection, error) {
+	if connection.Mail == nil {
+		return connection, nil
+	}
+	mailConfig := *connection.Mail
+	var err error
+	if mailConfig.ResolvedSecret == "" {
+		if mailConfig.Secret.Env != "" || mailConfig.Secret.Keychain != "" {
+			mailConfig.ResolvedSecret, err = config.ResolveSecret(mailConfig.Secret)
+		} else if mailConfig.SecretEnv != "" {
+			mailConfig.ResolvedSecret, err = config.Secret(mailConfig.SecretEnv)
+		}
+	}
+	if err != nil || mailConfig.ResolvedSecret == "" {
+		if err == nil {
+			err = fmt.Errorf("secret reference is not configured")
+		}
+		return connection, err
+	}
+	connection.Mail = &mailConfig
+	return connection, nil
+}
+
+func resolveCalendarConnection(connection model.Connection) (model.Connection, error) {
+	if connection.Calendar == nil {
+		return connection, nil
+	}
+	calendarConfig := *connection.Calendar
+	var err error
+	if calendarConfig.ResolvedURL == "" {
+		switch {
+		case calendarConfig.URL != "":
+			calendarConfig.ResolvedURL = calendarConfig.URL
+		case calendarConfig.URLSecret.Env != "" || calendarConfig.URLSecret.Keychain != "":
+			calendarConfig.ResolvedURL, err = config.ResolveSecret(calendarConfig.URLSecret)
+		case calendarConfig.URLSecretEnv != "":
+			calendarConfig.ResolvedURL, err = config.Secret(calendarConfig.URLSecretEnv)
+		}
+	}
+	if err != nil || calendarConfig.ResolvedURL == "" {
+		if err == nil {
+			err = fmt.Errorf("calendar URL is not configured")
+		}
+		return connection, err
+	}
+	if calendarConfig.Kind == "caldav" && calendarConfig.ResolvedSecret == "" {
+		calendarConfig.ResolvedSecret, err = config.ResolveSecret(calendarConfig.Secret)
+		if err != nil {
+			return connection, err
+		}
+	}
+	connection.Calendar = &calendarConfig
+	return connection, nil
 }
 
 func attachmentPreviews(attachments []model.AttachmentInput) []map[string]any {
@@ -2261,22 +2352,18 @@ func providerConfigID(connection model.Connection) string {
 	return framedCacheKey(connection.ID, hex.EncodeToString(digest[:]))
 }
 
-func resolvedCacheID(connection model.Connection, refs ...model.SecretRef) string {
+func resolvedCacheID(connection model.Connection, values ...string) string {
 	digests := []string{providerConfigID(connection)}
-	appendSecret := func(ref model.SecretRef) bool {
-		if ref.Env == "" && ref.Keychain == "" {
-			return true
-		}
-		value, err := config.ResolveSecret(ref)
-		if err != nil {
+	appendSecret := func(value string) bool {
+		if value == "" {
 			return false
 		}
 		digest := sha256.Sum256([]byte(value))
 		digests = append(digests, hex.EncodeToString(digest[:]))
 		return true
 	}
-	for _, ref := range refs {
-		if !appendSecret(ref) {
+	for _, value := range values {
+		if !appendSecret(value) {
 			return ""
 		}
 	}
@@ -2287,22 +2374,30 @@ func mailCacheID(connection model.Connection) string {
 	if connection.Mail == nil {
 		return ""
 	}
+	resolved, err := resolveMailConnection(connection)
+	if err != nil {
+		return ""
+	}
 	mailOnly := connection
 	mailOnly.Calendar = nil
-	return resolvedCacheID(mailOnly, connection.Mail.Secret)
+	return resolvedCacheID(mailOnly, resolved.Mail.ResolvedSecret)
 }
 
 func calendarCacheID(connection model.Connection) string {
 	if connection.Calendar == nil {
 		return ""
 	}
+	resolved, err := resolveCalendarConnection(connection)
+	if err != nil {
+		return ""
+	}
 	calendarOnly := connection
 	calendarOnly.Mail = nil
-	refs := []model.SecretRef{connection.Calendar.URLSecret}
-	if connection.Calendar.Kind == "caldav" {
-		refs = append(refs, connection.Calendar.Secret)
+	values := []string{resolved.Calendar.ResolvedURL}
+	if resolved.Calendar.Kind == "caldav" {
+		values = append(values, resolved.Calendar.ResolvedSecret)
 	}
-	return resolvedCacheID(calendarOnly, refs...)
+	return resolvedCacheID(calendarOnly, values...)
 }
 
 func messageCacheKey(connectionID, folder string, uidValidity, uid uint32) string {
