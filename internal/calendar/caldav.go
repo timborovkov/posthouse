@@ -35,8 +35,9 @@ func (e *UncertainError) Error() string { return "CalDAV write outcome is uncert
 func (e *UncertainError) Unwrap() error { return e.Err }
 
 type PartialError struct {
-	Errors                []model.SourceError
-	SuccessfulCollections int
+	Errors                  []model.SourceError
+	SuccessfulCollections   int
+	SuccessfulCollectionIDs []string
 }
 
 func (e *PartialError) Error() string {
@@ -120,15 +121,17 @@ func (c *Client) ListCalDAV(ctx context.Context, connection model.Connection, co
 			partial.Errors = append(partial.Errors, model.SourceError{ConnectionID: connection.ID, CollectionID: collection.ID, Code: "calendar_collection_unavailable", Message: safeTransportError("query CalDAV collection "+collection.ID, err).Error(), Retryable: true})
 			continue
 		}
-		partial.SuccessfulCollections++
+		collectionSucceeded := true
 		for _, object := range objects {
 			data, etag, err := getCalendarObject(ctx, httpClient, endpoint, object.Path)
 			if err != nil {
+				collectionSucceeded = false
 				partial.Errors = append(partial.Errors, model.SourceError{ConnectionID: connection.ID, CollectionID: collection.ID, Code: "calendar_object_unavailable", Message: err.Error(), Retryable: true})
 				continue
 			}
 			events, err := ParseRange(data, start, end)
 			if err != nil {
+				collectionSucceeded = false
 				partial.Errors = append(partial.Errors, model.SourceError{ConnectionID: connection.ID, CollectionID: collection.ID, Code: "calendar_object_invalid", Message: fmt.Sprintf("parse CalDAV object in collection %s: %v", collection.ID, err), Retryable: false})
 				continue
 			}
@@ -142,6 +145,10 @@ func (c *Client) ListCalDAV(ctx context.Context, connection model.Connection, co
 				event.ETag = etag
 				result = append(result, event)
 			}
+		}
+		if collectionSucceeded {
+			partial.SuccessfulCollections++
+			partial.SuccessfulCollectionIDs = append(partial.SuccessfulCollectionIDs, collection.ID)
 		}
 	}
 	if len(partial.Errors) > 0 {

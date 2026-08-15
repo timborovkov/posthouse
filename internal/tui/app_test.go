@@ -4,6 +4,7 @@ package tuiapp
 // state machine without coupling correctness to terminal escape snapshots.
 
 import (
+	"context"
 	"encoding/base64"
 	"path/filepath"
 	"strings"
@@ -54,6 +55,41 @@ func TestModalEscapeNeverExecutesPendingToken(t *testing.T) {
 	dispatch(app.KeyMap(), tui.KeyEvent{Key: tui.KeyEscape})
 	if app.modal.Get() || app.pendingToken.Get() != "" {
 		t.Fatal("escape did not cancel pending modal")
+	}
+}
+
+func TestOperationExecutionRunsOffEventLoopAndIsCancellable(t *testing.T) {
+	app := testApp(t)
+	defer app.close()
+	started := make(chan struct{})
+	app.executeOperation = func(ctx context.Context, token string) (model.OperationResult, error) {
+		close(started)
+		<-ctx.Done()
+		return model.OperationResult{Token: token, Status: "failed"}, ctx.Err()
+	}
+	app.modal.Set(true)
+	app.pendingToken.Set("opaque")
+	app.confirmModal(tui.KeyEvent{})
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("background operation did not start")
+	}
+	if app.executingToken.Get() != "opaque" || app.pendingToken.Get() != "" || !app.modal.Get() {
+		t.Fatalf("execution state token=%q pending=%q modal=%v", app.executingToken.Get(), app.pendingToken.Get(), app.modal.Get())
+	}
+	dispatch(app.KeyMap(), tui.KeyEvent{Key: tui.KeyEscape})
+	if app.modal.Get() {
+		t.Fatal("Escape did not close executing operation modal")
+	}
+	select {
+	case next := <-app.operationUpdates:
+		app.applyOperation(next)
+		if app.executingToken.Get() != "" || !strings.Contains(app.errorText.Get(), "canceled") {
+			t.Fatalf("completed cancellation token=%q error=%q", app.executingToken.Get(), app.errorText.Get())
+		}
+	case <-time.After(time.Second):
+		t.Fatal("canceled operation did not report completion")
 	}
 }
 

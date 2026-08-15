@@ -745,7 +745,7 @@ func DoctorSMTP(ctx context.Context, connection model.Connection) error {
 	if err != nil {
 		return err
 	}
-	client, err := dialSMTP(connection.Mail.SMTP, host)
+	client, err := dialSMTPContext(ctx, connection.Mail.SMTP, host)
 	if err != nil {
 		return err
 	}

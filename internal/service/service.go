@@ -490,6 +490,7 @@ func (s *Service) ListEventsMode(ctx context.Context, selection model.Selector, 
 		var events []model.Event
 		var err error
 		partialResult := false
+		var successfulCollections []string
 		if mode == "offline" {
 			var ok bool
 			events, ok = s.cachedEvents(connection, scope, selection.Collections, start, end, query)
@@ -506,6 +507,7 @@ func (s *Service) ListEventsMode(ctx context.Context, selection model.Selector, 
 			pageErrors = append(pageErrors, partial.Errors...)
 			if partial.SuccessfulCollections > 0 {
 				partialResult = true
+				successfulCollections = append(successfulCollections, partial.SuccessfulCollectionIDs...)
 				err = nil
 			}
 		}
@@ -532,8 +534,8 @@ func (s *Service) ListEventsMode(ctx context.Context, selection model.Selector, 
 			}
 		} else if mode != "offline" {
 			successfulSources++
-			replaceIndex := !partialResult && strings.TrimSpace(query) == "" && len(selection.Collections) == 0
-			if cacheErr := s.cacheEvents(connection.ID, scope, events, start, end, !partialResult, replaceIndex); cacheErr != nil {
+			replaceIndex := strings.TrimSpace(query) == "" && ((!partialResult && len(selection.Collections) == 0) || len(successfulCollections) > 0)
+			if cacheErr := s.cacheEventsReplacing(connection.ID, scope, events, start, end, !partialResult, replaceIndex, successfulCollections); cacheErr != nil {
 				pageErrors = append(pageErrors, sourceError(connection.ID, "cache_write_failed", cacheErr))
 			}
 		} else {
@@ -1879,6 +1881,10 @@ func matchesCachedMessage(message model.Message, options postmail.SearchOptions)
 }
 
 func (s *Service) cacheEvents(connectionID string, scope any, events []model.Event, rangeStart, rangeEnd time.Time, replaceScoped, replaceIndex bool) error {
+	return s.cacheEventsReplacing(connectionID, scope, events, rangeStart, rangeEnd, replaceScoped, replaceIndex, nil)
+}
+
+func (s *Service) cacheEventsReplacing(connectionID string, scope any, events []model.Event, rangeStart, rangeEnd time.Time, replaceScoped, replaceIndex bool, replaceCollections []string) error {
 	ledger, err := s.ensureState()
 	if err != nil {
 		return err
@@ -1892,6 +1898,9 @@ func (s *Service) cacheEvents(connectionID string, scope any, events []model.Eve
 		if entry, ok, getErr := ledger.Get(context.Background(), "events", scopedCacheKey(connectionID, scope), false); getErr == nil && ok {
 			var existing []model.Event
 			if json.Unmarshal(entry.Value, &existing) == nil {
+				if len(replaceCollections) > 0 {
+					existing = slices.DeleteFunc(existing, func(event model.Event) bool { return containsFolded(replaceCollections, event.CollectionID) })
+				}
 				scoped = mergeEvents(existing, scoped)
 			}
 		}
@@ -1910,7 +1919,8 @@ func (s *Service) cacheEvents(connectionID string, scope any, events []model.Eve
 			if replaceIndex {
 				kept := existing[:0]
 				for _, event := range existing {
-					if !calendarEventOverlaps(event, rangeStart, rangeEnd) {
+					selectedCollection := len(replaceCollections) == 0 || containsFolded(replaceCollections, event.CollectionID)
+					if !selectedCollection || !calendarEventOverlaps(event, rangeStart, rangeEnd) {
 						kept = append(kept, event)
 					}
 				}
@@ -1998,6 +2008,10 @@ func mergeEvents(existing, fresh []model.Event) []model.Event {
 	}
 	slices.SortFunc(result, compareEvents)
 	return result
+}
+
+func containsFolded(values []string, wanted string) bool {
+	return slices.ContainsFunc(values, func(value string) bool { return strings.EqualFold(value, wanted) })
 }
 
 func eventCacheIdentity(event model.Event) string {

@@ -138,6 +138,18 @@ func TestDiscoverContextHonorsPreCanceledContext(t *testing.T) {
 	}
 }
 
+func TestDoctorSMTPHonorsPreCanceledContextDuringDial(t *testing.T) {
+	t.Setenv("SMTP_PASSWORD", "test-password")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	connection := model.Connection{ID: "work", Mail: &model.MailConfig{Username: "work", Secret: model.SecretRef{Env: "SMTP_PASSWORD"}, SMTP: model.SMTPConfig{Address: "203.0.113.1:465", TLS: true}}}
+	started := time.Now()
+	err := DoctorSMTP(ctx, connection)
+	if !errors.Is(err, context.Canceled) || time.Since(started) > time.Second {
+		t.Fatalf("pre-canceled SMTP doctor returned %v after %v", err, time.Since(started))
+	}
+}
+
 func TestMutationErrorDistinguishesTaggedRejection(t *testing.T) {
 	rejected := classifyMutationError("move", &imap.Error{Type: imap.StatusResponseTypeNo, Text: "rejected"})
 	var uncertain *UncertainMutationError

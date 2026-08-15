@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -393,6 +394,28 @@ func TestMovedEventReplacesBroadCacheIdentity(t *testing.T) {
 	events, ok := application.cachedEvents(connection, "other", nil, start, end, "")
 	if !ok || len(events) != 1 || !events[0].Start.Equal(moved.Start) {
 		t.Fatalf("moved event cache = %#v, %v", events, ok)
+	}
+}
+
+func TestPartialCalDAVRefreshReplacesOnlySuccessfulCollections(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	connection := model.Connection{ID: "calendar", Name: "Calendar", Calendar: &model.CalendarConfig{Kind: "caldav", URL: "http://localhost:5232", Username: "calendar", Secret: model.SecretRef{Env: "CALENDAR_PASSWORD"}, Collections: []model.CalendarCollection{{ID: "team"}, {ID: "personal"}}}}
+	application := serviceWithConnections(t, connection)
+	start, end := instant(8), instant(18)
+	old := []model.Event{
+		{ConnectionID: connection.ID, CollectionID: "team", ID: "deleted", Start: instant(9), End: instant(10)},
+		{ConnectionID: connection.ID, CollectionID: "personal", ID: "preserved", Start: instant(11), End: instant(12)},
+	}
+	if err := application.cacheEvents(connection.ID, "scope", old, start, end, true, true); err != nil {
+		t.Fatal(err)
+	}
+	fresh := []model.Event{{ConnectionID: connection.ID, CollectionID: "team", ID: "new", Start: instant(13), End: instant(14)}}
+	if err := application.cacheEventsReplacing(connection.ID, "scope", fresh, start, end, false, true, []string{"team"}); err != nil {
+		t.Fatal(err)
+	}
+	events, ok := application.cachedEvents(connection, "scope", nil, start, end, "")
+	if !ok || len(events) != 2 || slices.ContainsFunc(events, func(event model.Event) bool { return event.ID == "deleted" }) || !slices.ContainsFunc(events, func(event model.Event) bool { return event.ID == "preserved" }) || !slices.ContainsFunc(events, func(event model.Event) bool { return event.ID == "new" }) {
+		t.Fatalf("partial collection cache = %#v, %v", events, ok)
 	}
 }
 

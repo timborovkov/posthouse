@@ -84,6 +84,26 @@ END:VCALENDAR`
 	}
 }
 
+func TestParseRangeIncludesLongRDATEPeriodStartingBeforeMasterLookback(t *testing.T) {
+	data := `BEGIN:VCALENDAR
+VERSION:2.0
+BEGIN:VEVENT
+UID:long-period
+DTSTART:20260801T090000Z
+DTEND:20260801T100000Z
+RDATE;VALUE=PERIOD:20260814T090000Z/20260816T090000Z
+SUMMARY:Long occurrence
+END:VEVENT
+END:VCALENDAR`
+	events, err := ParseRange([]byte(data), time.Date(2026, 8, 15, 0, 0, 0, 0, time.UTC), time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].Start.Day() != 14 || events[0].End.Day() != 16 {
+		t.Fatalf("long RDATE period events = %#v", events)
+	}
+}
+
 func TestParseMultipleEvents(t *testing.T) {
 	data := "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n" + eventFixture("one", "First", "20260814T090000Z", "20260814T100000Z") + eventFixture("two", "Second", "20260815T090000Z", "20260815T100000Z") + "END:VCALENDAR\r\n"
 	events, err := Parse([]byte(data))

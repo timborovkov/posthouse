@@ -29,6 +29,12 @@ type snapshot struct {
 	err         string
 }
 
+type operationSnapshot struct {
+	token  string
+	result model.OperationResult
+	err    error
+}
+
 type posthouseApp struct {
 	service           *service.Service
 	view              *tui.State[int]
@@ -45,14 +51,18 @@ type posthouseApp struct {
 	modal             *tui.State[bool]
 	modalText         *tui.State[string]
 	pendingToken      *tui.State[string]
+	executingToken    *tui.State[string]
 	editor            *tui.State[bool]
 	editorKind        *tui.State[string]
 	editorStep        *tui.State[int]
 	editorValues      *tui.State[[]string]
 	updates           chan snapshot
+	operationUpdates  chan operationSnapshot
+	executeOperation  func(context.Context, string) (model.OperationResult, error)
 	ctx               context.Context
 	cancel            context.CancelFunc
 	refreshCancel     context.CancelFunc
+	operationCancel   context.CancelFunc
 	refreshGeneration *atomic.Uint64
 	wg                *sync.WaitGroup
 }
@@ -67,8 +77,9 @@ func New(application *service.Service) *posthouseApp {
 		events: tui.NewState([]model.Event{}), detail: tui.NewState(model.MessageDetail{}),
 		searching: tui.NewState(false), query: tui.NewState(""), modal: tui.NewState(false),
 		modalText: tui.NewState(""), pendingToken: tui.NewState(""),
-		editor: tui.NewState(false), editorKind: tui.NewState(""), editorStep: tui.NewState(0), editorValues: tui.NewState([]string{}),
-		updates: make(chan snapshot, 4), ctx: ctx, cancel: cancel,
+		executingToken: tui.NewState(""),
+		editor:         tui.NewState(false), editorKind: tui.NewState(""), editorStep: tui.NewState(0), editorValues: tui.NewState([]string{}),
+		updates: make(chan snapshot, 4), operationUpdates: make(chan operationSnapshot, 1), executeOperation: application.ExecuteOperation, ctx: ctx, cancel: cancel,
 		refreshGeneration: &atomic.Uint64{},
 		wg:                &sync.WaitGroup{},
 	}
@@ -89,7 +100,7 @@ func Run(application *service.Service) error {
 }
 
 func (p *posthouseApp) Watchers() []tui.Watcher {
-	return []tui.Watcher{tui.Watch(p.updates, p.applySnapshot)}
+	return []tui.Watcher{tui.Watch(p.updates, p.applySnapshot), tui.Watch(p.operationUpdates, p.applyOperation)}
 }
 
 func (p *posthouseApp) KeyMap() tui.KeyMap {
@@ -133,7 +144,7 @@ func (p *posthouseApp) KeyMap() tui.KeyMap {
 	if p.modal.Get() {
 		return tui.KeyMap{
 			tui.OnPreemptStop(tui.KeyEnter, p.confirmModal),
-			tui.OnPreemptStop(tui.KeyEscape, func(ke tui.KeyEvent) { p.modal.Set(false); p.pendingToken.Set("") }),
+			tui.OnPreemptStop(tui.KeyEscape, func(ke tui.KeyEvent) { p.cancelModal() }),
 		}
 	}
 	return tui.KeyMap{
@@ -216,6 +227,9 @@ func (p *posthouseApp) close() {
 	p.cancel()
 	if p.refreshCancel != nil {
 		p.refreshCancel()
+	}
+	if p.operationCancel != nil {
+		p.operationCancel()
 	}
 	p.wg.Wait()
 }
@@ -598,19 +612,54 @@ func (p *posthouseApp) selectedMessage() (model.Message, bool) {
 }
 
 func (p *posthouseApp) confirmModal(ke tui.KeyEvent) {
+	if p.executingToken.Get() != "" {
+		return
+	}
 	token := p.pendingToken.Get()
 	if token == "" {
 		p.modal.Set(false)
 		return
 	}
-	result, err := p.service.ExecuteOperation(p.ctx, token)
-	if err != nil {
-		p.modalText.Set("Execution failed\n\n" + err.Error())
-		p.pendingToken.Set("")
+	ctx, cancel := context.WithCancel(p.ctx)
+	p.operationCancel = cancel
+	p.pendingToken.Set("")
+	p.executingToken.Set(token)
+	p.modalText.Set("Executing prepared operation…\n\nEsc cancels this request; provider ambiguity remains recorded safely.")
+	p.wg.Add(1)
+	go func() {
+		defer p.wg.Done()
+		result, err := p.executeOperation(ctx, token)
+		next := operationSnapshot{token: token, result: result, err: err}
+		select {
+		case p.operationUpdates <- next:
+		case <-p.ctx.Done():
+		}
+	}()
+}
+
+func (p *posthouseApp) cancelModal() {
+	if p.operationCancel != nil {
+		p.operationCancel()
+		p.operationCancel = nil
+	}
+	p.modal.Set(false)
+	p.pendingToken.Set("")
+}
+
+func (p *posthouseApp) applyOperation(next operationSnapshot) {
+	if next.token != p.executingToken.Get() {
 		return
 	}
-	p.modalText.Set(fmt.Sprintf("Operation %s\n\nStatus: %s", result.Token, result.Status))
-	p.pendingToken.Set("")
+	p.operationCancel = nil
+	p.executingToken.Set("")
+	if next.err != nil {
+		p.errorText.Set("Execution failed: " + next.err.Error())
+		if p.modal.Get() {
+			p.modalText.Set("Execution failed\n\n" + next.err.Error())
+		}
+	} else if p.modal.Get() {
+		p.modalText.Set(fmt.Sprintf("Operation %s\n\nStatus: %s", next.result.Token, next.result.Status))
+	}
 	p.refresh()
 }
 
@@ -969,6 +1018,7 @@ func (p *posthouseApp) updatePropsFields(fresh tui.Component) {
 	p.ctx = f.ctx
 	p.cancel = f.cancel
 	p.refreshCancel = f.refreshCancel
+	p.operationCancel = f.operationCancel
 	p.refreshGeneration = f.refreshGeneration
 	p.wg = f.wg
 }
@@ -1024,6 +1074,9 @@ func (p *posthouseApp) bindAppFields(app *tui.App) {
 	}
 	if p.pendingToken != nil {
 		p.pendingToken.BindApp(app)
+	}
+	if p.executingToken != nil {
+		p.executingToken.BindApp(app)
 	}
 	if p.editor != nil {
 		p.editor.BindApp(app)
