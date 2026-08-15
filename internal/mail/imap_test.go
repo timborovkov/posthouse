@@ -1,6 +1,7 @@
 package mail
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -53,14 +54,35 @@ func TestIMAPSearchUsesDaySupersetForExactTimestampBounds(t *testing.T) {
 	since := time.Date(2026, 8, 15, 12, 30, 0, 0, time.UTC)
 	before := time.Date(2026, 8, 16, 8, 15, 0, 0, time.UTC)
 	gotSince, gotBefore := imapSearchDateBounds(since, before)
-	if want := time.Date(2026, 8, 15, 0, 0, 0, 0, time.UTC); !gotSince.Equal(want) {
+	if want := time.Date(2026, 8, 14, 0, 0, 0, 0, time.UTC); !gotSince.Equal(want) {
 		t.Fatalf("IMAP since = %v, want %v", gotSince, want)
 	}
-	if want := time.Date(2026, 8, 17, 0, 0, 0, 0, time.UTC); !gotBefore.Equal(want) {
+	if want := time.Date(2026, 8, 18, 0, 0, 0, 0, time.UTC); !gotBefore.Equal(want) {
 		t.Fatalf("IMAP before = %v, want %v", gotBefore, want)
 	}
 	if window := orderedUIDWindow([]imap.UID{5, 4, 3, 2, 1}, 0, 0); len(window) != 5 {
 		t.Fatalf("exact-bound SORT window was prematurely truncated: %v", window)
+	}
+}
+
+func TestIMAPSearchBoundsCoverExtremeRFC3339Offsets(t *testing.T) {
+	plusFourteen := time.FixedZone("+14", 14*60*60)
+	minusTwelve := time.FixedZone("-12", -12*60*60)
+	since := time.Date(2026, 8, 15, 0, 0, 0, 0, plusFourteen)
+	before := time.Date(2026, 8, 15, 0, 0, 0, 0, minusTwelve)
+	gotSince, gotBefore := imapSearchDateBounds(since, before)
+	if gotSince.After(since.UTC()) || !gotBefore.After(before.UTC()) {
+		t.Fatalf("IMAP bounds %v..%v do not contain exact instants %v..%v", gotSince, gotBefore, since.UTC(), before.UTC())
+	}
+}
+
+func TestDialIMAPContextHonorsPreCanceledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	started := time.Now()
+	_, err := dialIMAPContext(ctx, model.IMAPConfig{Address: "203.0.113.1:993", TLS: true})
+	if err == nil || time.Since(started) > time.Second {
+		t.Fatalf("pre-canceled dial returned %v after %v", err, time.Since(started))
 	}
 }
 

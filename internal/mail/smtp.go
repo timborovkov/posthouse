@@ -42,6 +42,8 @@ func BuildMessage(connection model.Connection, message model.SendMessage) ([]byt
 	return buildMessage(connection.Identity, from, message)
 }
 
+func ValidateMessage(message model.SendMessage) error { return validateMessage(message) }
+
 func SendSerialized(connection model.Connection, message model.SendMessage, data []byte) error {
 	if connection.Mail == nil || connection.Mail.SMTP.Address == "" {
 		return fmt.Errorf("connection %s has no SMTP capability", connection.ID)

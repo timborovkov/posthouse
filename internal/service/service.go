@@ -299,7 +299,7 @@ func (s *Service) SearchMessagesContext(ctx context.Context, selection model.Sel
 				continue
 			}
 		} else if options.Mode != "offline" {
-			if cacheErr := s.cacheMailResult(connection.ID, mailFolder(connection, connectionOptions.Folder), scope, result); cacheErr != nil {
+			if cacheErr := s.cacheMailResult(connection.ID, mailFolder(connection, connectionOptions.Folder), scope, connectionOptions, result); cacheErr != nil {
 				pageErrors = append(pageErrors, sourceError(connection.ID, "cache_write_failed", cacheErr))
 			}
 		} else {
@@ -619,6 +619,9 @@ func (s *Service) PrepareSend(ctx context.Context, message model.SendMessage) (m
 		return model.PreparedOperation{}, fmt.Errorf("connection %s requires a sent-copy folder; run connection discover or configure folders.sent", connection.ID)
 	}
 	message.ConnectionID = connection.ID
+	if err := postmail.ValidateMessage(message); err != nil {
+		return model.PreparedOperation{}, fmt.Errorf("validate message: %w", err)
+	}
 	return s.prepare(ctx, "mail.send", connection, message, map[string]any{
 		"acting_identity": connection.Identity,
 		"recipients":      map[string]any{"to": message.To, "cc": message.CC, "bcc": message.BCC},
@@ -749,6 +752,11 @@ func (s *Service) PrepareDraft(ctx context.Context, connectionID, kind string, f
 		return model.PreparedOperation{}, fmt.Errorf("draft UID is required")
 	}
 	message.ConnectionID = connection.ID
+	if kind != "mail.draft.delete" {
+		if err := postmail.ValidateMessage(message); err != nil {
+			return model.PreparedOperation{}, fmt.Errorf("validate draft message: %w", err)
+		}
+	}
 	payload := draftPayload{Folder: folder, UID: uid, Message: message}
 	if kind != "mail.draft.create" {
 		payload.Precondition, err = s.mailSnapshot(connection, folder, uid)
@@ -788,6 +796,11 @@ func (s *Service) PrepareCalendarWrite(ctx context.Context, connectionID, kind s
 	}
 	if err := calendar.ValidateCalDAVHref(connection, event.CollectionID, event.Href); err != nil {
 		return model.PreparedOperation{}, err
+	}
+	if event.RecurrenceID != "" {
+		if _, err := time.Parse(time.RFC3339, event.RecurrenceID); err != nil {
+			return model.PreparedOperation{}, fmt.Errorf("validate recurrence ID: %w", err)
+		}
 	}
 	if _, _, err := calendar.Generate(event); err != nil {
 		return model.PreparedOperation{}, fmt.Errorf("validate calendar event: %w", err)
@@ -1548,40 +1561,25 @@ func sourceError(connectionID, code string, err error) model.SourceError {
 	return model.SourceError{ConnectionID: connectionID, Code: code, Message: err.Error(), Retryable: true}
 }
 
-func (s *Service) cacheMailResult(connectionID, folder string, scope any, result postmail.SearchResult) error {
+func (s *Service) cacheMailResult(connectionID, folder string, scope any, options postmail.SearchOptions, result postmail.SearchResult) error {
 	ledger, err := s.ensureState()
 	if err != nil {
 		return err
 	}
 	now := s.now()
+	result.Messages = slices.Clone(result.Messages)
 	if err := s.cacheMailboxUIDValidity(ledger, connectionID, folder, result.UIDValidity); err != nil {
 		return err
 	}
 	combined := result
-	if entry, ok, getErr := ledger.Get(context.Background(), "message_metadata", scopedCacheKey(connectionID, scope), false); getErr == nil && ok {
-		var existing postmail.SearchResult
-		if json.Unmarshal(entry.Value, &existing) == nil && existing.UIDValidity == result.UIDValidity {
-			byUID := make(map[uint32]model.Message, len(existing.Messages)+len(result.Messages))
-			for _, message := range existing.Messages {
-				byUID[message.UID] = message
+	continuation := !options.CursorTime.IsZero() || options.CursorUID != 0
+	if continuation {
+		entry, ok, getErr := ledger.Get(context.Background(), "message_metadata", scopedCacheKey(connectionID, scope), false)
+		if getErr == nil && ok {
+			var existing postmail.SearchResult
+			if json.Unmarshal(entry.Value, &existing) == nil && existing.UIDValidity == result.UIDValidity {
+				combined = mergeMailResults(existing, result)
 			}
-			for _, message := range result.Messages {
-				byUID[message.UID] = message
-			}
-			combined.Messages = make([]model.Message, 0, len(byUID))
-			for _, message := range byUID {
-				combined.Messages = append(combined.Messages, message)
-			}
-			slices.SortFunc(combined.Messages, func(a, b model.Message) int {
-				if messageBefore(a, b) {
-					return -1
-				}
-				if messageBefore(b, a) {
-					return 1
-				}
-				return 0
-			})
-			combined.UIDNext = max(existing.UIDNext, result.UIDNext)
 		}
 	}
 	stampMessages(combined.Messages, now)
@@ -1597,9 +1595,17 @@ func (s *Service) cacheMailResult(connectionID, folder string, scope any, result
 	if entry, ok, getErr := ledger.Get(context.Background(), "message_metadata_index", indexKey, false); getErr == nil && ok {
 		var existing postmail.SearchResult
 		if json.Unmarshal(entry.Value, &existing) == nil && existing.UIDValidity == result.UIDValidity {
-			index = mergeMailResults(existing, result)
+			if !result.HasMore && strings.TrimSpace(options.Query) == "" && !options.Unread {
+				kept := existing
+				kept.Messages = slices.DeleteFunc(kept.Messages, func(message model.Message) bool { return matchesCachedMessage(message, options) })
+				index = mergeMailResults(kept, combined)
+			} else {
+				index = mergeMailResults(existing, result)
+			}
 		}
 	}
+	cutoff := now.Add(-s.messageMetadataTTL())
+	index.Messages = slices.DeleteFunc(index.Messages, func(message model.Message) bool { return messageTime(message).Before(cutoff) })
 	stampMessages(index.Messages, now)
 	indexData, err := json.Marshal(index)
 	if err != nil {
@@ -1835,7 +1841,7 @@ func mergeEvents(existing, fresh []model.Event) []model.Event {
 }
 
 func eventCacheIdentity(event model.Event) string {
-	return strings.Join([]string{event.ConnectionID, event.CollectionID, event.ID, event.Href, event.RecurrenceID, event.Start.UTC().Format(time.RFC3339Nano)}, "\x00")
+	return strings.Join([]string{event.ConnectionID, event.CollectionID, event.ID, event.Href, event.RecurrenceID}, "\x00")
 }
 
 func calendarEventOverlaps(event model.Event, start, end time.Time) bool {

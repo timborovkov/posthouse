@@ -40,6 +40,17 @@ func TestLoadMigratesV1AtomicallyAndKeepsBackup(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsRemoteCleartextSMTPAuthentication(t *testing.T) {
+	cfg := model.Config{Version: 2, Connections: []model.Connection{{ID: "work", Name: "Work", Mail: &model.MailConfig{Username: "work@example.test", Secret: model.SecretRef{Env: "WORK_PASSWORD"}, SMTP: model.SMTPConfig{Address: "smtp.example.test:25", Insecure: true}}}}}
+	if err := Validate(cfg); err == nil {
+		t.Fatal("Validate accepted remote cleartext SMTP authentication")
+	}
+	cfg.Connections[0].Mail.SMTP.Address = "localhost:3025"
+	if err := Validate(cfg); err != nil {
+		t.Fatalf("Validate rejected loopback development SMTP: %v", err)
+	}
+}
+
 func TestStoreRoundTripAndPermissions(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "nested", "config.json")
 	store, err := New(path)

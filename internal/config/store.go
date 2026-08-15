@@ -270,6 +270,10 @@ func Validate(cfg model.Config) error {
 				if err := validateTransport(prefix+".mail.smtp", connection.Mail.SMTP.Address, connection.Mail.SMTP.TLS, connection.Mail.SMTP.StartTLS, connection.Mail.SMTP.Insecure); err != nil {
 					return err
 				}
+				host, _, _ := net.SplitHostPort(connection.Mail.SMTP.Address)
+				if connection.Mail.SMTP.Insecure && !connection.Mail.SMTP.TLS && !connection.Mail.SMTP.StartTLS && host != "localhost" && host != "127.0.0.1" && host != "::1" {
+					return fmt.Errorf("%s.mail.smtp cannot authenticate over remote cleartext SMTP; enable tls or starttls", prefix)
+				}
 			}
 			switch connection.Mail.SentCopy {
 			case "", "always", "never", "provider-managed":

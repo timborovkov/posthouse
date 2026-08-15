@@ -366,6 +366,66 @@ func TestPrepareCalendarWriteValidatesEventBeforeToken(t *testing.T) {
 	}
 }
 
+func TestPrepareCalendarWriteRejectsInvalidRecurrenceID(t *testing.T) {
+	connection := model.Connection{ID: "work", Name: "Work", Calendar: &model.CalendarConfig{Kind: "caldav", URL: "http://localhost:5232", Username: "work", Secret: model.SecretRef{Env: "CALENDAR_PASSWORD"}, Collections: []model.CalendarCollection{{ID: "team", Path: "/work/team/"}}}}
+	application := serviceWithConnections(t, connection)
+	_, err := application.PrepareCalendarWrite(context.Background(), "work", "calendar.create", model.Event{CollectionID: "team", Title: "Planning", Start: instant(9), End: instant(10), RecurrenceID: "not-rfc3339"})
+	if err == nil || !strings.Contains(err.Error(), "recurrence ID") {
+		t.Fatalf("PrepareCalendarWrite error = %v", err)
+	}
+}
+
+func TestMovedEventReplacesBroadCacheIdentity(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	connection := calendarConnection("calendar", "Calendar")
+	application := serviceWithConnections(t, connection)
+	start, end := instant(8), instant(18)
+	old := model.Event{ConnectionID: connection.ID, ID: "event", Href: "/event.ics", Start: instant(9), End: instant(10)}
+	moved := old
+	moved.Start, moved.End = instant(11), instant(12)
+	if err := application.cacheEvents(connection.ID, "old", []model.Event{old}, start, end, true, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.cacheEvents(connection.ID, "filtered", []model.Event{moved}, start, end, true, false); err != nil {
+		t.Fatal(err)
+	}
+	events, ok := application.cachedEvents(connection, "other", nil, start, end, "")
+	if !ok || len(events) != 1 || !events[0].Start.Equal(moved.Start) {
+		t.Fatalf("moved event cache = %#v, %v", events, ok)
+	}
+}
+
+func TestCompleteMailRefreshRemovesAbsentUIDs(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	application := serviceWithConnections(t, mailConnection("work"))
+	application.now = func() time.Time { return instant(14) }
+	scope := "all mail"
+	options := postmail.SearchOptions{Since: instant(8)}
+	initial := postmail.SearchResult{UIDValidity: 1, UIDNext: 3, Messages: []model.Message{{ConnectionID: "work", Folder: "INBOX", UID: 2, ReceivedAt: instant(12)}, {ConnectionID: "work", Folder: "INBOX", UID: 1, ReceivedAt: instant(10)}}}
+	if err := application.cacheMailResult("work", "INBOX", scope, options, initial); err != nil {
+		t.Fatal(err)
+	}
+	refreshed := postmail.SearchResult{UIDValidity: 1, UIDNext: 3, Messages: initial.Messages[:1]}
+	if err := application.cacheMailResult("work", "INBOX", scope, options, refreshed); err != nil {
+		t.Fatal(err)
+	}
+	result, ok := application.cachedMailResult("work", "INBOX", "different", options, mailCursorState{}, 10)
+	if !ok || messageUIDs(result.Messages) != "work:2" {
+		t.Fatalf("offline mail after complete refresh = %#v, %v", result, ok)
+	}
+}
+
+func TestPrepareSendValidatesSerializationBeforeToken(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	connection := mailConnection("work")
+	connection.Mail.SMTP = model.SMTPConfig{Address: "localhost:3025", Insecure: true}
+	application := serviceWithConnections(t, connection)
+	_, err := application.PrepareSend(context.Background(), model.SendMessage{ConnectionID: "work", To: []string{"not-an-address"}, Subject: "subject", Text: "body"})
+	if err == nil || !strings.Contains(err.Error(), "validate message") {
+		t.Fatalf("PrepareSend error = %v", err)
+	}
+}
+
 func TestOfflineMessageAndAttachmentReads(t *testing.T) {
 	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
 	application := serviceWithConnections(t, mailConnection("work"))

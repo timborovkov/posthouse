@@ -2,6 +2,7 @@ package mail
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"net"
 	"slices"
@@ -68,7 +69,7 @@ func SearchContext(ctx context.Context, connection model.Connection, options Sea
 	if err != nil {
 		return SearchResult{}, err
 	}
-	client, err := dialIMAP(connection.Mail.IMAP)
+	client, err := dialIMAPContext(ctx, connection.Mail.IMAP)
 	if err != nil {
 		return SearchResult{}, err
 	}
@@ -220,14 +221,10 @@ func orderedUIDWindow(uids []imap.UID, cursorUID uint32, limit int) []imap.UID {
 
 func imapSearchDateBounds(since, before time.Time) (time.Time, time.Time) {
 	if !since.IsZero() {
-		since = dayStart(since)
+		since = dayStart(since.UTC()).AddDate(0, 0, -1)
 	}
 	if !before.IsZero() {
-		start := dayStart(before)
-		if !before.Equal(start) {
-			start = start.AddDate(0, 0, 1)
-		}
-		before = start
+		before = dayStart(before.UTC()).AddDate(0, 0, 2)
 	}
 	return since, before
 }
@@ -319,27 +316,61 @@ func messagePreview(data []byte) string {
 }
 
 func dialIMAP(settings model.IMAPConfig) (*imapclient.Client, error) {
+	return dialIMAPContext(context.Background(), settings)
+}
+
+func dialIMAPContext(ctx context.Context, settings model.IMAPConfig) (*imapclient.Client, error) {
 	var (
 		client *imapclient.Client
 		err    error
 	)
-	switch {
-	case settings.TLS:
-		client, err = imapclient.DialTLS(settings.Address, nil)
-	case settings.StartTLS:
-		client, err = imapclient.DialStartTLS(settings.Address, nil)
-	default:
-		host, _, splitErr := net.SplitHostPort(settings.Address)
-		if splitErr != nil {
-			return nil, fmt.Errorf("IMAP address must use host:port: %w", splitErr)
-		}
-		if !settings.Insecure && host != "localhost" && host != "127.0.0.1" && host != "::1" {
-			return nil, fmt.Errorf("refusing cleartext IMAP connection without insecure=true")
-		}
-		client, err = imapclient.DialInsecure(settings.Address, nil)
+	host, _, splitErr := net.SplitHostPort(settings.Address)
+	if splitErr != nil {
+		return nil, fmt.Errorf("IMAP address must use host:port: %w", splitErr)
 	}
+	if !settings.TLS && !settings.StartTLS && !settings.Insecure && host != "localhost" && host != "127.0.0.1" && host != "::1" {
+		return nil, fmt.Errorf("refusing cleartext IMAP connection without insecure=true")
+	}
+	dialer := &net.Dialer{Timeout: 30 * time.Second}
+	connection, err := dialer.DialContext(ctx, "tcp", settings.Address)
 	if err != nil {
 		return nil, fmt.Errorf("connect to IMAP: %w", err)
+	}
+	deadline := time.Now().Add(30 * time.Second)
+	if contextDeadline, ok := ctx.Deadline(); ok && contextDeadline.Before(deadline) {
+		deadline = contextDeadline
+	}
+	_ = connection.SetDeadline(deadline)
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = connection.Close()
+		case <-done:
+		}
+	}()
+	switch {
+	case settings.TLS:
+		tlsConnection := tls.Client(connection, &tls.Config{MinVersion: tls.VersionTLS12, ServerName: host, NextProtos: []string{"imap"}})
+		if err = tlsConnection.HandshakeContext(ctx); err == nil {
+			client = imapclient.New(tlsConnection, nil)
+		}
+	case settings.StartTLS:
+		client, err = imapclient.NewStartTLS(connection, &imapclient.Options{TLSConfig: &tls.Config{MinVersion: tls.VersionTLS12, ServerName: host}})
+	default:
+		client = imapclient.New(connection, nil)
+	}
+	if err != nil {
+		_ = connection.Close()
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+		return nil, fmt.Errorf("connect to IMAP: %w", err)
+	}
+	if err := connection.SetDeadline(time.Time{}); err != nil {
+		_ = client.Close()
+		return nil, fmt.Errorf("clear IMAP handshake deadline: %w", err)
 	}
 	return client, nil
 }
