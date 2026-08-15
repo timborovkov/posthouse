@@ -490,11 +490,10 @@ func typedEvent(component *ics.VEvent, locations map[string]*time.Location) (mod
 			return model.Event{}, fmt.Errorf("parse DTEND for event %s: %w", event.ID, err)
 		}
 	} else if duration := component.GetProperty(ics.ComponentPropertyDuration); duration != nil {
-		parsedDuration, err := parseDuration(duration.Value)
+		event.End, err = addDuration(event.Start, duration.Value)
 		if err != nil {
 			return model.Event{}, fmt.Errorf("parse DURATION for event %s: %w", event.ID, err)
 		}
-		event.End = event.Start.Add(parsedDuration)
 	} else if event.AllDay {
 		event.End = event.Start.Add(24 * time.Hour)
 	} else {
@@ -538,55 +537,98 @@ func stableOccurrenceID(uid string, start time.Time) string {
 	return uid + "#" + start.UTC().Format("20060102T150405Z")
 }
 
-func parseDuration(value string) (time.Duration, error) {
-	sign := time.Duration(1)
+type calendarDuration struct {
+	sign  int
+	days  int
+	clock time.Duration
+}
+
+func parseDuration(value string) (calendarDuration, error) {
+	original := value
+	sign := 1
 	if strings.HasPrefix(value, "-") {
 		sign, value = -1, strings.TrimPrefix(value, "-")
 	} else {
 		value = strings.TrimPrefix(value, "+")
 	}
 	if !strings.HasPrefix(value, "P") {
-		return 0, fmt.Errorf("invalid RFC5545 duration %q", value)
+		return calendarDuration{}, fmt.Errorf("invalid RFC5545 duration %q", original)
 	}
 	value = strings.TrimPrefix(value, "P")
-	var days, hours, minutes, seconds int
-	_, err := fmt.Sscanf(strings.NewReplacer("T", "", "D", " ", "H", " ", "M", " ", "S", "").Replace(value), "%d %d %d %d", &days, &hours, &minutes, &seconds)
-	if err != nil {
-		// Accept the common subsets without forcing every unit to exist.
-		var total time.Duration
-		var number int
-		inTime := false
-		for _, char := range value {
-			if char == 'T' {
-				inTime = true
-				continue
-			}
-			if char >= '0' && char <= '9' {
-				number = number*10 + int(char-'0')
-				continue
-			}
-			switch char {
-			case 'W':
-				total += time.Duration(number) * 7 * 24 * time.Hour
-			case 'D':
-				total += time.Duration(number) * 24 * time.Hour
-			case 'H':
-				total += time.Duration(number) * time.Hour
-			case 'M':
-				if !inTime {
-					return 0, fmt.Errorf("month durations are not valid for VEVENT")
-				}
-				total += time.Duration(number) * time.Minute
-			case 'S':
-				total += time.Duration(number) * time.Second
-			default:
-				return 0, fmt.Errorf("invalid duration unit %q", char)
-			}
-			number = 0
-		}
-		return sign * total, nil
+	if value == "" {
+		return calendarDuration{}, fmt.Errorf("invalid RFC5545 duration %q", original)
 	}
-	return sign * (time.Duration(days)*24*time.Hour + time.Duration(hours)*time.Hour + time.Duration(minutes)*time.Minute + time.Duration(seconds)*time.Second), nil
+	parsed := calendarDuration{sign: sign}
+	var number int
+	haveNumber, haveUnit, inTime, timeUnit, usedWeeks := false, false, false, false, false
+	for _, char := range value {
+		if char >= '0' && char <= '9' {
+			haveNumber = true
+			number = number*10 + int(char-'0')
+			if number > 1_000_000 {
+				return calendarDuration{}, fmt.Errorf("RFC5545 duration %q is too large", original)
+			}
+			continue
+		}
+		if char == 'T' {
+			if inTime || haveNumber || usedWeeks {
+				return calendarDuration{}, fmt.Errorf("invalid RFC5545 duration %q", original)
+			}
+			inTime = true
+			continue
+		}
+		if !haveNumber {
+			return calendarDuration{}, fmt.Errorf("invalid RFC5545 duration %q", original)
+		}
+		switch char {
+		case 'W':
+			if inTime || haveUnit {
+				return calendarDuration{}, fmt.Errorf("invalid RFC5545 duration %q", original)
+			}
+			parsed.days = number * 7
+			usedWeeks = true
+		case 'D':
+			if inTime || usedWeeks {
+				return calendarDuration{}, fmt.Errorf("invalid RFC5545 duration %q", original)
+			}
+			parsed.days = number
+		case 'H':
+			if !inTime || usedWeeks {
+				return calendarDuration{}, fmt.Errorf("invalid RFC5545 duration %q", original)
+			}
+			parsed.clock += time.Duration(number) * time.Hour
+			timeUnit = true
+		case 'M':
+			if !inTime || usedWeeks {
+				return calendarDuration{}, fmt.Errorf("month durations are not valid for VEVENT")
+			}
+			parsed.clock += time.Duration(number) * time.Minute
+			timeUnit = true
+		case 'S':
+			if !inTime || usedWeeks {
+				return calendarDuration{}, fmt.Errorf("invalid RFC5545 duration %q", original)
+			}
+			parsed.clock += time.Duration(number) * time.Second
+			timeUnit = true
+		default:
+			return calendarDuration{}, fmt.Errorf("invalid duration unit %q", char)
+		}
+		haveNumber = false
+		haveUnit = true
+		number = 0
+	}
+	if haveNumber || !haveUnit || (inTime && !timeUnit) {
+		return calendarDuration{}, fmt.Errorf("invalid RFC5545 duration %q", original)
+	}
+	return parsed, nil
+}
+
+func addDuration(start time.Time, value string) (time.Time, error) {
+	duration, err := parseDuration(value)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return start.AddDate(0, 0, duration.sign*duration.days).Add(time.Duration(duration.sign) * duration.clock), nil
 }
 
 func Generate(event model.Event) (model.Event, string, error) {

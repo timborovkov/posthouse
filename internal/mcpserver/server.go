@@ -342,7 +342,7 @@ func (s *Server) registerTools() {
 			return nil, detail, err
 		})
 
-	mcp.AddTool(s.mcp, &mcp.Tool{Name: "messages_attachment_get", Title: "Get attachment chunk", Description: "Read a bounded base64 chunk from one immutable message-attachment snapshot. The maximum chunk is 1 MiB; pass both next_offset and next_cursor until omitted.", Annotations: readOnly},
+	mcp.AddTool(s.mcp, &mcp.Tool{Name: "messages_attachment_get", Title: "Get attachment chunk", Description: "Read a bounded base64 chunk from one immutable message-attachment snapshot. The maximum chunk is 1 MiB; pass both next_offset and next_cursor until omitted. A final cursorless chunk can be returned without caching, while multi-chunk reads require cache.max_bytes capacity for the full encrypted snapshot.", Annotations: readOnly},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input attachmentGetInput) (*mcp.CallToolResult, attachmentChunkOutput, error) {
 			if err := validateReadMode(input.Mode); err != nil {
 				return nil, attachmentChunkOutput{}, err
@@ -367,6 +367,9 @@ func (s *Server) registerTools() {
 				return nil, attachmentChunkOutput{}, fmt.Errorf("offset exceeds attachment size")
 			}
 			end := min(input.Offset+input.Limit, len(data))
+			if end < len(data) && snapshotCursor == "" {
+				return nil, attachmentChunkOutput{}, fmt.Errorf("attachment exceeds encrypted cache capacity; increase cache.max_bytes or request an attachment no larger than the 1 MiB chunk limit")
+			}
 			output := attachmentChunkOutput{Attachment: attachment, Offset: input.Offset, DataBase64: base64.StdEncoding.EncodeToString(data[input.Offset:end])}
 			if end < len(data) {
 				output.NextOffset = end

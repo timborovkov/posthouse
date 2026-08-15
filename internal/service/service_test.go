@@ -368,7 +368,7 @@ func TestInFlightCalendarWriteCannotPopulateReplacementCache(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cached, found := application.cachedEvents(current, "race", nil, start, end, ""); found || len(cached) != 0 {
+	if cached, found, _ := application.cachedEvents(current, "race", nil, start, end, ""); found || len(cached) != 0 {
 		t.Fatalf("replacement read old in-flight events: found=%v events=%#v", found, cached)
 	}
 }
@@ -632,7 +632,7 @@ func TestFilteredEventCacheDoesNotPruneOtherCollections(t *testing.T) {
 	if err := application.cacheEvents(connection.ID, "team query", all[:1], start, end, true, false); err != nil {
 		t.Fatal(err)
 	}
-	events, ok := application.cachedEvents(connection, "different scope", []string{"Personal"}, start, end, "")
+	events, ok, _ := application.cachedEvents(connection, "different scope", []string{"Personal"}, start, end, "")
 	if !ok || len(events) != 1 || events[0].ID != "personal" {
 		t.Fatalf("offline personal collection = %#v, %v", events, ok)
 	}
@@ -650,7 +650,7 @@ func TestFilteredEventCacheReplacesExactScopedResult(t *testing.T) {
 	if err := application.cacheEvents(connection.ID, "query", old[:1], start, end, true, false); err != nil {
 		t.Fatal(err)
 	}
-	events, ok := application.cachedEvents(connection, "query", nil, start, end, "")
+	events, ok, _ := application.cachedEvents(connection, "query", nil, start, end, "")
 	if !ok || len(events) != 1 || events[0].ID != "kept" {
 		t.Fatalf("exact filtered cache = %#v, %v", events, ok)
 	}
@@ -700,7 +700,7 @@ func TestMovedEventReplacesBroadCacheIdentity(t *testing.T) {
 	if err := application.cacheEvents(connection.ID, "filtered", []model.Event{moved}, start, end, true, false); err != nil {
 		t.Fatal(err)
 	}
-	events, ok := application.cachedEvents(connection, "other", nil, start, end, "")
+	events, ok, _ := application.cachedEvents(connection, "other", nil, start, end, "")
 	if !ok || len(events) != 1 || !events[0].Start.Equal(moved.Start) {
 		t.Fatalf("moved event cache = %#v, %v", events, ok)
 	}
@@ -738,7 +738,7 @@ func TestConcurrentSharedCacheIndexMergesRetainEveryResult(t *testing.T) {
 				}
 			}
 		}
-		cached, ok := first.cachedEvents(connection, "missing-scope", nil, start, end, "")
+		cached, ok, _ := first.cachedEvents(connection, "missing-scope", nil, start, end, "")
 		if !ok || len(cached) != 40 {
 			t.Fatalf("calendar index retained %d events, found=%v", len(cached), ok)
 		}
@@ -760,7 +760,7 @@ func TestConcurrentSharedCacheIndexMergesRetainEveryResult(t *testing.T) {
 				}
 			}
 		}
-		cached, ok = first.cachedEvents(connection, "shared-partial-scope", nil, start, end, "")
+		cached, ok, _ = first.cachedEvents(connection, "shared-partial-scope", nil, start, end, "")
 		if !ok || len(cached) != 40 {
 			t.Fatalf("calendar scoped cache retained %d events, found=%v", len(cached), ok)
 		}
@@ -828,9 +828,40 @@ func TestPartialCalDAVRefreshReplacesOnlySuccessfulCollections(t *testing.T) {
 	if err := application.cacheEventsReplacing(connection.ID, "scope", fresh, start, end, false, true, []string{"team"}); err != nil {
 		t.Fatal(err)
 	}
-	events, ok := application.cachedEvents(connection, "scope", nil, start, end, "")
+	events, ok, _ := application.cachedEvents(connection, "scope", nil, start, end, "")
 	if !ok || len(events) != 2 || slices.ContainsFunc(events, func(event model.Event) bool { return event.ID == "deleted" }) || !slices.ContainsFunc(events, func(event model.Event) bool { return event.ID == "preserved" }) || !slices.ContainsFunc(events, func(event model.Event) bool { return event.ID == "new" }) {
 		t.Fatalf("partial collection cache = %#v, %v", events, ok)
+	}
+}
+
+func TestPartialCalendarScopePreservesOfflineSourceStatus(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	connection := model.Connection{ID: "calendar", Name: "Calendar", Calendar: &model.CalendarConfig{Kind: "caldav", URL: "http://localhost:5232", Username: "calendar", Secret: model.SecretRef{Env: "CALENDAR_PASSWORD"}, Collections: []model.CalendarCollection{{ID: "team", Path: "/team/"}, {ID: "personal", Path: "/personal/"}}}}
+	application := serviceWithConnections(t, connection)
+	resolved, err := application.exactConnection("calendar", "calendar.read")
+	if err != nil {
+		t.Fatal(err)
+	}
+	start, end := instant(8), instant(18)
+	old := []model.Event{{ConnectionID: "calendar", CollectionID: "personal", ID: "old", Start: instant(9), End: instant(10)}}
+	if err := application.cacheEvents("calendar", "scope", old, start, end, true, true); err != nil {
+		t.Fatal(err)
+	}
+	partialErrors := []model.SourceError{{ConnectionID: "calendar", CollectionID: "personal", Code: "calendar_collection_unavailable", Message: "offline"}}
+	fresh := []model.Event{{ConnectionID: "calendar", CollectionID: "team", ID: "fresh", Start: instant(11), End: instant(12)}}
+	if err := application.cacheEventsReplacingWithID(resolved, calendarCacheID(resolved), "scope", fresh, start, end, false, true, []string{"team"}, partialErrors); err != nil {
+		t.Fatal(err)
+	}
+	events, found, cachedErrors := application.cachedEvents(resolved, "scope", nil, start, end, "")
+	if !found || len(events) != 1 || !events[0].Stale || len(cachedErrors) != 1 || !cachedErrors[0].Stale || cachedErrors[0].CollectionID != "personal" {
+		t.Fatalf("partial offline calendar = %#v, found=%v errors=%#v", events, found, cachedErrors)
+	}
+	if err := application.cacheEventsReplacingWithID(resolved, calendarCacheID(resolved), "scope", fresh, start, end, true, true, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	_, _, cachedErrors = application.cachedEvents(resolved, "scope", nil, start, end, "")
+	if len(cachedErrors) != 0 {
+		t.Fatalf("complete refresh retained partial status: %#v", cachedErrors)
 	}
 }
 
@@ -971,6 +1002,49 @@ func TestConcurrentMailContinuationsMergeAtomically(t *testing.T) {
 	result, ok, complete := first.cachedMailResult("work", "INBOX", scope, postmail.SearchOptions{}, mailCursorState{}, 100)
 	if !ok || !complete || len(result.Messages) != 22 {
 		t.Fatalf("atomic scoped snapshot retained %d messages, found=%v complete=%v", len(result.Messages), ok, complete)
+	}
+}
+
+func TestMailContinuationCannotPromoteAnotherTraversalSnapshot(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	application := serviceWithConnections(t, mailConnection("work"))
+	scope := "overlapping traversal"
+	message := func(uid uint32) model.Message {
+		return model.Message{ConnectionID: "work", Folder: "INBOX", UID: uid, ReceivedAt: time.Unix(int64(uid), 0)}
+	}
+	if err := application.cacheMailResult("work", "INBOX", scope, postmail.SearchOptions{}, postmail.SearchResult{UIDValidity: 7, UIDNext: 5, HasMore: true, Messages: []model.Message{message(4), message(3)}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.cacheMailResult("work", "INBOX", scope, postmail.SearchOptions{}, postmail.SearchResult{UIDValidity: 7, UIDNext: 6, HasMore: true, Messages: []model.Message{message(5), message(4)}}); err != nil {
+		t.Fatal(err)
+	}
+	olderContinuation := postmail.SearchOptions{CursorUID: 3, MaxUIDExclusive: 5}
+	if err := application.cacheMailResult("work", "INBOX", scope, olderContinuation, postmail.SearchResult{UIDValidity: 7, UIDNext: 6, Messages: []model.Message{message(2), message(1)}}); err != nil {
+		t.Fatal(err)
+	}
+	connection, err := application.exactConnection("work", "mail.read")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger, err := application.ensureState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry, ok, err := ledger.Get(context.Background(), "message_metadata", scopedCacheKey(mailCacheID(connection), scope), false)
+	if err != nil || !ok {
+		t.Fatalf("scoped cache = %#v, %v, %v", entry, ok, err)
+	}
+	var pending postmail.SearchResult
+	if err := json.Unmarshal(entry.Value, &pending); err != nil || !pending.HasMore || pending.UIDNext != 6 || messageUIDs(pending.Messages) != "work:5,work:4" {
+		t.Fatalf("older traversal promoted mixed snapshot %#v: %v", pending, err)
+	}
+	newerContinuation := postmail.SearchOptions{CursorUID: 4, MaxUIDExclusive: 6}
+	if err := application.cacheMailResult("work", "INBOX", scope, newerContinuation, postmail.SearchResult{UIDValidity: 7, UIDNext: 6, Messages: []model.Message{message(3), message(2), message(1)}}); err != nil {
+		t.Fatal(err)
+	}
+	result, found, complete := application.cachedMailResult("work", "INBOX", scope, postmail.SearchOptions{}, mailCursorState{}, 10)
+	if !found || !complete || messageUIDs(result.Messages) != "work:5,work:4,work:3,work:2,work:1" {
+		t.Fatalf("newer traversal did not complete atomically: %#v, %v, %v", result, found, complete)
 	}
 }
 
@@ -1389,6 +1463,62 @@ func TestAttachmentSnapshotCarriesFetchedUIDValidity(t *testing.T) {
 	}
 	if _, cached, ok := application.cachedAttachmentSnapshotFor(ctx, "INBOX", 7, "file", snapshot); !ok || string(cached) != "old bytes" {
 		t.Fatalf("fetched snapshot followed mutable mailbox state: %q, %v", cached, ok)
+	}
+}
+
+func TestAttachmentSnapshotReturnsCursorlessDataAfterCacheEviction(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	application := serviceWithConnections(t, mailConnection("work"))
+	if err := application.store.Update(func(cfg model.Config) (model.Config, error) {
+		cfg.Cache.MaxBytes = 1
+		return cfg, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	application.mailGetAttachment = func(context.Context, model.Connection, string, uint32, string) (model.Attachment, []byte, uint32, error) {
+		return model.Attachment{ID: "file"}, []byte("fetched bytes"), 11, nil
+	}
+	attachment, data, cursor, err := application.GetAttachmentSnapshotMode(context.Background(), "work", "INBOX", 7, "file", "refresh", "")
+	if err != nil || attachment.ID != "file" || string(data) != "fetched bytes" || cursor != "" {
+		t.Fatalf("cursorless fetched attachment = %#v %q %q, %v", attachment, data, cursor, err)
+	}
+}
+
+func TestMailboxUIDValidityCommitRejectsStaleReader(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	application := serviceWithConnections(t, mailConnection("work"))
+	ledger, err := application.ensureState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	connection, err := application.exactConnection("work", "mail.read")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cacheID := mailCacheID(connection)
+	if err := application.cacheMailboxUIDValidityWithID(ledger, connection, cacheID, "INBOX", 11); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.cacheMailResultDataWithID(connection, cacheID, "INBOX", "old scope", postmail.SearchOptions{}, postmail.SearchResult{UIDValidity: 11, UIDNext: 2, Messages: []model.Message{{ConnectionID: "work", Folder: "INBOX", UID: 1}}}, false); err != nil {
+		t.Fatal(err)
+	}
+	older := application.mailboxCacheSnapshotWithID(ledger, cacheID, "INBOX")
+	newer := application.mailboxCacheSnapshotWithID(ledger, cacheID, "INBOX")
+	if committed, err := application.commitMailboxUIDValidity(ledger, connection, cacheID, "INBOX", newer, 12); err != nil || !committed {
+		t.Fatalf("newer commit = %v, %v", committed, err)
+	}
+	if committed, err := application.commitMailboxUIDValidity(ledger, connection, cacheID, "INBOX", older, 11); err != nil || committed {
+		t.Fatalf("stale commit = %v, %v", committed, err)
+	}
+	current := application.mailboxCacheSnapshotWithID(ledger, cacheID, "INBOX")
+	if !current.Found || current.UIDValidity != 12 {
+		t.Fatalf("mailbox generation rolled back to %#v", current)
+	}
+	if cached, found, _ := application.cachedMailResult("work", "INBOX", "old scope", postmail.SearchOptions{}, mailCursorState{}, 10); found || len(cached.Messages) != 0 {
+		t.Fatalf("stale UIDVALIDITY cache remained readable: %#v, %v", cached, found)
+	}
+	if committed, err := application.commitMailboxUIDValidity(ledger, connection, cacheID, "INBOX", current, 1); err != nil || !committed {
+		t.Fatalf("legitimate lower UIDVALIDITY reset = %v, %v", committed, err)
 	}
 }
 

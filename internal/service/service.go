@@ -65,6 +65,13 @@ type attachmentSnapshotPosition struct {
 	Digest      string `json:"digest"`
 }
 
+type mailboxCacheSnapshot struct {
+	UIDValidity uint32
+	Found       bool
+}
+
+var errMailboxCacheSnapshotChanged = errors.New("mailbox cache snapshot changed")
+
 const maxOutboundAttachmentBytes int64 = 25 << 20
 
 func New(store *config.Store) *Service {
@@ -309,22 +316,24 @@ func (s *Service) SearchMessagesContext(ctx context.Context, selection model.Sel
 			pageErrors = append(pageErrors, failed)
 			continue
 		}
-		state, hasState := position.Connections[connection.ID]
+		cursorState, hasState := position.Connections[connection.ID]
 		if cursor != "" && !hasState {
 			return model.MessagePage{}, fmt.Errorf("cursor is missing state for connection %s", connection.ID)
 		}
 		connectionOptions := options
 		connectionOptions.Limit = pageSize + 1
-		connectionOptions.CursorTime = state.BeforeTime
-		connectionOptions.CursorUID = state.BeforeUID
-		connectionOptions.MaxUIDExclusive = state.UIDNext
-		connectionOptions.ExpectedUIDValidity = state.UIDValidity
+		connectionOptions.CursorTime = cursorState.BeforeTime
+		connectionOptions.CursorUID = cursorState.BeforeUID
+		connectionOptions.MaxUIDExclusive = cursorState.UIDNext
+		connectionOptions.ExpectedUIDValidity = cursorState.UIDValidity
 		var result postmail.SearchResult
 		var err error
 		requestCacheID := ""
+		var mailboxLedger *state.Store
+		var mailboxSnapshot mailboxCacheSnapshot
 		if options.Mode == "offline" {
 			var ok, complete bool
-			result, ok, complete = s.cachedMailResult(connection.ID, mailFolder(connection, connectionOptions.Folder), scope, connectionOptions, state, connectionOptions.Limit)
+			result, ok, complete = s.cachedMailResult(connection.ID, mailFolder(connection, connectionOptions.Folder), scope, connectionOptions, cursorState, connectionOptions.Limit)
 			if !ok {
 				err = fmt.Errorf("no cached result for this source and query")
 			} else if !complete {
@@ -337,6 +346,12 @@ func (s *Service) SearchMessagesContext(ctx context.Context, selection model.Sel
 			connection, err = resolveMailConnection(connection)
 			if err == nil {
 				requestCacheID = mailCacheID(connection)
+				if requestCacheID != "" {
+					mailboxLedger, _ = s.ensureState()
+					if mailboxLedger != nil {
+						mailboxSnapshot = s.mailboxCacheSnapshotWithID(mailboxLedger, requestCacheID, mailFolder(connection, connectionOptions.Folder))
+					}
+				}
 			}
 			if err != nil {
 				// handled by the normal stale-cache fallback below
@@ -349,7 +364,7 @@ func (s *Service) SearchMessagesContext(ctx context.Context, selection model.Sel
 		if err != nil {
 			providerError := sourceError(connection.ID, "mail_unavailable", err)
 			if options.Mode != "offline" && options.Mode != "refresh" {
-				if cached, ok, complete := s.cachedMailResult(connection.ID, mailFolder(connection, connectionOptions.Folder), scope, connectionOptions, state, connectionOptions.Limit); ok {
+				if cached, ok, complete := s.cachedMailResult(connection.ID, mailFolder(connection, connectionOptions.Folder), scope, connectionOptions, cursorState, connectionOptions.Limit); ok {
 					result = cached
 					providerError.Stale = true
 					for index := range result.Messages {
@@ -375,7 +390,13 @@ func (s *Service) SearchMessagesContext(ctx context.Context, selection model.Sel
 		} else if options.Mode != "offline" {
 			if requestCacheID == "" {
 				pageErrors = append(pageErrors, sourceError(connection.ID, "cache_write_skipped", fmt.Errorf("provider identity could not be resolved during read")))
-			} else if cacheErr := s.cacheMailResultWithID(connection, requestCacheID, mailFolder(connection, connectionOptions.Folder), scope, connectionOptions, result); cacheErr != nil {
+			} else if mailboxLedger == nil {
+				pageErrors = append(pageErrors, sourceError(connection.ID, "cache_write_skipped", fmt.Errorf("encrypted state is unavailable")))
+			} else if committed, commitErr := s.commitMailboxUIDValidity(mailboxLedger, connection, requestCacheID, mailFolder(connection, connectionOptions.Folder), mailboxSnapshot, result.UIDValidity); commitErr != nil {
+				pageErrors = append(pageErrors, sourceError(connection.ID, "cache_write_failed", commitErr))
+			} else if !committed {
+				pageErrors = append(pageErrors, sourceError(connection.ID, "cache_write_skipped", fmt.Errorf("a newer mailbox generation was cached while this read was in flight")))
+			} else if cacheErr := s.cacheMailResultDataWithID(connection, requestCacheID, mailFolder(connection, connectionOptions.Folder), scope, connectionOptions, result, false); cacheErr != nil {
 				pageErrors = append(pageErrors, sourceError(connection.ID, "cache_write_failed", cacheErr))
 			}
 		} else {
@@ -384,11 +405,11 @@ func (s *Service) SearchMessagesContext(ctx context.Context, selection model.Sel
 			}
 		}
 		results[connection.ID] = result
-		state.UIDValidity = result.UIDValidity
-		if state.UIDNext == 0 {
-			state.UIDNext = result.UIDNext
+		cursorState.UIDValidity = result.UIDValidity
+		if cursorState.UIDNext == 0 {
+			cursorState.UIDNext = result.UIDNext
 		}
-		position.Connections[connection.ID] = state
+		position.Connections[connection.ID] = cursorState
 	}
 	indices := make(map[string]int, len(connections))
 	consumedLast := make(map[string]model.Message, len(connections))
@@ -557,12 +578,16 @@ func (s *Service) ListEventsMode(ctx context.Context, selection model.Selector, 
 		var err error
 		requestCacheID := ""
 		partialResult := false
+		var partialErrors []model.SourceError
 		var successfulCollections []string
 		if mode == "offline" {
 			var ok bool
-			events, ok = s.cachedEvents(connection, scope, selection.Collections, start, end, query)
+			var cachedErrors []model.SourceError
+			events, ok, cachedErrors = s.cachedEvents(connection, scope, selection.Collections, start, end, query)
 			if !ok {
 				err = fmt.Errorf("no cached result for this source and query")
+			} else {
+				pageErrors = append(pageErrors, cachedErrors...)
 			}
 		} else {
 			connection, err = resolveCalendarConnection(connection)
@@ -580,6 +605,7 @@ func (s *Service) ListEventsMode(ctx context.Context, selection model.Selector, 
 			pageErrors = append(pageErrors, partial.Errors...)
 			if partial.SuccessfulCollections > 0 {
 				partialResult = true
+				partialErrors = append(partialErrors, partial.Errors...)
 				successfulCollections = append(successfulCollections, partial.SuccessfulCollectionIDs...)
 				err = nil
 			}
@@ -587,7 +613,7 @@ func (s *Service) ListEventsMode(ctx context.Context, selection model.Selector, 
 		if err != nil {
 			sourceError := sourceError(connection.ID, "calendar_unavailable", err)
 			if mode != "offline" && mode != "refresh" {
-				if cached, ok := s.cachedEvents(connection, scope, selection.Collections, start, end, query); ok {
+				if cached, ok, cachedErrors := s.cachedEvents(connection, scope, selection.Collections, start, end, query); ok {
 					events = cached
 					successfulSources++
 					sourceError.Stale = true
@@ -595,6 +621,7 @@ func (s *Service) ListEventsMode(ctx context.Context, selection model.Selector, 
 						events[index].Stale = true
 					}
 					pageErrors = append(pageErrors, sourceError)
+					pageErrors = append(pageErrors, cachedErrors...)
 				} else {
 					position.Failed[connection.ID] = sourceError
 					pageErrors = append(pageErrors, sourceError)
@@ -610,7 +637,7 @@ func (s *Service) ListEventsMode(ctx context.Context, selection model.Selector, 
 			replaceIndex := strings.TrimSpace(query) == "" && ((!partialResult && len(selection.Collections) == 0) || len(successfulCollections) > 0)
 			if requestCacheID == "" {
 				pageErrors = append(pageErrors, sourceError(connection.ID, "cache_write_skipped", fmt.Errorf("provider identity could not be resolved during read")))
-			} else if cacheErr := s.cacheEventsReplacingWithID(connection, requestCacheID, scope, events, start, end, !partialResult, replaceIndex, successfulCollections); cacheErr != nil {
+			} else if cacheErr := s.cacheEventsReplacingWithID(connection, requestCacheID, scope, events, start, end, !partialResult, replaceIndex, successfulCollections, partialErrors); cacheErr != nil {
 				pageErrors = append(pageErrors, sourceError(connection.ID, "cache_write_failed", cacheErr))
 			}
 		} else {
@@ -1361,21 +1388,26 @@ func (s *Service) getMessageModeWithConnection(ctx context.Context, connection m
 			liveUIDValidity, validityErr := s.mailboxUIDValidity(ctx, connection, folder)
 			if validityErr == nil {
 				confirmedUIDMismatch = validityOK && liveUIDValidity != cachedUIDValidity
-				if confirmedUIDMismatch && stateErr == nil {
-					_ = s.cacheMailboxUIDValidityFor(ledger, connection, folder, liveUIDValidity)
+				if stateErr == nil {
+					cacheID := mailCacheID(connection)
+					_, _ = s.commitMailboxUIDValidity(ledger, connection, cacheID, folder, mailboxCacheSnapshot{UIDValidity: cachedUIDValidity, Found: validityOK}, liveUIDValidity)
 				}
 			}
 		}
 	}
 	if mode != "offline" && err == nil {
 		requestCacheID := mailCacheID(connection)
+		ledger, stateErr := s.ensureState()
+		mailboxSnapshot := mailboxCacheSnapshot{}
+		if stateErr == nil && requestCacheID != "" {
+			mailboxSnapshot = s.mailboxCacheSnapshotWithID(ledger, requestCacheID, folder)
+		}
 		fetched, fetchErr := s.mailGetMessage(ctx, connection, folder, uid)
 		if fetchErr == nil {
-			if ledger, stateErr := s.ensureState(); stateErr == nil && requestCacheID != "" {
-				if cacheID := requestCacheID; cacheID != "" {
+			if stateErr == nil && requestCacheID != "" {
+				if committed, commitErr := s.commitMailboxUIDValidity(ledger, connection, requestCacheID, folder, mailboxSnapshot, fetched.UIDValidity); commitErr == nil && committed {
 					data, _ := json.Marshal(fetched.Detail)
-					_ = s.cacheMailboxUIDValidityWithID(ledger, connection, cacheID, folder, fetched.UIDValidity)
-					_ = ledger.Put(context.Background(), state.CacheEntry{Namespace: "message_body", Key: messageCacheKey(cacheID, folder, fetched.UIDValidity, uid), ConnectionID: connection.ID, Kind: "message_body", ProviderID: fmt.Sprintf("%s/%d", folder, uid), ExpiresAt: s.now().Add(s.messageBodyTTL()), Value: data})
+					_ = ledger.Put(context.Background(), state.CacheEntry{Namespace: "message_body", Key: messageCacheKey(requestCacheID, folder, fetched.UIDValidity, uid), ConnectionID: connection.ID, Kind: "message_body", ProviderID: fmt.Sprintf("%s/%d", folder, uid), ExpiresAt: s.now().Add(s.messageBodyTTL()), Value: data})
 				}
 			}
 			return fetched.Detail, nil
@@ -1435,21 +1467,26 @@ func (s *Service) getAttachmentModeSnapshot(ctx context.Context, connectionID, f
 			if validityErr == nil {
 				confirmedUIDMismatch = validityOK && liveUIDValidity != cachedUIDValidity
 				if stateErr == nil {
-					_ = s.cacheMailboxUIDValidityFor(ledger, connection, folder, liveUIDValidity)
+					cacheID := mailCacheID(connection)
+					_, _ = s.commitMailboxUIDValidity(ledger, connection, cacheID, folder, mailboxCacheSnapshot{UIDValidity: cachedUIDValidity, Found: validityOK}, liveUIDValidity)
 				}
 			}
 		}
 	}
 	if mode != "offline" && err == nil {
 		requestCacheID := mailCacheID(connection)
+		ledger, stateErr := s.ensureState()
+		mailboxSnapshot := mailboxCacheSnapshot{}
+		if stateErr == nil && requestCacheID != "" {
+			mailboxSnapshot = s.mailboxCacheSnapshotWithID(ledger, requestCacheID, folder)
+		}
 		attachment, data, uidValidity, fetchErr := s.mailGetAttachment(ctx, connection, folder, uid, attachmentID)
 		if fetchErr == nil {
 			digest := sha256.Sum256(data)
 			snapshot := attachmentSnapshotPosition{CacheID: requestCacheID, UIDValidity: uidValidity, Digest: hex.EncodeToString(digest[:])}
-			if ledger, stateErr := s.ensureState(); stateErr == nil && requestCacheID != "" {
-				if cacheID := requestCacheID; cacheID != "" {
-					_ = s.cacheMailboxUIDValidityWithID(ledger, connection, cacheID, folder, uidValidity)
-					key := messageCacheKey(cacheID, folder, uidValidity, uid) + "/" + attachmentID
+			if stateErr == nil && requestCacheID != "" {
+				if committed, commitErr := s.commitMailboxUIDValidity(ledger, connection, requestCacheID, folder, mailboxSnapshot, uidValidity); commitErr == nil && committed {
+					key := messageCacheKey(requestCacheID, folder, uidValidity, uid) + "/" + attachmentID
 					expiresAt := s.now().Add(s.messageBodyTTL())
 					_ = ledger.Put(ctx, state.CacheEntry{Namespace: "attachment", Key: key, ConnectionID: connection.ID, Kind: "attachment", ProviderID: attachmentID, ExpiresAt: expiresAt, Value: data})
 					if metadata, metadataErr := json.Marshal(attachment); metadataErr == nil {
@@ -1509,10 +1546,10 @@ func (s *Service) GetAttachmentSnapshotMode(ctx context.Context, connectionID, f
 		return model.Attachment{}, nil, "", err
 	}
 	if snapshot.CacheID == "" || snapshot.UIDValidity == 0 {
-		return model.Attachment{}, nil, "", fmt.Errorf("attachment snapshot was not cached; retry the first chunk")
+		return attachment, data, "", nil
 	}
 	if _, _, ok := s.cachedAttachmentSnapshotFor(ctx, folder, uid, attachmentID, snapshot); !ok {
-		return model.Attachment{}, nil, "", fmt.Errorf("attachment snapshot was not cached; retry the first chunk")
+		return attachment, data, "", nil
 	}
 	cursor, err = pagination.Encode("attachment", scope, snapshot)
 	if err != nil {
@@ -2146,6 +2183,10 @@ func (s *Service) cacheMailResultFor(connection model.Connection, folder string,
 }
 
 func (s *Service) cacheMailResultWithID(connection model.Connection, cacheID, folder string, scope any, options postmail.SearchOptions, result postmail.SearchResult) error {
+	return s.cacheMailResultDataWithID(connection, cacheID, folder, scope, options, result, true)
+}
+
+func (s *Service) cacheMailResultDataWithID(connection model.Connection, cacheID, folder string, scope any, options postmail.SearchOptions, result postmail.SearchResult, cacheUIDValidity bool) error {
 	ledger, err := s.ensureState()
 	if err != nil {
 		return err
@@ -2156,8 +2197,13 @@ func (s *Service) cacheMailResultWithID(connection model.Connection, cacheID, fo
 	}
 	now := s.now()
 	result.Messages = slices.Clone(result.Messages)
-	if err := s.cacheMailboxUIDValidityFor(ledger, connection, folder, result.UIDValidity); err != nil {
-		return err
+	if options.MaxUIDExclusive != 0 {
+		result.UIDNext = options.MaxUIDExclusive
+	}
+	if cacheUIDValidity {
+		if err := s.cacheMailboxUIDValidityFor(ledger, connection, folder, result.UIDValidity); err != nil {
+			return err
+		}
 	}
 	continuation := !options.CursorTime.IsZero() || options.CursorUID != 0
 	pendingKey := scopedCacheKey(cacheID, scope)
@@ -2166,8 +2212,11 @@ func (s *Service) cacheMailResultWithID(connection model.Connection, cacheID, fo
 		combined = result
 		if continuation && found {
 			var existing postmail.SearchResult
-			if json.Unmarshal(current, &existing) == nil && existing.UIDValidity == result.UIDValidity {
+			if json.Unmarshal(current, &existing) == nil && existing.UIDValidity == result.UIDValidity && existing.UIDNext == result.UIDNext {
 				combined = mergeMailResults(existing, result)
+			} else {
+				combined = existing
+				return current, nil
 			}
 		} else if continuation {
 			// A missing earlier page cannot become an apparently complete scoped
@@ -2234,6 +2283,10 @@ func (s *Service) cachedMailResult(connectionID, folder string, scope any, optio
 		if err != nil || !ok || json.Unmarshal(entry.Value, &result) != nil {
 			return postmail.SearchResult{}, false, false
 		}
+	}
+	mailboxSnapshot := s.mailboxCacheSnapshotWithID(ledger, cacheID, folder)
+	if !mailboxSnapshot.Found || mailboxSnapshot.UIDValidity != result.UIDValidity {
+		return postmail.SearchResult{}, false, false
 	}
 	if cursorState.UIDValidity != 0 && result.UIDValidity != cursorState.UIDValidity {
 		return postmail.SearchResult{}, false, false
@@ -2376,10 +2429,10 @@ func (s *Service) cacheEventsReplacing(connectionID string, scope any, events []
 }
 
 func (s *Service) cacheEventsReplacingFor(connection model.Connection, scope any, events []model.Event, rangeStart, rangeEnd time.Time, replaceScoped, replaceIndex bool, replaceCollections []string) error {
-	return s.cacheEventsReplacingWithID(connection, calendarCacheID(connection), scope, events, rangeStart, rangeEnd, replaceScoped, replaceIndex, replaceCollections)
+	return s.cacheEventsReplacingWithID(connection, calendarCacheID(connection), scope, events, rangeStart, rangeEnd, replaceScoped, replaceIndex, replaceCollections, nil)
 }
 
-func (s *Service) cacheEventsReplacingWithID(connection model.Connection, cacheID string, scope any, events []model.Event, rangeStart, rangeEnd time.Time, replaceScoped, replaceIndex bool, replaceCollections []string) error {
+func (s *Service) cacheEventsReplacingWithID(connection model.Connection, cacheID string, scope any, events []model.Event, rangeStart, rangeEnd time.Time, replaceScoped, replaceIndex bool, replaceCollections []string, partialErrors []model.SourceError) error {
 	ledger, err := s.ensureState()
 	if err != nil {
 		return err
@@ -2392,7 +2445,16 @@ func (s *Service) cacheEventsReplacingWithID(connection model.Connection, cacheI
 	for index := range events {
 		events[index].CachedAt = now
 	}
-	if err := ledger.Mutate(context.Background(), state.CacheEntry{Namespace: "events", Key: scopedCacheKey(cacheID, scope), ConnectionID: connectionID, Kind: "event", CachedAt: now, ExpiresAt: now.Add(s.eventTTL())}, func(current []byte, found bool) ([]byte, error) {
+	scopeKey := scopedCacheKey(cacheID, scope)
+	if len(partialErrors) > 0 {
+		data, err := json.Marshal(partialErrors)
+		if err != nil {
+			return err
+		}
+		if err := ledger.Put(context.Background(), state.CacheEntry{Namespace: "event_scope_partial", Key: scopeKey, ConnectionID: connectionID, Kind: "sync_state", CachedAt: now, ExpiresAt: now.Add(s.eventTTL()), Value: data}); err != nil {
+			return err
+		}
+	} else if err := ledger.Mutate(context.Background(), state.CacheEntry{Namespace: "events", Key: scopeKey, ConnectionID: connectionID, Kind: "event", CachedAt: now, ExpiresAt: now.Add(s.eventTTL())}, func(current []byte, found bool) ([]byte, error) {
 		scoped := append([]model.Event(nil), events...)
 		if !replaceScoped && found {
 			var existing []model.Event
@@ -2407,7 +2469,7 @@ func (s *Service) cacheEventsReplacingWithID(connection model.Connection, cacheI
 	}); err != nil {
 		return err
 	}
-	return ledger.Mutate(context.Background(), state.CacheEntry{Namespace: "event_index", Key: cacheID, ConnectionID: connectionID, Kind: "event", CachedAt: now, ExpiresAt: now.Add(s.eventTTL())}, func(current []byte, found bool) ([]byte, error) {
+	if err := ledger.Mutate(context.Background(), state.CacheEntry{Namespace: "event_index", Key: cacheID, ConnectionID: connectionID, Kind: "event", CachedAt: now, ExpiresAt: now.Add(s.eventTTL())}, func(current []byte, found bool) ([]byte, error) {
 		index := append([]model.Event(nil), events...)
 		var existing []model.Event
 		if found && json.Unmarshal(current, &existing) == nil {
@@ -2424,30 +2486,44 @@ func (s *Service) cacheEventsReplacingWithID(connection model.Connection, cacheI
 			index = mergeEvents(existing, index)
 		}
 		return json.Marshal(index)
-	})
+	}); err != nil {
+		return err
+	}
+	if len(partialErrors) == 0 {
+		return ledger.Delete(context.Background(), "event_scope_partial", scopeKey)
+	}
+	return nil
 }
 
-func (s *Service) cachedEvents(connection model.Connection, scope any, collections []string, start, end time.Time, query string) ([]model.Event, bool) {
+func (s *Service) cachedEvents(connection model.Connection, scope any, collections []string, start, end time.Time, query string) ([]model.Event, bool, []model.SourceError) {
 	ledger, err := s.ensureState()
 	if err != nil {
-		return nil, false
+		return nil, false, nil
 	}
 	cacheID := calendarCacheID(connection)
 	if cacheID == "" {
-		return nil, false
+		return nil, false, nil
 	}
-	entry, ok, err := ledger.Get(context.Background(), "events", scopedCacheKey(cacheID, scope), false)
+	scopeKey := scopedCacheKey(cacheID, scope)
+	var partialErrors []model.SourceError
+	if marker, found, markerErr := ledger.Get(context.Background(), "event_scope_partial", scopeKey, false); markerErr == nil && found {
+		_ = json.Unmarshal(marker.Value, &partialErrors)
+		for index := range partialErrors {
+			partialErrors[index].Stale = true
+		}
+	}
+	entry, ok, err := ledger.Get(context.Background(), "events", scopeKey, false)
 	fromIndex := false
 	if err == nil && !ok {
 		entry, ok, err = ledger.Get(context.Background(), "event_index", cacheID, false)
 		fromIndex = ok
 	}
 	if err != nil || !ok {
-		return nil, false
+		return nil, false, nil
 	}
 	var events []model.Event
 	if json.Unmarshal(entry.Value, &events) != nil {
-		return nil, false
+		return nil, false, nil
 	}
 	filtered := events[:0]
 	query = strings.ToLower(strings.TrimSpace(query))
@@ -2463,9 +2539,12 @@ func (s *Service) cachedEvents(connection model.Connection, scope any, collectio
 			continue
 		}
 		event.CachedAt = entry.CachedAt
+		if len(partialErrors) > 0 {
+			event.Stale = true
+		}
 		filtered = append(filtered, event)
 	}
-	return filtered, true
+	return filtered, true, partialErrors
 }
 
 func selectedCollectionIDs(connection model.Connection, selected []string) []string {
@@ -2804,6 +2883,46 @@ func (s *Service) cacheMailboxUIDValidityWithID(ledger *state.Store, connection 
 	}
 	ttl := max(s.messageMetadataTTL(), s.messageBodyTTL())
 	return ledger.Put(context.Background(), state.CacheEntry{Namespace: "mailbox_uidvalidity", Key: mailboxCacheKey(cacheID, folder), ConnectionID: connection.ID, Kind: "sync_state", ProviderID: folder, ExpiresAt: s.now().Add(ttl), Value: data})
+}
+
+func (s *Service) mailboxCacheSnapshotWithID(ledger *state.Store, cacheID, folder string) mailboxCacheSnapshot {
+	entry, found, err := ledger.Get(context.Background(), "mailbox_uidvalidity", mailboxCacheKey(cacheID, folder), false)
+	if err != nil || !found {
+		return mailboxCacheSnapshot{}
+	}
+	var uidValidity uint32
+	if json.Unmarshal(entry.Value, &uidValidity) != nil || uidValidity == 0 {
+		return mailboxCacheSnapshot{}
+	}
+	return mailboxCacheSnapshot{UIDValidity: uidValidity, Found: true}
+}
+
+func (s *Service) commitMailboxUIDValidity(ledger *state.Store, connection model.Connection, cacheID, folder string, snapshot mailboxCacheSnapshot, uidValidity uint32) (bool, error) {
+	if cacheID == "" {
+		return false, fmt.Errorf("provider cache identity cannot be resolved")
+	}
+	if uidValidity == 0 {
+		return false, fmt.Errorf("provider returned zero UIDVALIDITY")
+	}
+	committed := false
+	ttl := max(s.messageMetadataTTL(), s.messageBodyTTL())
+	err := ledger.Mutate(context.Background(), state.CacheEntry{Namespace: "mailbox_uidvalidity", Key: mailboxCacheKey(cacheID, folder), ConnectionID: connection.ID, Kind: "sync_state", ProviderID: folder, ExpiresAt: s.now().Add(ttl)}, func(current []byte, found bool) ([]byte, error) {
+		if found != snapshot.Found {
+			return nil, errMailboxCacheSnapshotChanged
+		}
+		if found {
+			var currentUIDValidity uint32
+			if json.Unmarshal(current, &currentUIDValidity) != nil || currentUIDValidity != snapshot.UIDValidity {
+				return nil, errMailboxCacheSnapshotChanged
+			}
+		}
+		committed = true
+		return json.Marshal(uidValidity)
+	})
+	if errors.Is(err, errMailboxCacheSnapshotChanged) {
+		return false, nil
+	}
+	return committed, err
 }
 
 func (s *Service) cachedMailboxUIDValidity(ledger *state.Store, connectionID, folder string) (uint32, bool) {

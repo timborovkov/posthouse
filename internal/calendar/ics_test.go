@@ -479,6 +479,18 @@ func TestMergeUpdatedOccurrenceAppendsToMatchingFloatingSeries(t *testing.T) {
 	}
 }
 
+func TestMergeUpdatedOccurrencePreservesFloatingDurationEnd(t *testing.T) {
+	existing := []byte("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:series\r\nDTSTART:20260301T090000\r\nDURATION:PT1H\r\nRRULE:FREQ=DAILY;COUNT=3\r\nSUMMARY:Series\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n")
+	replacement := "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:series\r\nRECURRENCE-ID:20260302T140000Z\r\nDTSTART:20260302T160000Z\r\nDTEND:20260302T170000Z\r\nSUMMARY:Override\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+	merged, err := mergeUpdatedEventWithWallTimes(existing, replacement, "2026-03-02T14:00:00Z", "20260302T110000", "20260302T120000", "20260302T090000")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(merged, "DTSTART:20260302T110000") || !strings.Contains(merged, "DTEND:20260302T120000") {
+		t.Fatalf("duration override lost floating endpoints:\n%s", merged)
+	}
+}
+
 func TestParsePreservesFloatingRecurrenceWall(t *testing.T) {
 	events, err := Parse([]byte("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:series\r\nRECURRENCE-ID:20260302T090000\r\nDTSTART:20260302T110000\r\nDTEND:20260302T120000\r\nSUMMARY:Override\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"))
 	if err != nil {
@@ -496,6 +508,16 @@ func TestParseRangeSynthesizesFloatingRecurrenceWall(t *testing.T) {
 	}
 	if len(events) != 1 || events[0].RecurrenceWall != "20260302T090000" {
 		t.Fatalf("synthesized floating recurrence = %#v", events)
+	}
+}
+
+func TestDurationUsesCalendarDaysAcrossDST(t *testing.T) {
+	events, err := Parse([]byte("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:dst-duration\r\nDTSTART;TZID=America/New_York:20260307T090000\r\nDURATION:P1D\r\nSUMMARY:One local day\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].End.Hour() != 9 || events[0].End.Day() != 8 || events[0].End.Sub(events[0].Start) != 23*time.Hour {
+		t.Fatalf("calendar-day duration = %#v", events)
 	}
 }
 

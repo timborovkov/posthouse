@@ -455,6 +455,9 @@ func preserveEventTimezone(current, replacement *ics.VEvent, locations map[strin
 	}{{ics.ComponentPropertyDtStart, startWall}, {ics.ComponentPropertyDtEnd, endWall}, {ics.ComponentPropertyRecurrenceId, recurrenceWall}}
 	for _, property := range properties {
 		currentProperty := current.GetProperty(property.name)
+		if currentProperty == nil && property.name == ics.ComponentPropertyDtEnd && current.GetProperty(ics.ComponentPropertyDuration) != nil {
+			currentProperty = current.GetProperty(ics.ComponentPropertyDtStart)
+		}
 		replacementProperty := replacement.GetProperty(property.name)
 		if currentProperty == nil || replacementProperty == nil || replacementProperty.GetValueType() == ics.ValueDataTypeDate {
 			continue

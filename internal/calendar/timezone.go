@@ -73,11 +73,10 @@ func componentRecurrences(component *ics.VEvent, locations map[string]*time.Loca
 			}
 			var end time.Time
 			if strings.HasPrefix(parts[1], "P") || strings.HasPrefix(parts[1], "+P") || strings.HasPrefix(parts[1], "-P") {
-				duration, err := parseDuration(parts[1])
+				end, err = addDuration(start, parts[1])
 				if err != nil {
 					return nil, nil, err
 				}
-				end = start.Add(duration)
 			} else {
 				endProperty := *item
 				endProperty.Value = parts[1]
