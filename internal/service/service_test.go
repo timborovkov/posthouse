@@ -399,6 +399,29 @@ func TestProviderCacheIdentityUsesResolvedSecretValues(t *testing.T) {
 	}
 }
 
+func TestSecretRotationDuringCalendarFetchSkipsCacheWrite(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	t.Setenv("SECRET_FEED_URL", "https://calendar-one.example.test/feed.ics")
+	connection := model.Connection{ID: "calendar", Name: "Calendar", Calendar: &model.CalendarConfig{Kind: "feed", URLSecret: model.SecretRef{Env: "SECRET_FEED_URL"}}}
+	application := serviceWithConnections(t, connection)
+	application.calendar = calendar.NewClient(&http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.URL.Host != "calendar-one.example.test" {
+			t.Fatalf("provider request URL = %s", request.URL)
+		}
+		t.Setenv("SECRET_FEED_URL", "https://calendar-two.example.test/feed.ics")
+		feed := "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n" + eventFixture("old", "Old provider", "20260814T090000Z") + "END:VCALENDAR\r\n"
+		return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: make(http.Header), Body: io.NopCloser(strings.NewReader(feed))}, nil
+	})})
+	start, end := instant(8), instant(12)
+	page, err := application.ListEventsMode(context.Background(), model.Selector{}, start, end, "", 10, "", "refresh")
+	if err != nil || len(page.Events) != 1 || len(page.Errors) != 1 || page.Errors[0].Code != "cache_write_skipped" {
+		t.Fatalf("rotated fetch page = %#v, %v", page, err)
+	}
+	if _, err := application.ListEventsMode(context.Background(), model.Selector{}, start, end, "", 10, "", "offline"); err == nil {
+		t.Fatal("offline read found content fetched under the previous secret URL")
+	}
+}
+
 func TestPreparedOperationRejectsRotatedProviderSecret(t *testing.T) {
 	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
 	connection := mailConnection("work")
@@ -837,6 +860,22 @@ func TestMailboxUIDValidityLivesAsLongAsBodyCache(t *testing.T) {
 	}
 }
 
+func TestEventCacheTTLHoldsLongerPastHorizon(t *testing.T) {
+	application := serviceWithConnections(t, calendarConnection("calendar", "Calendar"))
+	cfg, err := application.store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Cache.EventPastDays = 90
+	cfg.Cache.EventFutureDays = 1
+	if err := application.store.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := application.eventTTL(), 90*24*time.Hour; got != want {
+		t.Fatalf("eventTTL = %v, want %v", got, want)
+	}
+}
+
 func TestLiveAttachmentRefetchesAndOnlyFallsBackAsStale(t *testing.T) {
 	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
 	application := serviceWithConnections(t, mailConnection("work"))
@@ -877,6 +916,27 @@ func TestLiveAttachmentRefetchesAndOnlyFallsBackAsStale(t *testing.T) {
 	providerMissing = true
 	if _, staleData, err := application.GetAttachmentMode(ctx, "work", "INBOX", 7, "file", ""); err == nil || len(staleData) != 0 {
 		t.Fatalf("confirmed UIDVALIDITY mismatch returned old bytes %q: %v", staleData, err)
+	}
+}
+
+func TestAttachmentProbeFailureStillAttemptsLiveFetch(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	application := serviceWithConnections(t, mailConnection("work"))
+	fetches := 0
+	application.mailGetAttachment = func(context.Context, model.Connection, string, uint32, string) (model.Attachment, []byte, uint32, error) {
+		fetches++
+		return model.Attachment{ID: "file", Name: "live.txt"}, []byte(fmt.Sprintf("live-%d", fetches)), 11, nil
+	}
+	ctx := context.Background()
+	if _, _, err := application.GetAttachmentMode(ctx, "work", "INBOX", 7, "file", "refresh"); err != nil {
+		t.Fatal(err)
+	}
+	application.mailboxUIDValidity = func(context.Context, model.Connection, string) (uint32, error) {
+		return 0, errors.New("probe unavailable")
+	}
+	attachment, data, err := application.GetAttachmentMode(ctx, "work", "INBOX", 7, "file", "")
+	if err != nil || attachment.Stale || string(data) != "live-2" || fetches != 2 {
+		t.Fatalf("probe failure returned %#v %q after %d fetches: %v", attachment, data, fetches, err)
 	}
 }
 
