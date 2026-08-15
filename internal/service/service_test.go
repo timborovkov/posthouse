@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -415,6 +416,36 @@ func TestCompleteMailRefreshRemovesAbsentUIDs(t *testing.T) {
 	}
 }
 
+func TestIncompleteMailRefreshPreservesLastCompleteScopedCache(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	application := serviceWithConnections(t, mailConnection("work"))
+	application.now = func() time.Time { return instant(14) }
+	scope := "query"
+	options := postmail.SearchOptions{Since: instant(8)}
+	complete := postmail.SearchResult{UIDValidity: 1, UIDNext: 4, Messages: []model.Message{{ConnectionID: "work", Folder: "INBOX", UID: 3, ReceivedAt: instant(13)}, {ConnectionID: "work", Folder: "INBOX", UID: 2, ReceivedAt: instant(12)}, {ConnectionID: "work", Folder: "INBOX", UID: 1, ReceivedAt: instant(11)}}}
+	if err := application.cacheMailResult("work", "INBOX", scope, options, complete); err != nil {
+		t.Fatal(err)
+	}
+	partial := postmail.SearchResult{UIDValidity: 1, UIDNext: 4, HasMore: true, Messages: complete.Messages[:1]}
+	if err := application.cacheMailResult("work", "INBOX", scope, options, partial); err != nil {
+		t.Fatal(err)
+	}
+	result, ok := application.cachedMailResult("work", "INBOX", scope, options, mailCursorState{}, 10)
+	if !ok || messageUIDs(result.Messages) != "work:3,work:2,work:1" {
+		t.Fatalf("partial refresh replaced complete cache: %#v, %v", result, ok)
+	}
+	continuation := options
+	continuation.CursorTime, continuation.CursorUID = complete.Messages[0].ReceivedAt, complete.Messages[0].UID
+	final := postmail.SearchResult{UIDValidity: 1, UIDNext: 4, Messages: complete.Messages[1:2]}
+	if err := application.cacheMailResult("work", "INBOX", scope, continuation, final); err != nil {
+		t.Fatal(err)
+	}
+	result, ok = application.cachedMailResult("work", "INBOX", scope, options, mailCursorState{}, 10)
+	if !ok || messageUIDs(result.Messages) != "work:3,work:2" {
+		t.Fatalf("completed refresh did not replace scoped cache: %#v, %v", result, ok)
+	}
+}
+
 func TestPrepareSendValidatesSerializationBeforeToken(t *testing.T) {
 	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
 	connection := mailConnection("work")
@@ -423,6 +454,49 @@ func TestPrepareSendValidatesSerializationBeforeToken(t *testing.T) {
 	_, err := application.PrepareSend(context.Background(), model.SendMessage{ConnectionID: "work", To: []string{"not-an-address"}, Subject: "subject", Text: "body"})
 	if err == nil || !strings.Contains(err.Error(), "validate message") {
 		t.Fatalf("PrepareSend error = %v", err)
+	}
+}
+
+func TestExecuteMailSendPropagatesCancellationAndPersistsResult(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	connection := mailConnection("work")
+	connection.Mail.SMTP = model.SMTPConfig{Address: "localhost:3025", Insecure: true}
+	application := serviceWithConnections(t, connection)
+	started := make(chan struct{})
+	application.mailSendRawContext = func(ctx context.Context, _ model.Connection, _ model.SendMessage, _ []byte) error {
+		close(started)
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	prepared, err := application.PrepareSend(context.Background(), model.SendMessage{ConnectionID: "work", To: []string{"person@example.test"}, Subject: "subject", Text: "body"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { _, executeErr := application.ExecuteOperation(ctx, prepared.Token); done <- executeErr }()
+	<-started
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("ExecuteOperation error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("ExecuteOperation ignored cancellation")
+	}
+	shown, err := application.OperationShow(context.Background(), prepared.Token)
+	if err != nil || shown.Status == "executing" {
+		t.Fatalf("canceled operation remained executing: %#v, %v", shown, err)
+	}
+}
+
+func TestPrepareCalendarDeleteRequiresETag(t *testing.T) {
+	connection := model.Connection{ID: "work", Name: "Work", Calendar: &model.CalendarConfig{Kind: "caldav", URL: "http://localhost:5232", Username: "work", Secret: model.SecretRef{Env: "CALENDAR_PASSWORD"}, Collections: []model.CalendarCollection{{ID: "team", Path: "/work/team/"}}}}
+	application := serviceWithConnections(t, connection)
+	_, err := application.PrepareCalendarDelete(context.Background(), "work", "team", "/work/team/event.ics", "", "")
+	if err == nil || !strings.Contains(err.Error(), "ETag") {
+		t.Fatalf("PrepareCalendarDelete error = %v", err)
 	}
 }
 

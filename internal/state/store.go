@@ -377,6 +377,13 @@ func (s *Store) Clear(ctx context.Context) error {
 	return nil
 }
 
+func (s *Store) Delete(ctx context.Context, namespace, key string) error {
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM cache_entries WHERE namespace=? AND key_hash=?`, namespace, cacheKeyHash(namespace, key)); err != nil {
+		return fmt.Errorf("delete cache entry: %w", err)
+	}
+	return nil
+}
+
 func (s *Store) PutOperation(ctx context.Context, record OperationRecord) error {
 	s.keyMu.RLock()
 	defer s.keyMu.RUnlock()

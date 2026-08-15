@@ -2,6 +2,7 @@ package mail
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"fmt"
 	"io"
@@ -45,6 +46,10 @@ func BuildMessage(connection model.Connection, message model.SendMessage) ([]byt
 func ValidateMessage(message model.SendMessage) error { return validateMessage(message) }
 
 func SendSerialized(connection model.Connection, message model.SendMessage, data []byte) error {
+	return SendSerializedContext(context.Background(), connection, message, data)
+}
+
+func SendSerializedContext(ctx context.Context, connection model.Connection, message model.SendMessage, data []byte) error {
 	if connection.Mail == nil || connection.Mail.SMTP.Address == "" {
 		return fmt.Errorf("connection %s has no SMTP capability", connection.ID)
 	}
@@ -62,11 +67,20 @@ func SendSerialized(connection model.Connection, message model.SendMessage, data
 	if err != nil {
 		return err
 	}
-	client, err := dialSMTP(connection.Mail.SMTP, host)
+	client, err := dialSMTPContext(ctx, connection.Mail.SMTP, host)
 	if err != nil {
 		return err
 	}
 	defer client.Close()
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = client.Close()
+		case <-done:
+		}
+	}()
 
 	if ok, _ := client.Extension("AUTH"); !ok {
 		return fmt.Errorf("SMTP server %s does not advertise AUTH", host)
@@ -111,21 +125,47 @@ func SendSerialized(connection model.Connection, message model.SendMessage, data
 }
 
 func dialSMTP(settings model.SMTPConfig, host string) (*smtp.Client, error) {
+	return dialSMTPContext(context.Background(), settings, host)
+}
+
+func dialSMTPContext(ctx context.Context, settings model.SMTPConfig, host string) (*smtp.Client, error) {
 	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12, ServerName: host}
+	dialer := &net.Dialer{Timeout: 30 * time.Second}
+	connection, err := dialer.DialContext(ctx, "tcp", settings.Address)
+	if err != nil {
+		return nil, fmt.Errorf("connect to SMTP: %w", err)
+	}
+	deadline := time.Now().Add(30 * time.Second)
+	if contextDeadline, ok := ctx.Deadline(); ok && contextDeadline.Before(deadline) {
+		deadline = contextDeadline
+	}
+	_ = connection.SetDeadline(deadline)
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = connection.Close()
+		case <-done:
+		}
+	}()
 	if settings.TLS {
-		connection, err := tls.Dial("tcp", settings.Address, tlsConfig)
-		if err != nil {
+		tlsConnection := tls.Client(connection, tlsConfig)
+		if err := tlsConnection.HandshakeContext(ctx); err != nil {
+			_ = connection.Close()
 			return nil, fmt.Errorf("connect to SMTP over TLS: %w", err)
 		}
-		client, err := smtp.NewClient(connection, host)
+		client, err := smtp.NewClient(tlsConnection, host)
 		if err != nil {
 			_ = connection.Close()
 			return nil, fmt.Errorf("start SMTP client: %w", err)
 		}
+		_ = connection.SetDeadline(time.Time{})
 		return client, nil
 	}
-	client, err := smtp.Dial(settings.Address)
+	client, err := smtp.NewClient(connection, host)
 	if err != nil {
+		_ = connection.Close()
 		return nil, fmt.Errorf("connect to SMTP: %w", err)
 	}
 	if settings.StartTLS {
@@ -137,6 +177,7 @@ func dialSMTP(settings model.SMTPConfig, host string) (*smtp.Client, error) {
 		_ = client.Close()
 		return nil, fmt.Errorf("refusing cleartext SMTP connection without insecure=true")
 	}
+	_ = connection.SetDeadline(time.Time{})
 	return client, nil
 }
 

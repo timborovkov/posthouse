@@ -28,27 +28,32 @@ import (
 )
 
 type Service struct {
-	store             *config.Store
-	calendar          *calendar.Client
-	mailSearch        func(model.Connection, postmail.SearchOptions) (postmail.SearchResult, error)
-	mailSearchContext func(context.Context, model.Connection, postmail.SearchOptions) (postmail.SearchResult, error)
-	mailSnapshot      func(model.Connection, string, uint32) (postmail.MessagePrecondition, error)
-	mailAppend        func(model.Connection, string, model.SendMessage, []imap.Flag) (uint32, error)
-	mailBuild         func(model.Connection, model.SendMessage) ([]byte, error)
-	mailSendRaw       func(model.Connection, model.SendMessage, []byte) error
-	mailAppendRaw     func(model.Connection, string, []byte, []imap.Flag) (uint32, error)
-	mailMarkDeleted   func(model.Connection, string, uint32, postmail.MessagePrecondition) error
-	stateMu           sync.Mutex
-	state             *state.Store
-	stateErr          error
-	now               func() time.Time
+	store                  *config.Store
+	calendar               *calendar.Client
+	mailSearch             func(model.Connection, postmail.SearchOptions) (postmail.SearchResult, error)
+	mailSearchContext      func(context.Context, model.Connection, postmail.SearchOptions) (postmail.SearchResult, error)
+	mailSnapshot           func(model.Connection, string, uint32) (postmail.MessagePrecondition, error)
+	mailAppend             func(model.Connection, string, model.SendMessage, []imap.Flag) (uint32, error)
+	mailAppendContext      func(context.Context, model.Connection, string, model.SendMessage, []imap.Flag) (uint32, error)
+	mailBuild              func(model.Connection, model.SendMessage) ([]byte, error)
+	mailSendRaw            func(model.Connection, model.SendMessage, []byte) error
+	mailSendRawContext     func(context.Context, model.Connection, model.SendMessage, []byte) error
+	mailAppendRaw          func(model.Connection, string, []byte, []imap.Flag) (uint32, error)
+	mailAppendRawContext   func(context.Context, model.Connection, string, []byte, []imap.Flag) (uint32, error)
+	mailMarkDeleted        func(model.Connection, string, uint32, postmail.MessagePrecondition) error
+	mailMarkDeletedContext func(context.Context, model.Connection, string, uint32, postmail.MessagePrecondition) error
+	stateMu                sync.Mutex
+	state                  *state.Store
+	stateErr               error
+	now                    func() time.Time
 }
 
 func New(store *config.Store) *Service {
 	return &Service{
 		store: store, calendar: calendar.NewClient(nil), mailSearchContext: postmail.SearchContext,
-		mailSnapshot: postmail.SnapshotMessage, mailAppend: postmail.Append, mailMarkDeleted: postmail.MarkDeleted,
-		mailBuild: postmail.BuildMessage, mailSendRaw: postmail.SendSerialized, mailAppendRaw: postmail.AppendSerialized,
+		mailSnapshot:      postmail.SnapshotMessage,
+		mailAppendContext: postmail.AppendContext, mailMarkDeletedContext: postmail.MarkDeletedContext,
+		mailBuild: postmail.BuildMessage, mailSendRawContext: postmail.SendSerializedContext, mailAppendRawContext: postmail.AppendSerializedContext,
 		now: func() time.Time { return time.Now().UTC() },
 	}
 }
@@ -817,6 +822,9 @@ func (s *Service) PrepareCalendarDelete(ctx context.Context, connectionID, colle
 	if recurrenceID != "" {
 		return model.PreparedOperation{}, fmt.Errorf("cannot delete one expanded occurrence; update it with STATUS:CANCELLED or delete the series master")
 	}
+	if etag == "" {
+		return model.PreparedOperation{}, fmt.Errorf("calendar delete requires the current ETag")
+	}
 	connection, err := s.exactConnection(connectionID, "calendar.write")
 	if err != nil {
 		return model.PreparedOperation{}, err
@@ -942,8 +950,14 @@ func (s *Service) ExecuteOperation(ctx context.Context, token string) (model.Ope
 		}
 		record.Public.Result["error"] = executeErr.Error()
 	}
-	if err := ledger.CompleteOperation(ctx, record); err != nil {
-		current, readErr := ledger.GetOperation(ctx, token)
+	persistCtx := ctx
+	var cancelPersist context.CancelFunc
+	if ctx.Err() != nil {
+		persistCtx, cancelPersist = context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancelPersist()
+	}
+	if err := ledger.CompleteOperation(persistCtx, record); err != nil {
+		current, readErr := ledger.GetOperation(persistCtx, token)
 		if readErr == nil && current.Public.Status != "executing" {
 			return operationResult(current.Public), executeErr
 		}
@@ -1004,12 +1018,23 @@ func (s *Service) execute(ctx context.Context, connection model.Connection, kind
 		if err != nil {
 			return nil, err
 		}
-		if err := s.mailSendRaw(connection, message, data); err != nil {
-			return nil, err
+		var sendErr error
+		if s.mailSendRaw != nil {
+			sendErr = s.mailSendRaw(connection, message, data)
+		} else {
+			sendErr = s.mailSendRawContext(ctx, connection, message, data)
+		}
+		if sendErr != nil {
+			return nil, sendErr
 		}
 		result := map[string]any{"sent": true}
 		if connection.Mail.SentCopy == "always" {
-			uid, err := s.mailAppendRaw(connection, connection.Mail.Folders.Sent, data, []imap.Flag{imap.FlagSeen})
+			var uid uint32
+			if s.mailAppendRaw != nil {
+				uid, err = s.mailAppendRaw(connection, connection.Mail.Folders.Sent, data, []imap.Flag{imap.FlagSeen})
+			} else {
+				uid, err = s.mailAppendRawContext(ctx, connection, connection.Mail.Folders.Sent, data, []imap.Flag{imap.FlagSeen})
+			}
 			if err != nil {
 				result["sent_copy"] = "failed"
 				return result, &uncertainOperationError{message: fmt.Sprintf("message was sent but appending its sent copy failed: %v", err)}
@@ -1023,12 +1048,12 @@ func (s *Service) execute(ctx context.Context, connection model.Connection, kind
 			return nil, err
 		}
 		if kind == "mail.mark" {
-			if err := postmail.SetFlags(connection, action.Folder, action.UID, action.Seen, action.Flagged, action.Precondition); err != nil {
+			if err := postmail.SetFlagsContext(ctx, connection, action.Folder, action.UID, action.Seen, action.Flagged, action.Precondition); err != nil {
 				return nil, err
 			}
 			return map[string]any{"updated": true}, nil
 		}
-		if err := postmail.Move(connection, action.Folder, action.UID, action.Destination, action.Precondition); err != nil {
+		if err := postmail.MoveContext(ctx, connection, action.Folder, action.UID, action.Destination, action.Precondition); err != nil {
 			return nil, err
 		}
 		return map[string]any{"moved": true, "destination": action.Destination}, nil
@@ -1038,7 +1063,13 @@ func (s *Service) execute(ctx context.Context, connection model.Connection, kind
 			return nil, err
 		}
 		if kind == "mail.draft.delete" {
-			if err := s.mailMarkDeleted(connection, draft.Folder, draft.UID, draft.Precondition); err != nil {
+			var err error
+			if s.mailMarkDeleted != nil {
+				err = s.mailMarkDeleted(connection, draft.Folder, draft.UID, draft.Precondition)
+			} else {
+				err = s.mailMarkDeletedContext(ctx, connection, draft.Folder, draft.UID, draft.Precondition)
+			}
+			if err != nil {
 				return nil, err
 			}
 			return map[string]any{"deleted": true}, nil
@@ -1049,12 +1080,23 @@ func (s *Service) execute(ctx context.Context, connection model.Connection, kind
 				return nil, fmt.Errorf("provider draft changed; refresh and prepare the operation again")
 			}
 		}
-		uid, err := s.mailAppend(connection, draft.Folder, draft.Message, []imap.Flag{imap.FlagDraft})
+		var uid uint32
+		var err error
+		if s.mailAppend != nil {
+			uid, err = s.mailAppend(connection, draft.Folder, draft.Message, []imap.Flag{imap.FlagDraft})
+		} else {
+			uid, err = s.mailAppendContext(ctx, connection, draft.Folder, draft.Message, []imap.Flag{imap.FlagDraft})
+		}
 		if err != nil {
 			return nil, err
 		}
 		if kind == "mail.draft.update" {
-			if err := s.mailMarkDeleted(connection, draft.Folder, draft.UID, draft.Precondition); err != nil {
+			if s.mailMarkDeleted != nil {
+				err = s.mailMarkDeleted(connection, draft.Folder, draft.UID, draft.Precondition)
+			} else {
+				err = s.mailMarkDeletedContext(ctx, connection, draft.Folder, draft.UID, draft.Precondition)
+			}
+			if err != nil {
 				return map[string]any{"uid": uid, "replaced_uid": draft.UID, "cleanup": "failed"}, &uncertainOperationError{message: fmt.Sprintf("replacement draft was appended as UID %d but old draft cleanup failed: %v", uid, err)}
 			}
 		}
@@ -1573,8 +1615,12 @@ func (s *Service) cacheMailResult(connectionID, folder string, scope any, option
 	}
 	combined := result
 	continuation := !options.CursorTime.IsZero() || options.CursorUID != 0
+	pendingKey := scopedCacheKey(connectionID, scope)
 	if continuation {
-		entry, ok, getErr := ledger.Get(context.Background(), "message_metadata", scopedCacheKey(connectionID, scope), false)
+		entry, ok, getErr := ledger.Get(context.Background(), "message_metadata_pending", pendingKey, false)
+		if getErr == nil && !ok {
+			entry, ok, getErr = ledger.Get(context.Background(), "message_metadata", pendingKey, false)
+		}
 		if getErr == nil && ok {
 			var existing postmail.SearchResult
 			if json.Unmarshal(entry.Value, &existing) == nil && existing.UIDValidity == result.UIDValidity {
@@ -1587,8 +1633,17 @@ func (s *Service) cacheMailResult(connectionID, folder string, scope any, option
 	if err != nil {
 		return err
 	}
-	if err := ledger.Put(context.Background(), state.CacheEntry{Namespace: "message_metadata", Key: scopedCacheKey(connectionID, scope), ConnectionID: connectionID, Kind: "message_metadata", CachedAt: now, ExpiresAt: now.Add(s.messageMetadataTTL()), Value: data}); err != nil {
-		return err
+	if result.HasMore {
+		if err := ledger.Put(context.Background(), state.CacheEntry{Namespace: "message_metadata_pending", Key: pendingKey, ConnectionID: connectionID, Kind: "message_metadata", CachedAt: now, ExpiresAt: now.Add(s.messageMetadataTTL()), Value: data}); err != nil {
+			return err
+		}
+	} else {
+		if err := ledger.Put(context.Background(), state.CacheEntry{Namespace: "message_metadata", Key: pendingKey, ConnectionID: connectionID, Kind: "message_metadata", CachedAt: now, ExpiresAt: now.Add(s.messageMetadataTTL()), Value: data}); err != nil {
+			return err
+		}
+		if err := ledger.Delete(context.Background(), "message_metadata_pending", pendingKey); err != nil {
+			return err
+		}
 	}
 	index := result
 	indexKey := mailboxCacheKey(connectionID, folder)

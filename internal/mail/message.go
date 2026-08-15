@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/emersion/go-imap/v2"
@@ -347,10 +348,15 @@ func SnapshotMessage(connection model.Connection, folder string, uid uint32) (Me
 }
 
 func SetFlags(connection model.Connection, folder string, uid uint32, seen, flagged *bool, expected MessagePrecondition) error {
-	client, err := authenticatedIMAP(connection)
+	return SetFlagsContext(context.Background(), connection, folder, uid, seen, flagged, expected)
+}
+
+func SetFlagsContext(ctx context.Context, connection model.Connection, folder string, uid uint32, seen, flagged *bool, expected MessagePrecondition) error {
+	client, stop, err := authenticatedIMAPContext(ctx, connection)
 	if err != nil {
 		return err
 	}
+	defer stop()
 	defer client.Close()
 	defer client.Logout()
 	folder = defaultFolder(connection, folder)
@@ -401,13 +407,18 @@ func hasFlagChange(changes []flagChange) bool {
 }
 
 func Move(connection model.Connection, folder string, uid uint32, destination string, expected MessagePrecondition) error {
+	return MoveContext(context.Background(), connection, folder, uid, destination, expected)
+}
+
+func MoveContext(ctx context.Context, connection model.Connection, folder string, uid uint32, destination string, expected MessagePrecondition) error {
 	if destination == "" {
 		return fmt.Errorf("destination folder is required")
 	}
-	client, err := authenticatedIMAP(connection)
+	client, stop, err := authenticatedIMAPContext(ctx, connection)
 	if err != nil {
 		return err
 	}
+	defer stop()
 	defer client.Close()
 	defer client.Logout()
 	folder = defaultFolder(connection, folder)
@@ -428,24 +439,33 @@ func Move(connection model.Connection, folder string, uid uint32, destination st
 }
 
 func Append(connection model.Connection, folder string, message model.SendMessage, flags []imap.Flag) (uint32, error) {
+	return AppendContext(context.Background(), connection, folder, message, flags)
+}
+
+func AppendContext(ctx context.Context, connection model.Connection, folder string, message model.SendMessage, flags []imap.Flag) (uint32, error) {
 	data, err := BuildMessage(connection, message)
 	if err != nil {
 		return 0, fmt.Errorf("build IMAP message: %w", err)
 	}
-	return AppendSerialized(connection, folder, data, flags)
+	return AppendSerializedContext(ctx, connection, folder, data, flags)
 }
 
 func AppendSerialized(connection model.Connection, folder string, data []byte, flags []imap.Flag) (uint32, error) {
+	return AppendSerializedContext(context.Background(), connection, folder, data, flags)
+}
+
+func AppendSerializedContext(ctx context.Context, connection model.Connection, folder string, data []byte, flags []imap.Flag) (uint32, error) {
 	if folder == "" {
 		return 0, fmt.Errorf("append folder is required")
 	}
 	if len(data) == 0 {
 		return 0, fmt.Errorf("serialized message is empty")
 	}
-	client, err := authenticatedIMAP(connection)
+	client, stop, err := authenticatedIMAPContext(ctx, connection)
 	if err != nil {
 		return 0, err
 	}
+	defer stop()
 	defer client.Close()
 	defer client.Logout()
 	command := client.Append(folder, int64(len(data)), &imap.AppendOptions{Flags: flags, Time: time.Now()})
@@ -473,10 +493,15 @@ func classifyAppendWaitError(err error) error {
 }
 
 func MarkDeleted(connection model.Connection, folder string, uid uint32, expected MessagePrecondition) error {
-	client, err := authenticatedIMAP(connection)
+	return MarkDeletedContext(context.Background(), connection, folder, uid, expected)
+}
+
+func MarkDeletedContext(ctx context.Context, connection model.Connection, folder string, uid uint32, expected MessagePrecondition) error {
+	client, stop, err := authenticatedIMAPContext(ctx, connection)
 	if err != nil {
 		return err
 	}
+	defer stop()
 	defer client.Close()
 	defer client.Logout()
 	selected, err := client.Select(folder, &imap.SelectOptions{CondStore: expected.ModSeq != 0}).Wait()
@@ -528,22 +553,45 @@ func defaultFolder(connection model.Connection, folder string) string {
 }
 
 func authenticatedIMAP(connection model.Connection) (*imapclient.Client, error) {
+	client, stop, err := authenticatedIMAPContext(context.Background(), connection)
+	if err != nil {
+		return nil, err
+	}
+	stop()
+	return client, nil
+}
+
+func authenticatedIMAPContext(ctx context.Context, connection model.Connection) (*imapclient.Client, func(), error) {
 	if connection.Mail == nil || connection.Mail.IMAP.Address == "" {
-		return nil, fmt.Errorf("connection %s has no IMAP capability", connection.ID)
+		return nil, func() {}, fmt.Errorf("connection %s has no IMAP capability", connection.ID)
 	}
 	secret, err := config.ResolveSecret(connection.Mail.Secret)
 	if err != nil {
-		return nil, err
+		return nil, func() {}, err
 	}
-	client, err := dialIMAP(connection.Mail.IMAP)
+	client, err := dialIMAPContext(ctx, connection.Mail.IMAP)
 	if err != nil {
-		return nil, err
+		return nil, func() {}, err
 	}
+	done := make(chan struct{})
+	var once sync.Once
+	stop := func() { once.Do(func() { close(done) }) }
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = client.Close()
+		case <-done:
+		}
+	}()
 	if err := client.Login(connection.Mail.Username, secret).Wait(); err != nil {
+		stop()
 		_ = client.Close()
-		return nil, fmt.Errorf("authenticate to IMAP: %w", err)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, func() {}, ctxErr
+		}
+		return nil, func() {}, fmt.Errorf("authenticate to IMAP: %w", err)
 	}
-	return client, nil
+	return client, stop, nil
 }
 
 func DoctorSMTP(ctx context.Context, connection model.Connection) error {
