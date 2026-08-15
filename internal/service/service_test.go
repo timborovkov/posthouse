@@ -1010,7 +1010,7 @@ func TestMailContinuationCannotPromoteAnotherTraversalSnapshot(t *testing.T) {
 	application := serviceWithConnections(t, mailConnection("work"))
 	scope := "overlapping traversal"
 	message := func(uid uint32) model.Message {
-		return model.Message{ConnectionID: "work", Folder: "INBOX", UID: uid, ReceivedAt: time.Unix(int64(uid), 0)}
+		return model.Message{ConnectionID: "work", Folder: "INBOX", UID: uid, ReceivedAt: instant(8 + int(uid))}
 	}
 	if err := application.cacheMailResult("work", "INBOX", scope, postmail.SearchOptions{}, postmail.SearchResult{UIDValidity: 7, UIDNext: 5, HasMore: true, Messages: []model.Message{message(4), message(3)}}); err != nil {
 		t.Fatal(err)
@@ -1037,6 +1037,10 @@ func TestMailContinuationCannotPromoteAnotherTraversalSnapshot(t *testing.T) {
 	var pending postmail.SearchResult
 	if err := json.Unmarshal(entry.Value, &pending); err != nil || !pending.HasMore || pending.UIDNext != 6 || messageUIDs(pending.Messages) != "work:5,work:4" {
 		t.Fatalf("older traversal promoted mixed snapshot %#v: %v", pending, err)
+	}
+	broad, found, _ := application.cachedMailResult("work", "INBOX", "different scope", postmail.SearchOptions{}, mailCursorState{}, 10)
+	if !found || messageUIDs(broad.Messages) != "work:5,work:4,work:3" {
+		t.Fatalf("rejected continuation mutated broad index: %#v, %v", broad, found)
 	}
 	newerContinuation := postmail.SearchOptions{CursorUID: 4, MaxUIDExclusive: 6}
 	if err := application.cacheMailResult("work", "INBOX", scope, newerContinuation, postmail.SearchResult{UIDValidity: 7, UIDNext: 6, Messages: []model.Message{message(3), message(2), message(1)}}); err != nil {

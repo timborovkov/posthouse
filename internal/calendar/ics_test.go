@@ -521,6 +521,44 @@ func TestDurationUsesCalendarDaysAcrossDST(t *testing.T) {
 	}
 }
 
+func TestRecurringDurationRetainsCalendarDayComponents(t *testing.T) {
+	newYork, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, err := ParseRange([]byte("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:dst-series\r\nDTSTART;TZID=America/New_York:20260307T090000\r\nDURATION:P1D\r\nRRULE:FREQ=DAILY;COUNT=3\r\nSUMMARY:Daily local span\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"), time.Date(2026, 3, 9, 0, 0, 0, 0, newYork), time.Date(2026, 3, 10, 0, 0, 0, 0, newYork))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var marchNinth *model.Event
+	for index := range events {
+		if events[index].Start.Day() == 9 {
+			marchNinth = &events[index]
+		}
+	}
+	if marchNinth == nil || marchNinth.Start.Hour() != 9 || marchNinth.End.Hour() != 9 || marchNinth.End.Day() != 10 {
+		t.Fatalf("recurring calendar-day duration = %#v", events)
+	}
+}
+
+func TestAllDayRecurrenceIDIsTimezoneIndependent(t *testing.T) {
+	tallinn, err := time.LoadLocation("Europe/Tallinn")
+	if err != nil {
+		t.Fatal(err)
+	}
+	previousLocal := time.Local
+	time.Local = tallinn
+	defer func() { time.Local = previousLocal }()
+	data := []byte("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:days\r\nDTSTART;VALUE=DATE:20260814\r\nDTEND;VALUE=DATE:20260815\r\nRRULE:FREQ=DAILY;COUNT=3\r\nSUMMARY:Days\r\nEND:VEVENT\r\nBEGIN:VEVENT\r\nUID:days\r\nRECURRENCE-ID;VALUE=DATE:20260815\r\nDTSTART;VALUE=DATE:20260815\r\nDTEND;VALUE=DATE:20260816\r\nSTATUS:CANCELLED\r\nSUMMARY:Cancelled\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n")
+	events, err := ParseRange(data, time.Date(2026, 8, 14, 0, 0, 0, 0, time.UTC), time.Date(2026, 8, 17, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 2 || events[0].Start.Day() != 14 || events[1].Start.Day() != 16 {
+		t.Fatalf("all-day cancellation in non-UTC timezone = %#v", events)
+	}
+}
+
 func TestGenerateCarriesTZIDOnRecurrenceSets(t *testing.T) {
 	newYork, err := time.LoadLocation("America/New_York")
 	if err != nil {

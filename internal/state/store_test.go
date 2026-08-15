@@ -143,6 +143,24 @@ func TestEvictionBoundsSyncStateEntries(t *testing.T) {
 	}
 }
 
+func TestOversizedEntryDoesNotEvictExistingCache(t *testing.T) {
+	store, err := state.OpenWithKey(filepath.Join(t.TempDir(), "state.db"), 10, bytesOf(12, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	if err := store.Put(ctx, state.CacheEntry{Namespace: "message_body", Key: "existing", Kind: "message_body", Value: []byte("12345678")}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Put(ctx, state.CacheEntry{Namespace: "attachment", Key: "oversized", Kind: "attachment", Value: []byte("12345678901")}); err == nil || !strings.Contains(err.Error(), "cannot fit") {
+		t.Fatalf("oversized cache write returned %v", err)
+	}
+	if entry, found, err := store.Get(ctx, "message_body", "existing", false); err != nil || !found || string(entry.Value) != "12345678" {
+		t.Fatalf("oversized write evicted existing cache: %#v, %v, %v", entry, found, err)
+	}
+}
+
 func TestUpdatingEntryDoesNotReplaceAnotherEntriesChunks(t *testing.T) {
 	store, err := state.OpenWithKey(filepath.Join(t.TempDir(), "state.db"), 2<<20, bytesOf(8, 32))
 	if err != nil {

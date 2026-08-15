@@ -229,7 +229,7 @@ func ParseRange(data []byte, rangeStart, rangeEnd time.Time) ([]model.Event, err
 						}
 						occurrence.RecurrenceRange = ""
 						occurrence.Start = occurrenceStart.Add(ranged.Start.Sub(originalStart))
-						occurrence.End = occurrence.Start.Add(ranged.End.Sub(ranged.Start))
+						occurrence.End = recurringEnd(ranged, occurrence.Start)
 						clearRecurrenceSet(&occurrence)
 						if overlaps(occurrence, rangeStart, rangeEnd) {
 							result = append(result, occurrence)
@@ -447,6 +447,11 @@ func recurringEnd(event model.Event, occurrenceStart time.Time) time.Time {
 	if event.AllDay {
 		return occurrenceStart.AddDate(0, 0, calendarDaySpan(event.Start, event.End))
 	}
+	if event.Duration != "" {
+		if end, err := addDuration(occurrenceStart, event.Duration); err == nil {
+			return end
+		}
+	}
 	return occurrenceStart.Add(event.End.Sub(event.Start))
 }
 
@@ -473,7 +478,7 @@ func typedEvent(component *ics.VEvent, locations map[string]*time.Location) (mod
 	event.Floating = isFloatingDateTime(startProperty)
 	var err error
 	if event.AllDay {
-		event.Start, err = component.GetAllDayStartAt()
+		event.Start, err = time.Parse("20060102", startProperty.Value)
 	} else {
 		event.Start, err = componentTime(component, ics.ComponentPropertyDtStart, locations)
 	}
@@ -482,7 +487,7 @@ func typedEvent(component *ics.VEvent, locations map[string]*time.Location) (mod
 	}
 	if component.GetProperty(ics.ComponentPropertyDtEnd) != nil {
 		if event.AllDay {
-			event.End, err = component.GetAllDayEndAt()
+			event.End, err = time.Parse("20060102", component.GetProperty(ics.ComponentPropertyDtEnd).Value)
 		} else {
 			event.End, err = componentTime(component, ics.ComponentPropertyDtEnd, locations)
 		}
@@ -494,6 +499,7 @@ func typedEvent(component *ics.VEvent, locations map[string]*time.Location) (mod
 		if err != nil {
 			return model.Event{}, fmt.Errorf("parse DURATION for event %s: %w", event.ID, err)
 		}
+		event.Duration = duration.Value
 	} else if event.AllDay {
 		event.End = event.Start.Add(24 * time.Hour)
 	} else {

@@ -2208,6 +2208,7 @@ func (s *Service) cacheMailResultDataWithID(connection model.Connection, cacheID
 	continuation := !options.CursorTime.IsZero() || options.CursorUID != 0
 	pendingKey := scopedCacheKey(cacheID, scope)
 	combined := result
+	accepted := true
 	if err := ledger.Mutate(context.Background(), state.CacheEntry{Namespace: "message_metadata", Key: pendingKey, ConnectionID: connectionID, Kind: "message_metadata", CachedAt: now, ExpiresAt: now.Add(s.messageMetadataTTL())}, func(current []byte, found bool) ([]byte, error) {
 		combined = result
 		if continuation && found {
@@ -2216,6 +2217,7 @@ func (s *Service) cacheMailResultDataWithID(connection model.Connection, cacheID
 				combined = mergeMailResults(existing, result)
 			} else {
 				combined = existing
+				accepted = false
 				return current, nil
 			}
 		} else if continuation {
@@ -2227,6 +2229,9 @@ func (s *Service) cacheMailResultDataWithID(connection model.Connection, cacheID
 		return json.Marshal(combined)
 	}); err != nil {
 		return err
+	}
+	if !accepted {
+		return nil
 	}
 	_ = ledger.Delete(context.Background(), "message_metadata_pending", pendingKey)
 	indexKey := mailboxCacheKey(cacheID, folder)

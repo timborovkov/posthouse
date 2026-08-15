@@ -96,6 +96,13 @@ func componentRecurrences(component *ics.VEvent, locations map[string]*time.Loca
 
 func propertyTime(property *ics.IANAProperty, locations map[string]*time.Location) (time.Time, error) {
 	value := strings.TrimSpace(property.Value)
+	if property.GetValueType() == ics.ValueDataTypeDate {
+		parsed, err := time.Parse("20060102", value)
+		if err != nil {
+			return time.Time{}, fmt.Errorf("invalid iCalendar date %q", value)
+		}
+		return parsed, nil
+	}
 	if strings.HasSuffix(value, "Z") {
 		for _, format := range []string{"20060102T150405Z", "20060102Z"} {
 			if parsed, err := time.Parse(format, value); err == nil {

@@ -317,6 +317,9 @@ func (s *Store) Put(ctx context.Context, entry CacheEntry) error {
 	if err := s.lockAndVerifyKey(ctx, tx); err != nil {
 		return err
 	}
+	if err := s.ensureCacheEntryFitsTx(ctx, tx, len(entry.Value)); err != nil {
+		return err
+	}
 	if err := s.putEntryTx(ctx, tx, entry); err != nil {
 		return err
 	}
@@ -355,6 +358,9 @@ func (s *Store) Mutate(ctx context.Context, entry CacheEntry, transform func(cur
 	if err != nil {
 		return err
 	}
+	if err := s.ensureCacheEntryFitsTx(ctx, tx, len(entry.Value)); err != nil {
+		return err
+	}
 	if err := s.putEntryTx(ctx, tx, entry); err != nil {
 		return err
 	}
@@ -362,6 +368,17 @@ func (s *Store) Mutate(ctx context.Context, entry CacheEntry, transform func(cur
 		return fmt.Errorf("commit cache mutation: %w", err)
 	}
 	return s.evict(ctx)
+}
+
+func (s *Store) ensureCacheEntryFitsTx(ctx context.Context, tx *sql.Tx, valueBytes int) error {
+	var operationBytes int64
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(SUM(reserved_bytes),0) FROM operations`).Scan(&operationBytes); err != nil {
+		return fmt.Errorf("read operation reservations: %w", err)
+	}
+	if operationBytes+int64(valueBytes) > s.maxBytes {
+		return fmt.Errorf("cache entry cannot fit within configured %d-byte encrypted state limit", s.maxBytes)
+	}
+	return nil
 }
 
 func (s *Store) readEntryValueTx(ctx context.Context, tx *sql.Tx, namespace, key string) ([]byte, bool, error) {
