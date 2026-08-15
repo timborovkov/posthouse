@@ -288,6 +288,28 @@ END:VCALENDAR`
 	if events[0].ID == events[2].ID || !strings.Contains(events[0].ID, "series#") {
 		t.Fatalf("occurrence IDs are not stable: %#v", events)
 	}
+	for _, event := range events {
+		if event.RecurrenceRule != "" || len(event.RecurrenceDates) != 0 || len(event.RecurrencePeriods) != 0 || len(event.ExceptionDates) != 0 {
+			t.Fatalf("expanded occurrence retained recurrence generators: %#v", event)
+		}
+	}
+}
+
+func TestParseRangeBoundsDenseRecurrenceExpansion(t *testing.T) {
+	data := `BEGIN:VCALENDAR
+VERSION:2.0
+BEGIN:VEVENT
+UID:dense
+DTSTART:20260815T000000Z
+DTEND:20260815T000001Z
+RRULE:FREQ=SECONDLY
+SUMMARY:Dense series
+END:VEVENT
+END:VCALENDAR`
+	_, err := ParseRange([]byte(data), time.Date(2026, 8, 15, 0, 0, 0, 0, time.UTC), time.Date(2027, 8, 15, 0, 0, 0, 0, time.UTC))
+	if err == nil || !strings.Contains(err.Error(), "exceeds 10000 occurrences") {
+		t.Fatalf("dense recurrence returned %v", err)
+	}
 }
 
 func TestParseRangeKeepsLocalTimeAcrossDST(t *testing.T) {

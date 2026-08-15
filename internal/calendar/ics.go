@@ -170,17 +170,27 @@ func ParseRange(data []byte, rangeStart, rangeEnd time.Time) ([]model.Event, err
 		if event.AllDay {
 			lookback = rangeStart.AddDate(0, 0, -calendarDaySpan(event.Start, event.End))
 		}
-		starts := set.Between(lookback, rangeEnd, true)
-		if len(starts) > maxOccurrences-len(result) {
-			return nil, fmt.Errorf("calendar recurrence expansion exceeds %d occurrences", maxOccurrences)
-		}
-		for _, occurrenceStart := range starts {
+		next := set.Iterator()
+		generated := 0
+		for {
+			occurrenceStart, ok := next()
+			if !ok || occurrenceStart.After(rangeEnd) {
+				break
+			}
+			generated++
+			if generated > maxOccurrences || len(result) >= maxOccurrences {
+				return nil, fmt.Errorf("calendar recurrence expansion exceeds %d occurrences", maxOccurrences)
+			}
+			if occurrenceStart.Before(lookback) {
+				continue
+			}
 			recurrenceID := occurrenceStart.UTC().Format(time.RFC3339)
 			overrideKey := event.ID + "\x00" + recurrenceID
 			if override, ok := overrides[overrideKey]; ok {
 				consumedOverrides[overrideKey] = true
 				if !strings.EqualFold(override.Status, "CANCELLED") && overlaps(override, rangeStart, rangeEnd) {
 					override.ID = stableOccurrenceID(event.ID, occurrenceStart)
+					clearRecurrenceSet(&override)
 					result = append(result, override)
 				}
 				continue
@@ -188,6 +198,7 @@ func ParseRange(data []byte, rangeStart, rangeEnd time.Time) ([]model.Event, err
 			occurrence := event
 			occurrence.RecurrenceID = recurrenceID
 			occurrence.ID = stableOccurrenceID(event.ID, occurrenceStart)
+			clearRecurrenceSet(&occurrence)
 			if periodEnd, ok := periodEnds[occurrenceStart.UTC().Format(time.RFC3339Nano)]; ok {
 				occurrence.End = occurrenceStart.Add(periodEnd.Sub(occurrenceStart))
 			} else {
@@ -215,6 +226,7 @@ func ParseRange(data []byte, rangeStart, rangeEnd time.Time) ([]model.Event, err
 			return nil, fmt.Errorf("parse recurrence override for event %s: %w", override.ID, err)
 		}
 		override.ID = stableOccurrenceID(override.ID, originalStart)
+		clearRecurrenceSet(&override)
 		result = append(result, override)
 		if len(result) > maxOccurrences {
 			return nil, fmt.Errorf("calendar recurrence expansion exceeds %d occurrences", maxOccurrences)
@@ -227,6 +239,13 @@ func ParseRange(data []byte, rangeStart, rangeEnd time.Time) ([]model.Event, err
 		return strings.Compare(a.ID, b.ID)
 	})
 	return result, nil
+}
+
+func clearRecurrenceSet(event *model.Event) {
+	event.RecurrenceRule = ""
+	event.RecurrenceDates = nil
+	event.RecurrencePeriods = nil
+	event.ExceptionDates = nil
 }
 
 func calendarDaySpan(start, end time.Time) int {

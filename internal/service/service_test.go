@@ -581,6 +581,10 @@ func TestOfflineMessageAndAttachmentReads(t *testing.T) {
 	if err := ledger.Put(ctx, state.CacheEntry{Namespace: "attachment", Key: messageCacheKey("work", "INBOX", 11, 7) + "/file", Kind: "attachment", CachedAt: time.Now(), Value: []byte("content")}); err != nil {
 		t.Fatal(err)
 	}
+	cachedAttachment, cachedContent, err := application.GetAttachmentMode(ctx, "work", "INBOX", 7, "file", "")
+	if err != nil || cachedAttachment.Stale || cachedAttachment.CachedAt.IsZero() || string(cachedContent) != "content" {
+		t.Fatalf("cache-first attachment = %#v %q, %v", cachedAttachment, cachedContent, err)
+	}
 	got, err := application.GetMessageMode("work", "INBOX", 7, "offline")
 	if err != nil || got.Text != "offline body" || !got.Stale || got.CachedAt.IsZero() {
 		t.Fatalf("offline message = %#v, %v", got, err)
@@ -597,6 +601,39 @@ func TestOfflineMessageAndAttachmentReads(t *testing.T) {
 	}
 	if _, _, err := application.GetAttachmentMode(ctx, "work", "INBOX", 7, "file", "offline"); err == nil {
 		t.Fatal("offline read reused a cached attachment after UIDVALIDITY changed")
+	}
+}
+
+func TestOperationDigestFramesAttachmentContent(t *testing.T) {
+	firstPath := filepath.Join(t.TempDir(), "first.txt")
+	secondPath := filepath.Join(t.TempDir(), "second.txt")
+	if err := os.WriteFile(firstPath, []byte("a"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(secondPath, []byte("bc"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	message := model.SendMessage{To: []string{"person@example.test"}, Attachments: []model.AttachmentInput{{Path: firstPath}, {Path: secondPath}}}
+	payload, err := json.Marshal(message)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := digestPayload("mail.send", payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(firstPath, []byte("ab"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(secondPath, []byte("c"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	after, err := digestPayload("mail.send", payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before == after {
+		t.Fatal("attachment boundary-preserving content change did not change operation digest")
 	}
 }
 

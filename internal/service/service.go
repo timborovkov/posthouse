@@ -1191,6 +1191,12 @@ func (s *Service) GetAttachmentMode(ctx context.Context, connectionID, folder st
 			folder = "INBOX"
 		}
 	}
+	if mode == "" {
+		if attachment, data, ok := s.cachedAttachment(ctx, connection.ID, folder, uid, attachmentID); ok {
+			attachment.Stale = false
+			return attachment, data, nil
+		}
+	}
 	if mode != "offline" {
 		attachment, data, uidValidity, fetchErr := postmail.GetAttachment(connection, folder, uid, attachmentID)
 		if fetchErr == nil {
@@ -1307,26 +1313,24 @@ func digestPayload(kind string, payload []byte) (string, error) {
 			return "", err
 		}
 		_, _ = digest.Write(canonicalPayload)
-		for _, attachment := range message.Attachments {
-			if attachment.Path == "" {
-				_, _ = digest.Write(attachment.Data)
-				continue
+		for index, attachment := range message.Attachments {
+			attachmentDigest := sha256.New()
+			if attachment.Path == "" || attachment.Data != nil {
+				_, _ = attachmentDigest.Write(attachment.Data)
+			} else {
+				file, err := os.Open(attachment.Path)
+				if err != nil {
+					return "", fmt.Errorf("read attachment %s for operation digest: %w", attachment.Path, err)
+				}
+				if _, err := io.Copy(attachmentDigest, file); err != nil {
+					_ = file.Close()
+					return "", err
+				}
+				if err := file.Close(); err != nil {
+					return "", err
+				}
 			}
-			if attachment.Data != nil {
-				_, _ = digest.Write(attachment.Data)
-				continue
-			}
-			file, err := os.Open(attachment.Path)
-			if err != nil {
-				return "", fmt.Errorf("read attachment %s for operation digest: %w", attachment.Path, err)
-			}
-			if _, err := io.Copy(digest, file); err != nil {
-				_ = file.Close()
-				return "", err
-			}
-			if err := file.Close(); err != nil {
-				return "", err
-			}
+			_, _ = fmt.Fprintf(digest, "\x00attachment:%d:%x", index, attachmentDigest.Sum(nil))
 		}
 	} else {
 		_, _ = digest.Write(payload)

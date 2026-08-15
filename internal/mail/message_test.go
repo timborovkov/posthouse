@@ -22,13 +22,13 @@ func TestMessageBodyFetchIsBoundedAtProvider(t *testing.T) {
 	}
 }
 
-func TestFlagPreconditionRefreshRequiresAnotherChange(t *testing.T) {
-	value := true
-	if hasFlagChange([]flagChange{{flag: imap.FlagFlagged}}) {
-		t.Fatal("nil flag change required a MODSEQ refresh")
+func TestFlagMutationVerification(t *testing.T) {
+	flags := []imap.Flag{imap.FlagSeen}
+	if !flagMutationApplied(flags, imap.FlagSeen, true) || !flagMutationApplied(flags, imap.FlagFlagged, false) {
+		t.Fatal("flag mutation verifier rejected the requested state")
 	}
-	if !hasFlagChange([]flagChange{{flag: imap.FlagFlagged, value: &value}}) {
-		t.Fatal("non-nil flag change skipped the required MODSEQ refresh")
+	if flagMutationApplied(flags, imap.FlagSeen, false) || flagMutationApplied(flags, imap.FlagFlagged, true) {
+		t.Fatal("flag mutation verifier accepted an unapplied state")
 	}
 }
 
@@ -57,6 +57,21 @@ func TestParseMessagePreservesNonTextInlinePart(t *testing.T) {
 	attachment := parsed.Detail.Attachments[0]
 	if !attachment.Inline || attachment.Name != "logo.png" || attachment.ContentID != "logo" || string(parsed.Attachments[attachment.ID]) != "image" {
 		t.Fatalf("inline attachment = %#v bytes=%q", attachment, parsed.Attachments[attachment.ID])
+	}
+}
+
+func TestParseMessageTreatsNamedInlineTextAsAttachment(t *testing.T) {
+	raw := []byte("MIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=part\r\n\r\n--part\r\nContent-Type: text/plain\r\n\r\nmessage body\r\n--part\r\nContent-Type: text/plain; name=notes.txt\r\nContent-Disposition: inline; filename=notes.txt\r\n\r\nattached notes\r\n--part--\r\n")
+	parsed, err := parseMessage(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Detail.Text != "message body" || len(parsed.Detail.Attachments) != 1 {
+		t.Fatalf("parsed message body=%q attachments=%#v", parsed.Detail.Text, parsed.Detail.Attachments)
+	}
+	attachment := parsed.Detail.Attachments[0]
+	if attachment.Name != "notes.txt" || string(parsed.Attachments[attachment.ID]) != "attached notes" {
+		t.Fatalf("named text attachment=%#v bytes=%q", attachment, parsed.Attachments[attachment.ID])
 	}
 }
 

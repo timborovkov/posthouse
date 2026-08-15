@@ -1,11 +1,25 @@
 package mail
 
 import (
+	"errors"
+	"net/textproto"
 	"strings"
 	"testing"
 
 	"github.com/timborovkov/posthouse/internal/model"
 )
+
+func TestDataCloseErrorDistinguishesSMTPRejection(t *testing.T) {
+	rejected := classifyDataCloseError(&textproto.Error{Code: 550, Msg: "message rejected"})
+	var uncertain *UncertainError
+	if errors.As(rejected, &uncertain) {
+		t.Fatalf("definitive SMTP rejection was uncertain: %v", rejected)
+	}
+	ambiguous := classifyDataCloseError(errors.New("connection closed"))
+	if !errors.As(ambiguous, &uncertain) {
+		t.Fatalf("transport loss after DATA was not uncertain: %v", ambiguous)
+	}
+}
 
 func TestBuildMessagePropagatesValidationErrors(t *testing.T) {
 	for _, message := range []model.SendMessage{

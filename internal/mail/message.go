@@ -204,6 +204,15 @@ func parseMessage(raw []byte) (FetchedMessage, error) {
 		switch header := part.Header.(type) {
 		case *gomail.InlineHeader:
 			contentType, _, _ := header.ContentType()
+			if name, named := inlineAttachmentFilename(header); named {
+				digest := sha256.Sum256([]byte(fmt.Sprintf("%d\x00%s\x00%s", attachmentIndex, name, contentType)))
+				id := base64.RawURLEncoding.EncodeToString(digest[:12])
+				attachment := model.Attachment{ID: id, Name: name, ContentType: contentType, Size: int64(len(data)), Inline: true, ContentID: strings.Trim(header.Get("Content-ID"), "<>")}
+				result.Detail.Attachments = append(result.Detail.Attachments, attachment)
+				result.Attachments[id] = data
+				attachmentIndex++
+				continue
+			}
 			switch strings.ToLower(contentType) {
 			case "text/plain":
 				if result.Detail.Text == "" {
@@ -242,15 +251,22 @@ func parseMessage(raw []byte) (FetchedMessage, error) {
 }
 
 func inlineFilename(header *gomail.InlineHeader, index int) string {
-	_, dispositionParams, _ := header.ContentDisposition()
-	if name := dispositionParams["filename"]; name != "" {
-		return name
-	}
-	_, contentTypeParams, _ := header.ContentType()
-	if name := contentTypeParams["name"]; name != "" {
+	if name, ok := inlineAttachmentFilename(header); ok {
 		return name
 	}
 	return fmt.Sprintf("inline-%d", index+1)
+}
+
+func inlineAttachmentFilename(header *gomail.InlineHeader) (string, bool) {
+	_, dispositionParams, _ := header.ContentDisposition()
+	if name := dispositionParams["filename"]; name != "" {
+		return name, true
+	}
+	_, contentTypeParams, _ := header.ContentType()
+	if name := contentTypeParams["name"]; name != "" {
+		return name, true
+	}
+	return "", false
 }
 
 func headerAddresses(header gomail.Header, key string) []model.Address {
@@ -383,7 +399,7 @@ func SetFlagsContext(ctx context.Context, connection model.Connection, folder st
 	changes := []flagChange{{imap.FlagSeen, seen}, {imap.FlagFlagged, flagged}}
 	modSeq := expected.ModSeq
 	mutated := false
-	for index, change := range changes {
+	for _, change := range changes {
 		flag, value := change.flag, change.value
 		if value == nil {
 			continue
@@ -406,24 +422,34 @@ func SetFlagsContext(ctx context.Context, connection model.Connection, folder st
 			return classifyMutationError("update IMAP flags", err)
 		}
 		mutated = true
-		if modSeq != 0 && hasFlagChange(changes[index+1:]) {
-			items, err := client.Fetch(set, &imap.FetchOptions{UID: true, ModSeq: true}).Collect()
-			if err != nil || len(items) != 1 {
-				return &UncertainMutationError{Err: fmt.Errorf("refresh IMAP message precondition after flag update")}
-			}
-			modSeq = items[0].ModSeq
+		flags, nextModSeq, err := fetchMutationState(client, set, modSeq != 0)
+		if err != nil {
+			return &UncertainMutationError{Err: fmt.Errorf("verify IMAP flag update: %w", err)}
+		}
+		if !flagMutationApplied(flags, flag, *value) {
+			return fmt.Errorf("IMAP message changed; flag update was not applied, refresh and prepare the operation again")
+		}
+		if modSeq != 0 {
+			modSeq = nextModSeq
 		}
 	}
 	return nil
 }
 
-func hasFlagChange(changes []flagChange) bool {
-	for _, change := range changes {
-		if change.value != nil {
-			return true
-		}
+func flagMutationApplied(flags []imap.Flag, flag imap.Flag, expected bool) bool {
+	return slices.Contains(flags, flag) == expected
+}
+
+func fetchMutationState(client *imapclient.Client, set imap.UIDSet, withModSeq bool) ([]imap.Flag, uint64, error) {
+	options := &imap.FetchOptions{UID: true, Flags: true, ModSeq: withModSeq}
+	items, err := client.Fetch(set, options).Collect()
+	if err != nil {
+		return nil, 0, err
 	}
-	return false
+	if len(items) != 1 {
+		return nil, 0, fmt.Errorf("message disappeared after mutation")
+	}
+	return items[0].Flags, items[0].ModSeq, nil
 }
 
 func Move(connection model.Connection, folder string, uid uint32, destination string, expected MessagePrecondition) error {
@@ -543,6 +569,13 @@ func MarkDeletedContext(ctx context.Context, connection model.Connection, folder
 	}
 	if err := client.Store(imap.UIDSetNum(imap.UID(uid)), &imap.StoreFlags{Op: imap.StoreFlagsAdd, Silent: true, Flags: []imap.Flag{imap.FlagDeleted}}, storeOptions).Close(); err != nil {
 		return classifyMutationError("mark IMAP draft deleted", err)
+	}
+	flags, _, err := fetchMutationState(client, imap.UIDSetNum(imap.UID(uid)), expected.ModSeq != 0)
+	if err != nil {
+		return &UncertainMutationError{Err: fmt.Errorf("verify IMAP draft deletion: %w", err)}
+	}
+	if !flagMutationApplied(flags, imap.FlagDeleted, true) {
+		return fmt.Errorf("IMAP message changed; draft deletion was not applied, refresh and prepare the operation again")
 	}
 	return nil
 }

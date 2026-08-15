@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	stdmail "net/mail"
 	"net/smtp"
+	"net/textproto"
 	"os"
 	"path/filepath"
 	"slices"
@@ -116,12 +118,20 @@ func SendSerializedContext(ctx context.Context, connection model.Connection, mes
 		return fmt.Errorf("write SMTP body: %w", err)
 	}
 	if err := writer.Close(); err != nil {
-		return &UncertainError{Err: err}
+		return classifyDataCloseError(err)
 	}
 	// DATA has been accepted at this point. A failed QUIT must not invite a
 	// retry that could duplicate the message.
 	_ = client.Quit()
 	return nil
+}
+
+func classifyDataCloseError(err error) error {
+	var statusErr *textproto.Error
+	if errors.As(err, &statusErr) {
+		return fmt.Errorf("SMTP server rejected message after DATA: %w", err)
+	}
+	return &UncertainError{Err: err}
 }
 
 func dialSMTP(settings model.SMTPConfig, host string) (*smtp.Client, error) {
