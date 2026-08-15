@@ -457,6 +457,28 @@ func TestMergeUpdatedOccurrenceUsesPreparedFloatingRecurrenceWall(t *testing.T) 
 	}
 }
 
+func TestMergeUpdatedOccurrenceRejectsUnrelatedResource(t *testing.T) {
+	existing := []byte("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:other-series\r\nDTSTART:20260301T090000Z\r\nDTEND:20260301T100000Z\r\nSUMMARY:Other\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n")
+	replacement := "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:series\r\nRECURRENCE-ID:20260302T090000Z\r\nDTSTART:20260302T110000Z\r\nDTEND:20260302T120000Z\r\nSUMMARY:Override\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+	if _, err := mergeUpdatedEvent(existing, replacement, "2026-03-02T09:00:00Z"); err == nil || !strings.Contains(err.Error(), "does not contain event UID series") {
+		t.Fatalf("unrelated resource update returned %v", err)
+	}
+}
+
+func TestMergeUpdatedOccurrenceAppendsToMatchingFloatingSeries(t *testing.T) {
+	existing := []byte("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:series\r\nDTSTART:20260301T090000\r\nDTEND:20260301T100000\r\nRRULE:FREQ=DAILY;COUNT=3\r\nSUMMARY:Series\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n")
+	replacement := "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:series\r\nRECURRENCE-ID:20260302T140000Z\r\nDTSTART:20260302T160000Z\r\nDTEND:20260302T170000Z\r\nSUMMARY:Override\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+	merged, err := mergeUpdatedEventWithWallTimes(existing, replacement, "2026-03-02T14:00:00Z", "20260302T110000", "20260302T120000", "20260302T090000")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"RECURRENCE-ID:20260302T090000", "DTSTART:20260302T110000", "DTEND:20260302T120000", "SUMMARY:Override"} {
+		if !strings.Contains(merged, want) {
+			t.Fatalf("floating override append lacks %q:\n%s", want, merged)
+		}
+	}
+}
+
 func TestParsePreservesFloatingRecurrenceWall(t *testing.T) {
 	events, err := Parse([]byte("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:series\r\nRECURRENCE-ID:20260302T090000\r\nDTSTART:20260302T110000\r\nDTEND:20260302T120000\r\nSUMMARY:Override\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"))
 	if err != nil {
@@ -464,6 +486,16 @@ func TestParsePreservesFloatingRecurrenceWall(t *testing.T) {
 	}
 	if len(events) != 1 || events[0].RecurrenceWall != "20260302T090000" {
 		t.Fatalf("floating recurrence wall = %#v", events)
+	}
+}
+
+func TestParseRangeSynthesizesFloatingRecurrenceWall(t *testing.T) {
+	events, err := ParseRange([]byte("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:series\r\nDTSTART:20260301T090000\r\nDTEND:20260301T100000\r\nRRULE:FREQ=DAILY;COUNT=3\r\nSUMMARY:Series\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"), time.Date(2026, 3, 2, 0, 0, 0, 0, time.Local), time.Date(2026, 3, 3, 0, 0, 0, 0, time.Local))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].RecurrenceWall != "20260302T090000" {
+		t.Fatalf("synthesized floating recurrence = %#v", events)
 	}
 }
 

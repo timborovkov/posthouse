@@ -3,6 +3,7 @@ package mail
 import (
 	"errors"
 	"net/textproto"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -103,5 +104,15 @@ func TestSMTPHost(t *testing.T) {
 	got, err := smtpHost("smtp.example.com:465")
 	if err != nil || got != "smtp.example.com" {
 		t.Fatalf("smtpHost returned %q, %v", got, err)
+	}
+}
+
+func TestEnvelopeRecipientsDeduplicateParsedAddresses(t *testing.T) {
+	got, err := envelopeRecipients([]string{"Alice <alice@example.test>", "alice@example.test", "ALICE@EXAMPLE.TEST", "bob@example.test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, []string{"alice@example.test", "bob@example.test"}) {
+		t.Fatalf("envelope recipients = %#v", got)
 	}
 }

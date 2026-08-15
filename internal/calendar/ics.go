@@ -224,6 +224,9 @@ func ParseRange(data []byte, rangeStart, rangeEnd time.Time) ([]model.Event, err
 						occurrence := ranged
 						occurrence.ID = stableOccurrenceID(event.ID, occurrenceStart)
 						occurrence.RecurrenceID = recurrenceID
+						if event.Floating {
+							occurrence.RecurrenceWall = occurrenceStart.Format("20060102T150405")
+						}
 						occurrence.RecurrenceRange = ""
 						occurrence.Start = occurrenceStart.Add(ranged.Start.Sub(originalStart))
 						occurrence.End = occurrence.Start.Add(ranged.End.Sub(ranged.Start))
@@ -236,6 +239,9 @@ func ParseRange(data []byte, rangeStart, rangeEnd time.Time) ([]model.Event, err
 				}
 				occurrence := event
 				occurrence.RecurrenceID = recurrenceID
+				if event.Floating {
+					occurrence.RecurrenceWall = occurrenceStart.Format("20060102T150405")
+				}
 				occurrence.ID = stableOccurrenceID(event.ID, occurrenceStart)
 				clearRecurrenceSet(&occurrence)
 				if periodEnd, ok := periodEnds[occurrenceStart.UTC().Format(time.RFC3339Nano)]; ok {
@@ -464,6 +470,7 @@ func typedEvent(component *ics.VEvent, locations map[string]*time.Location) (mod
 		return model.Event{}, fmt.Errorf("VEVENT %s is missing DTSTART", event.ID)
 	}
 	event.AllDay = startProperty.GetValueType() == ics.ValueDataTypeDate
+	event.Floating = isFloatingDateTime(startProperty)
 	var err error
 	if event.AllDay {
 		event.Start, err = component.GetAllDayStartAt()

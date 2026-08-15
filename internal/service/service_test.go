@@ -313,7 +313,7 @@ func TestReplacingProviderAndRemovingConnectionInvalidateCachedContent(t *testin
 	if err := application.cacheMailResultFor(oldProvider, "INBOX", "old in-flight request", options, postmail.SearchResult{UIDValidity: 1, Messages: []model.Message{{ConnectionID: "work", UID: 1, Subject: "old provider"}}}); err != nil {
 		t.Fatal(err)
 	}
-	if result, found := application.cachedMailResult("work", "INBOX", "old in-flight request", options, mailCursorState{}, 10); found || len(result.Messages) != 0 {
+	if result, found, _ := application.cachedMailResult("work", "INBOX", "old in-flight request", options, mailCursorState{}, 10); found || len(result.Messages) != 0 {
 		t.Fatalf("replacement read old in-flight cache: found=%v result=%#v", found, result)
 	}
 
@@ -858,7 +858,7 @@ func TestCompleteMailRefreshRemovesAbsentUIDs(t *testing.T) {
 	if err := application.cacheMailResult("work", "INBOX", scope, options, refreshed); err != nil {
 		t.Fatal(err)
 	}
-	result, ok := application.cachedMailResult("work", "INBOX", "different", options, mailCursorState{}, 10)
+	result, ok, _ := application.cachedMailResult("work", "INBOX", "different", options, mailCursorState{}, 10)
 	if !ok || messageUIDs(result.Messages) != "work:2" {
 		t.Fatalf("offline mail after complete refresh = %#v, %v", result, ok)
 	}
@@ -878,7 +878,7 @@ func TestOlderMailTraversalRetainsMessagesBeyondUIDSnapshot(t *testing.T) {
 	if err := application.cacheMailResult("work", "INBOX", "older traversal", options, refreshed); err != nil {
 		t.Fatal(err)
 	}
-	result, ok := application.cachedMailResult("work", "INBOX", "different scope", postmail.SearchOptions{Since: instant(8)}, mailCursorState{}, 10)
+	result, ok, _ := application.cachedMailResult("work", "INBOX", "different scope", postmail.SearchOptions{Since: instant(8)}, mailCursorState{}, 10)
 	if !ok || messageUIDs(result.Messages) != "work:4,work:3" {
 		t.Fatalf("older traversal removed newer cached mail: %#v, %v", result, ok)
 	}
@@ -918,7 +918,7 @@ func TestIncompleteMailRefreshPreservesLastCompleteScopedCache(t *testing.T) {
 	if err := application.cacheMailResult("work", "INBOX", scope, options, partial); err != nil {
 		t.Fatal(err)
 	}
-	result, ok := application.cachedMailResult("work", "INBOX", scope, options, mailCursorState{}, 10)
+	result, ok, _ := application.cachedMailResult("work", "INBOX", scope, options, mailCursorState{}, 10)
 	if !ok || messageUIDs(result.Messages) != "work:3,work:2,work:1" {
 		t.Fatalf("partial refresh replaced complete cache: %#v, %v", result, ok)
 	}
@@ -928,9 +928,77 @@ func TestIncompleteMailRefreshPreservesLastCompleteScopedCache(t *testing.T) {
 	if err := application.cacheMailResult("work", "INBOX", scope, continuation, final); err != nil {
 		t.Fatal(err)
 	}
-	result, ok = application.cachedMailResult("work", "INBOX", scope, options, mailCursorState{}, 10)
+	result, ok, _ = application.cachedMailResult("work", "INBOX", scope, options, mailCursorState{}, 10)
 	if !ok || messageUIDs(result.Messages) != "work:3,work:2" {
 		t.Fatalf("completed refresh did not replace scoped cache: %#v, %v", result, ok)
+	}
+}
+
+func TestConcurrentMailContinuationsMergeAtomically(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	first := serviceWithConnections(t, mailConnection("work"))
+	defer first.Close()
+	second := New(first.store)
+	defer second.Close()
+	scope := "shared traversal"
+	initial := postmail.SearchResult{UIDValidity: 7, UIDNext: 100, HasMore: true, Messages: []model.Message{{ConnectionID: "work", Folder: "INBOX", UID: 99, ReceivedAt: instant(13)}}}
+	if err := first.cacheMailResult("work", "INBOX", scope, postmail.SearchOptions{}, initial); err != nil {
+		t.Fatal(err)
+	}
+	continuation := postmail.SearchOptions{CursorUID: 99}
+	ready := make(chan struct{})
+	errors := make(chan error, 20)
+	for index := range 20 {
+		application := first
+		if index%2 == 1 {
+			application = second
+		}
+		go func(index int, application *Service) {
+			<-ready
+			uid := uint32(index + 1)
+			errors <- application.cacheMailResult("work", "INBOX", scope, continuation, postmail.SearchResult{UIDValidity: 7, UIDNext: 100, HasMore: true, Messages: []model.Message{{ConnectionID: "work", Folder: "INBOX", UID: uid, ReceivedAt: instant(12)}}})
+		}(index, application)
+	}
+	close(ready)
+	for range 20 {
+		if err := <-errors; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := first.cacheMailResult("work", "INBOX", scope, continuation, postmail.SearchResult{UIDValidity: 7, UIDNext: 100, Messages: []model.Message{{ConnectionID: "work", Folder: "INBOX", UID: 98, ReceivedAt: instant(11)}}}); err != nil {
+		t.Fatal(err)
+	}
+	result, ok, complete := first.cachedMailResult("work", "INBOX", scope, postmail.SearchOptions{}, mailCursorState{}, 100)
+	if !ok || !complete || len(result.Messages) != 22 {
+		t.Fatalf("atomic scoped snapshot retained %d messages, found=%v complete=%v", len(result.Messages), ok, complete)
+	}
+}
+
+func TestOfflineBodySearchReportsReducedSemantics(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	application := serviceWithConnections(t, mailConnection("work"))
+	message := model.Message{ConnectionID: "work", Folder: "INBOX", UID: 7, Subject: "Unrelated", ReceivedAt: instant(12)}
+	if err := application.cacheMailResult("work", "INBOX", "seed", postmail.SearchOptions{}, postmail.SearchResult{UIDValidity: 9, UIDNext: 8, Messages: []model.Message{message}}); err != nil {
+		t.Fatal(err)
+	}
+	connection, err := application.exactConnection("work", "mail.read")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger, err := application.ensureState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	detail, err := json.Marshal(model.MessageDetail{Message: message, Text: "body contains the needle"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ledger.Put(context.Background(), state.CacheEntry{Namespace: "message_body", Key: messageCacheKey(mailCacheID(connection), "INBOX", 9, 7), ConnectionID: "work", Kind: "message_body", ExpiresAt: time.Now().Add(time.Hour), Value: detail}); err != nil {
+		t.Fatal(err)
+	}
+	page, err := application.SearchMessages(model.Selector{}, postmail.SearchOptions{Mode: "offline", Query: "needle"}, 10, "")
+	if err != nil || len(page.Messages) != 1 || len(page.Errors) != 1 || page.Errors[0].Code != "offline_search_incomplete" {
+		t.Fatalf("offline body search = %#v, %v", page, err)
 	}
 }
 
@@ -943,11 +1011,11 @@ func TestScopedMailCacheTrustsProviderBodyQueryMatch(t *testing.T) {
 	if err := application.cacheMailResult("work", "INBOX", scope, options, postmail.SearchResult{UIDValidity: 1, UIDNext: 8, Messages: []model.Message{providerMatch}}); err != nil {
 		t.Fatal(err)
 	}
-	result, ok := application.cachedMailResult("work", "INBOX", scope, options, mailCursorState{}, 10)
+	result, ok, _ := application.cachedMailResult("work", "INBOX", scope, options, mailCursorState{}, 10)
 	if !ok || len(result.Messages) != 1 || result.Messages[0].UID != 7 {
 		t.Fatalf("provider-confirmed scoped match = %#v, %v", result, ok)
 	}
-	result, ok = application.cachedMailResult("work", "INBOX", "different scope", options, mailCursorState{}, 10)
+	result, ok, _ = application.cachedMailResult("work", "INBOX", "different scope", options, mailCursorState{}, 10)
 	if !ok || len(result.Messages) != 0 {
 		t.Fatalf("broad metadata fallback trusted an unconfirmed body match: %#v, %v", result, ok)
 	}
@@ -1294,6 +1362,33 @@ func TestAttachmentContinuationKeepsOriginalUIDValiditySnapshot(t *testing.T) {
 	attachment, continuedData, continuedCursor, err := application.GetAttachmentSnapshotMode(ctx, "work", "INBOX", 7, "file", "", cursor)
 	if err != nil || attachment.Stale || string(continuedData) != "content-11" || continuedCursor != cursor || fetches != 2 {
 		t.Fatalf("continuation mixed snapshots: attachment=%#v data=%q cursor=%q fetches=%d err=%v", attachment, continuedData, continuedCursor, fetches, err)
+	}
+}
+
+func TestAttachmentSnapshotCarriesFetchedUIDValidity(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	application := serviceWithConnections(t, mailConnection("work"))
+	application.mailGetAttachment = func(context.Context, model.Connection, string, uint32, string) (model.Attachment, []byte, uint32, error) {
+		return model.Attachment{ID: "file"}, []byte("old bytes"), 11, nil
+	}
+	ctx := context.Background()
+	_, data, snapshot, err := application.getAttachmentModeSnapshot(ctx, "work", "INBOX", 7, "file", "refresh")
+	if err != nil || snapshot.UIDValidity != 11 || string(data) != "old bytes" {
+		t.Fatalf("fetched snapshot = %#v %q, %v", snapshot, data, err)
+	}
+	ledger, err := application.ensureState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	connection, err := application.exactConnection("work", "mail.read")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := application.cacheMailboxUIDValidityFor(ledger, connection, "INBOX", 12); err != nil {
+		t.Fatal(err)
+	}
+	if _, cached, ok := application.cachedAttachmentSnapshotFor(ctx, "INBOX", 7, "file", snapshot); !ok || string(cached) != "old bytes" {
+		t.Fatalf("fetched snapshot followed mutable mailbox state: %q, %v", cached, ok)
 	}
 }
 

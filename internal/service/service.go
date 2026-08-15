@@ -323,10 +323,15 @@ func (s *Service) SearchMessagesContext(ctx context.Context, selection model.Sel
 		var err error
 		requestCacheID := ""
 		if options.Mode == "offline" {
-			var ok bool
-			result, ok = s.cachedMailResult(connection.ID, mailFolder(connection, connectionOptions.Folder), scope, connectionOptions, state, connectionOptions.Limit)
+			var ok, complete bool
+			result, ok, complete = s.cachedMailResult(connection.ID, mailFolder(connection, connectionOptions.Folder), scope, connectionOptions, state, connectionOptions.Limit)
 			if !ok {
 				err = fmt.Errorf("no cached result for this source and query")
+			} else if !complete {
+				warning := sourceError(connection.ID, "offline_search_incomplete", fmt.Errorf("offline full-text search uses available cached headers and bodies and may omit uncached content"))
+				warning.Retryable = false
+				warning.Stale = true
+				pageErrors = append(pageErrors, warning)
 			}
 		} else {
 			connection, err = resolveMailConnection(connection)
@@ -342,23 +347,29 @@ func (s *Service) SearchMessagesContext(ctx context.Context, selection model.Sel
 			}
 		}
 		if err != nil {
-			sourceError := sourceError(connection.ID, "mail_unavailable", err)
+			providerError := sourceError(connection.ID, "mail_unavailable", err)
 			if options.Mode != "offline" && options.Mode != "refresh" {
-				if cached, ok := s.cachedMailResult(connection.ID, mailFolder(connection, connectionOptions.Folder), scope, connectionOptions, state, connectionOptions.Limit); ok {
+				if cached, ok, complete := s.cachedMailResult(connection.ID, mailFolder(connection, connectionOptions.Folder), scope, connectionOptions, state, connectionOptions.Limit); ok {
 					result = cached
-					sourceError.Stale = true
+					providerError.Stale = true
 					for index := range result.Messages {
 						result.Messages[index].Stale = true
 					}
-					pageErrors = append(pageErrors, sourceError)
+					pageErrors = append(pageErrors, providerError)
+					if !complete {
+						warning := sourceError(connection.ID, "offline_search_incomplete", fmt.Errorf("stale full-text search uses available cached headers and bodies and may omit uncached content"))
+						warning.Retryable = false
+						warning.Stale = true
+						pageErrors = append(pageErrors, warning)
+					}
 				} else {
-					position.Failed[connection.ID] = sourceError
-					pageErrors = append(pageErrors, sourceError)
+					position.Failed[connection.ID] = providerError
+					pageErrors = append(pageErrors, providerError)
 					continue
 				}
 			} else {
-				position.Failed[connection.ID] = sourceError
-				pageErrors = append(pageErrors, sourceError)
+				position.Failed[connection.ID] = providerError
+				pageErrors = append(pageErrors, providerError)
 				continue
 			}
 		} else if options.Mode != "offline" {
@@ -1391,9 +1402,14 @@ func (s *Service) GetAttachment(ctx context.Context, connectionID, folder string
 }
 
 func (s *Service) GetAttachmentMode(ctx context.Context, connectionID, folder string, uid uint32, attachmentID, mode string) (model.Attachment, []byte, error) {
+	attachment, data, _, err := s.getAttachmentModeSnapshot(ctx, connectionID, folder, uid, attachmentID, mode)
+	return attachment, data, err
+}
+
+func (s *Service) getAttachmentModeSnapshot(ctx context.Context, connectionID, folder string, uid uint32, attachmentID, mode string) (model.Attachment, []byte, attachmentSnapshotPosition, error) {
 	connection, err := s.exactConnection(connectionID, "mail.read")
 	if err != nil {
-		return model.Attachment{}, nil, err
+		return model.Attachment{}, nil, attachmentSnapshotPosition{}, err
 	}
 	if folder == "" {
 		folder = connection.Mail.Folders.Inbox
@@ -1404,7 +1420,7 @@ func (s *Service) GetAttachmentMode(ctx context.Context, connectionID, folder st
 	if mode != "offline" {
 		connection, err = resolveMailConnection(connection)
 		if err != nil && mode == "refresh" {
-			return model.Attachment{}, nil, err
+			return model.Attachment{}, nil, attachmentSnapshotPosition{}, err
 		}
 	}
 	confirmedUIDMismatch := false
@@ -1428,6 +1444,8 @@ func (s *Service) GetAttachmentMode(ctx context.Context, connectionID, folder st
 		requestCacheID := mailCacheID(connection)
 		attachment, data, uidValidity, fetchErr := s.mailGetAttachment(ctx, connection, folder, uid, attachmentID)
 		if fetchErr == nil {
+			digest := sha256.Sum256(data)
+			snapshot := attachmentSnapshotPosition{CacheID: requestCacheID, UIDValidity: uidValidity, Digest: hex.EncodeToString(digest[:])}
 			if ledger, stateErr := s.ensureState(); stateErr == nil && requestCacheID != "" {
 				if cacheID := requestCacheID; cacheID != "" {
 					_ = s.cacheMailboxUIDValidityWithID(ledger, connection, cacheID, folder, uidValidity)
@@ -1439,23 +1457,23 @@ func (s *Service) GetAttachmentMode(ctx context.Context, connectionID, folder st
 					}
 				}
 			}
-			return attachment, data, nil
+			return attachment, data, snapshot, nil
 		}
 		if mode == "refresh" {
-			return model.Attachment{}, nil, fetchErr
+			return model.Attachment{}, nil, attachmentSnapshotPosition{}, fetchErr
 		}
 		err = fetchErr
 	}
 	if !confirmedUIDMismatch {
-		if attachment, data, ok := s.cachedAttachmentFor(ctx, connection, folder, uid, attachmentID); ok {
+		if attachment, data, snapshot, ok := s.cachedAttachmentForSnapshot(ctx, connection, folder, uid, attachmentID); ok {
 			attachment.Stale = true
-			return attachment, data, nil
+			return attachment, data, snapshot, nil
 		}
 	}
 	if err != nil {
-		return model.Attachment{}, nil, err
+		return model.Attachment{}, nil, attachmentSnapshotPosition{}, err
 	}
-	return model.Attachment{}, nil, fmt.Errorf("no cached attachment %q", attachmentID)
+	return model.Attachment{}, nil, attachmentSnapshotPosition{}, fmt.Errorf("no cached attachment %q", attachmentID)
 }
 
 func (s *Service) GetAttachmentSnapshotMode(ctx context.Context, connectionID, folder string, uid uint32, attachmentID, mode, cursor string) (model.Attachment, []byte, string, error) {
@@ -1486,21 +1504,16 @@ func (s *Service) GetAttachmentSnapshotMode(ctx context.Context, connectionID, f
 		}
 		return attachment, data, cursor, nil
 	}
-	attachment, data, err := s.GetAttachmentMode(ctx, connection.ID, folder, uid, attachmentID, mode)
+	attachment, data, snapshot, err := s.getAttachmentModeSnapshot(ctx, connection.ID, folder, uid, attachmentID, mode)
 	if err != nil {
 		return model.Attachment{}, nil, "", err
 	}
-	ledger, err := s.ensureState()
-	if err != nil {
-		return model.Attachment{}, nil, "", err
-	}
-	uidValidity, ok := s.cachedMailboxUIDValidityFor(ledger, connection, folder)
-	cacheID := mailCacheID(connection)
-	if !ok || cacheID == "" {
+	if snapshot.CacheID == "" || snapshot.UIDValidity == 0 {
 		return model.Attachment{}, nil, "", fmt.Errorf("attachment snapshot was not cached; retry the first chunk")
 	}
-	digest := sha256.Sum256(data)
-	snapshot := attachmentSnapshotPosition{CacheID: cacheID, UIDValidity: uidValidity, Digest: hex.EncodeToString(digest[:])}
+	if _, _, ok := s.cachedAttachmentSnapshotFor(ctx, folder, uid, attachmentID, snapshot); !ok {
+		return model.Attachment{}, nil, "", fmt.Errorf("attachment snapshot was not cached; retry the first chunk")
+	}
 	cursor, err = pagination.Encode("attachment", scope, snapshot)
 	if err != nil {
 		return model.Attachment{}, nil, "", err
@@ -2146,38 +2159,27 @@ func (s *Service) cacheMailResultWithID(connection model.Connection, cacheID, fo
 	if err := s.cacheMailboxUIDValidityFor(ledger, connection, folder, result.UIDValidity); err != nil {
 		return err
 	}
-	combined := result
 	continuation := !options.CursorTime.IsZero() || options.CursorUID != 0
 	pendingKey := scopedCacheKey(cacheID, scope)
-	if continuation {
-		entry, ok, getErr := ledger.Get(context.Background(), "message_metadata_pending", pendingKey, false)
-		if getErr == nil && !ok {
-			entry, ok, getErr = ledger.Get(context.Background(), "message_metadata", pendingKey, false)
-		}
-		if getErr == nil && ok {
+	combined := result
+	if err := ledger.Mutate(context.Background(), state.CacheEntry{Namespace: "message_metadata", Key: pendingKey, ConnectionID: connectionID, Kind: "message_metadata", CachedAt: now, ExpiresAt: now.Add(s.messageMetadataTTL())}, func(current []byte, found bool) ([]byte, error) {
+		combined = result
+		if continuation && found {
 			var existing postmail.SearchResult
-			if json.Unmarshal(entry.Value, &existing) == nil && existing.UIDValidity == result.UIDValidity {
+			if json.Unmarshal(current, &existing) == nil && existing.UIDValidity == result.UIDValidity {
 				combined = mergeMailResults(existing, result)
 			}
+		} else if continuation {
+			// A missing earlier page cannot become an apparently complete scoped
+			// snapshot. The broad atomic index remains available as fallback.
+			combined.HasMore = true
 		}
-	}
-	stampMessages(combined.Messages, now)
-	data, err := json.Marshal(combined)
-	if err != nil {
+		stampMessages(combined.Messages, now)
+		return json.Marshal(combined)
+	}); err != nil {
 		return err
 	}
-	if result.HasMore {
-		if err := ledger.Put(context.Background(), state.CacheEntry{Namespace: "message_metadata_pending", Key: pendingKey, ConnectionID: connectionID, Kind: "message_metadata", CachedAt: now, ExpiresAt: now.Add(s.messageMetadataTTL()), Value: data}); err != nil {
-			return err
-		}
-	} else {
-		if err := ledger.Put(context.Background(), state.CacheEntry{Namespace: "message_metadata", Key: pendingKey, ConnectionID: connectionID, Kind: "message_metadata", CachedAt: now, ExpiresAt: now.Add(s.messageMetadataTTL()), Value: data}); err != nil {
-			return err
-		}
-		if err := ledger.Delete(context.Background(), "message_metadata_pending", pendingKey); err != nil {
-			return err
-		}
-	}
+	_ = ledger.Delete(context.Background(), "message_metadata_pending", pendingKey)
 	indexKey := mailboxCacheKey(cacheID, folder)
 	return ledger.Mutate(context.Background(), state.CacheEntry{Namespace: "message_metadata_index", Key: indexKey, ConnectionID: connectionID, Kind: "message_metadata", CachedAt: now, ExpiresAt: now.Add(s.messageMetadataTTL())}, func(current []byte, found bool) ([]byte, error) {
 		index := result
@@ -2200,18 +2202,18 @@ func (s *Service) cacheMailResultWithID(connection model.Connection, cacheID, fo
 	})
 }
 
-func (s *Service) cachedMailResult(connectionID, folder string, scope any, options postmail.SearchOptions, cursorState mailCursorState, limit int) (postmail.SearchResult, bool) {
+func (s *Service) cachedMailResult(connectionID, folder string, scope any, options postmail.SearchOptions, cursorState mailCursorState, limit int) (postmail.SearchResult, bool, bool) {
 	connection, connectionErr := s.exactConnection(connectionID, "mail.read")
 	if connectionErr != nil {
-		return postmail.SearchResult{}, false
+		return postmail.SearchResult{}, false, false
 	}
 	ledger, err := s.ensureState()
 	if err != nil {
-		return postmail.SearchResult{}, false
+		return postmail.SearchResult{}, false, false
 	}
 	cacheID := mailCacheID(connection)
 	if cacheID == "" {
-		return postmail.SearchResult{}, false
+		return postmail.SearchResult{}, false, false
 	}
 	entry, ok, err := ledger.Get(context.Background(), "message_metadata", scopedCacheKey(cacheID, scope), false)
 	scopedResult := ok
@@ -2220,19 +2222,41 @@ func (s *Service) cachedMailResult(connectionID, folder string, scope any, optio
 		scopedResult = false
 	}
 	if err != nil || !ok {
-		return postmail.SearchResult{}, false
+		return postmail.SearchResult{}, false, false
 	}
 	var result postmail.SearchResult
 	if json.Unmarshal(entry.Value, &result) != nil {
-		return postmail.SearchResult{}, false
+		return postmail.SearchResult{}, false, false
+	}
+	if scopedResult && result.HasMore {
+		entry, ok, err = ledger.Get(context.Background(), "message_metadata_index", mailboxCacheKey(cacheID, folder), false)
+		scopedResult = false
+		if err != nil || !ok || json.Unmarshal(entry.Value, &result) != nil {
+			return postmail.SearchResult{}, false, false
+		}
 	}
 	if cursorState.UIDValidity != 0 && result.UIDValidity != cursorState.UIDValidity {
-		return postmail.SearchResult{}, false
+		return postmail.SearchResult{}, false, false
 	}
+	complete := scopedResult || strings.TrimSpace(options.Query) == ""
 	filtered := make([]model.Message, 0, len(result.Messages))
 	for _, message := range result.Messages {
-		if !scopedResult && !matchesCachedMessage(message, options) {
-			continue
+		if !scopedResult {
+			baseOptions := options
+			baseOptions.Query = ""
+			if !matchesCachedMessage(message, baseOptions) {
+				continue
+			}
+			if strings.TrimSpace(options.Query) != "" {
+				detail, found := s.cachedMessageSnapshotFor(ledger, cacheID, folder, result.UIDValidity, message.UID)
+				if !found {
+					if !matchesCachedMessage(message, options) {
+						continue
+					}
+				} else if !matchesCachedMessageDetail(detail, options.Query) {
+					continue
+				}
+			}
 		}
 		if cursorState.UIDNext != 0 && message.UID >= cursorState.UIDNext {
 			continue
@@ -2251,7 +2275,7 @@ func (s *Service) cachedMailResult(connectionID, folder string, scope any, optio
 		filtered = filtered[:limit]
 	}
 	result.Messages = filtered
-	return result, true
+	return result, true, complete
 }
 
 func mergeMailResults(existing, fresh postmail.SearchResult) postmail.SearchResult {
@@ -2312,6 +2336,31 @@ func matchesCachedMessage(message model.Message, options postmail.SearchOptions)
 		searchable.WriteString(address.Email)
 	}
 	return strings.Contains(strings.ToLower(searchable.String()), query)
+}
+
+func matchesCachedMessageDetail(detail model.MessageDetail, query string) bool {
+	var searchable strings.Builder
+	searchable.WriteString(detail.Subject)
+	searchable.WriteByte(' ')
+	searchable.WriteString(detail.Preview)
+	searchable.WriteByte(' ')
+	searchable.WriteString(detail.Text)
+	searchable.WriteByte(' ')
+	searchable.WriteString(detail.HTML)
+	searchable.WriteByte(' ')
+	searchable.WriteString(detail.InReplyTo)
+	for _, reference := range detail.References {
+		searchable.WriteByte(' ')
+		searchable.WriteString(reference)
+	}
+	addresses := append(append(append(append(append([]model.Address(nil), detail.From...), detail.To...), detail.CC...), detail.BCC...), detail.ReplyTo...)
+	for _, address := range addresses {
+		searchable.WriteByte(' ')
+		searchable.WriteString(address.Name)
+		searchable.WriteByte(' ')
+		searchable.WriteString(address.Email)
+	}
+	return strings.Contains(strings.ToLower(searchable.String()), strings.ToLower(strings.TrimSpace(query)))
 }
 
 func (s *Service) cacheEvents(connectionID string, scope any, events []model.Event, rangeStart, rangeEnd time.Time, replaceScoped, replaceIndex bool) error {
@@ -2513,6 +2562,10 @@ func (s *Service) cachedMessageFor(connection model.Connection, folder string, u
 	if cacheID == "" {
 		return model.MessageDetail{}, false
 	}
+	return s.cachedMessageSnapshotFor(ledger, cacheID, folder, uidValidity, uid)
+}
+
+func (s *Service) cachedMessageSnapshotFor(ledger *state.Store, cacheID, folder string, uidValidity, uid uint32) (model.MessageDetail, bool) {
 	entry, ok, err := ledger.Get(context.Background(), "message_body", messageCacheKey(cacheID, folder, uidValidity, uid), false)
 	if err != nil || !ok {
 		return model.MessageDetail{}, false
@@ -2534,21 +2587,26 @@ func (s *Service) cachedAttachment(ctx context.Context, connectionID, folder str
 }
 
 func (s *Service) cachedAttachmentFor(ctx context.Context, connection model.Connection, folder string, uid uint32, attachmentID string) (model.Attachment, []byte, bool) {
+	attachment, data, _, ok := s.cachedAttachmentForSnapshot(ctx, connection, folder, uid, attachmentID)
+	return attachment, data, ok
+}
+
+func (s *Service) cachedAttachmentForSnapshot(ctx context.Context, connection model.Connection, folder string, uid uint32, attachmentID string) (model.Attachment, []byte, attachmentSnapshotPosition, bool) {
 	ledger, err := s.ensureState()
 	if err != nil {
-		return model.Attachment{}, nil, false
+		return model.Attachment{}, nil, attachmentSnapshotPosition{}, false
 	}
 	uidValidity, ok := s.cachedMailboxUIDValidityFor(ledger, connection, folder)
 	if !ok {
-		return model.Attachment{}, nil, false
+		return model.Attachment{}, nil, attachmentSnapshotPosition{}, false
 	}
 	cacheID := mailCacheID(connection)
 	if cacheID == "" {
-		return model.Attachment{}, nil, false
+		return model.Attachment{}, nil, attachmentSnapshotPosition{}, false
 	}
 	entry, ok, err := ledger.Get(ctx, "attachment", messageCacheKey(cacheID, folder, uidValidity, uid)+"/"+attachmentID, false)
 	if err != nil || !ok {
-		return model.Attachment{}, nil, false
+		return model.Attachment{}, nil, attachmentSnapshotPosition{}, false
 	}
 	attachment := model.Attachment{ID: attachmentID, Size: int64(len(entry.Value)), CachedAt: entry.CachedAt}
 	if metadata, found, metadataErr := ledger.Get(ctx, "attachment_metadata", messageCacheKey(cacheID, folder, uidValidity, uid)+"/"+attachmentID, false); metadataErr == nil && found && json.Unmarshal(metadata.Value, &attachment) == nil {
@@ -2562,7 +2620,9 @@ func (s *Service) cachedAttachmentFor(ctx context.Context, connection model.Conn
 			}
 		}
 	}
-	return attachment, entry.Value, true
+	digest := sha256.Sum256(entry.Value)
+	snapshot := attachmentSnapshotPosition{CacheID: cacheID, UIDValidity: uidValidity, Digest: hex.EncodeToString(digest[:])}
+	return attachment, entry.Value, snapshot, true
 }
 
 func (s *Service) cachedAttachmentSnapshotFor(ctx context.Context, folder string, uid uint32, attachmentID string, snapshot attachmentSnapshotPosition) (model.Attachment, []byte, bool) {

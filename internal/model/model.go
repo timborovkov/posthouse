@@ -213,6 +213,7 @@ type Event struct {
 	Href              string             `json:"href,omitempty"`
 	RecurrenceID      string             `json:"recurrence_id,omitempty"`
 	RecurrenceWall    string             `json:"recurrence_wall,omitempty"`
+	Floating          bool               `json:"-"`
 	RecurrenceRange   string             `json:"recurrence_range,omitempty"`
 	RecurrenceRule    string             `json:"recurrence_rule,omitempty"`
 	RecurrenceDates   []time.Time        `json:"recurrence_dates,omitempty"`

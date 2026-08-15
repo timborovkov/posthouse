@@ -133,14 +133,13 @@ func SendSerializedContext(ctx context.Context, connection model.Connection, mes
 	if err := client.Mail(from); err != nil {
 		return fmt.Errorf("set SMTP sender: %w", err)
 	}
-	recipients := uniqueStrings(append(append(slices.Clone(message.To), message.CC...), message.BCC...))
+	recipients, err := envelopeRecipients(append(append(slices.Clone(message.To), message.CC...), message.BCC...))
+	if err != nil {
+		return err
+	}
 	for _, recipient := range recipients {
-		address, err := stdmail.ParseAddress(recipient)
-		if err != nil {
-			return fmt.Errorf("invalid recipient %q: %w", recipient, err)
-		}
-		if err := client.Rcpt(address.Address); err != nil {
-			return fmt.Errorf("set SMTP recipient %s: %w", address.Address, err)
+		if err := client.Rcpt(recipient); err != nil {
+			return fmt.Errorf("set SMTP recipient %s: %w", recipient, err)
 		}
 	}
 	writer, err := client.Data()
@@ -446,4 +445,25 @@ func uniqueStrings(values []string) []string {
 		}
 	}
 	return result
+}
+
+func envelopeRecipients(values []string) ([]string, error) {
+	result := make([]string, 0, len(values))
+	seen := make(map[string]bool, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		address, err := stdmail.ParseAddress(value)
+		if err != nil {
+			return nil, fmt.Errorf("invalid recipient %q: %w", value, err)
+		}
+		key := strings.ToLower(address.Address)
+		if !seen[key] {
+			seen[key] = true
+			result = append(result, address.Address)
+		}
+	}
+	return result, nil
 }

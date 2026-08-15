@@ -8,6 +8,7 @@ Posthouse is a local-first Go CLI, MCP server, and full-screen terminal app for 
 
 - Aggregate and paginate two or more mail, CalDAV, and ICS-feed connections with structured partial-source errors.
 - Fetch complete MIME messages, decoded text, sanitized HTML, threading headers, and bounded attachment chunks.
+- Offline full-text search uses the encrypted headers and bodies already cached; structured `offline_search_incomplete` source warnings identify queries that may omit uncached content.
 - Prepare and execute send, reply, forward, draft, mark, flag, move, archive, and trash operations without global IMAP expunge.
 - Discover IMAP special-use folders, capabilities, CalDAV principals/homes, and multiple calendar collections.
 - Expand recurring ICS events with exclusions, overrides, cancellations, all-day and timezone handling.

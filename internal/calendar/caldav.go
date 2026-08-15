@@ -396,13 +396,19 @@ func mergeUpdatedEventWithWallTimes(existing []byte, replacement, recurrenceID, 
 	if recurrenceWall != "" {
 		targetRecurrence = "floating:" + recurrenceWall
 	}
+	seriesFound := false
+	var seriesMaster *ics.VEvent
 	for _, current := range parsedCalendar.Events() {
 		if current.Id() != replacementEvent.Id() {
 			continue
 		}
+		seriesFound = true
 		currentRecurrence, err := eventRecurrenceKey(current, locations)
 		if err != nil {
 			return "", err
+		}
+		if currentRecurrence == "" {
+			seriesMaster = current
 		}
 		if property := current.GetProperty(ics.ComponentPropertyRecurrenceId); recurrenceWall != "" && isFloatingDateTime(property) {
 			currentRecurrence = "floating:" + property.Value
@@ -418,6 +424,25 @@ func mergeUpdatedEventWithWallTimes(existing []byte, replacement, recurrenceID, 
 	}
 	if targetRecurrence == "" {
 		return "", fmt.Errorf("existing CalDAV object does not contain the event series master")
+	}
+	if !seriesFound {
+		return "", fmt.Errorf("existing CalDAV object does not contain event UID %s", replacementEvent.Id())
+	}
+	if seriesMaster != nil {
+		if err := preserveEventTimezone(seriesMaster, replacementEvent, locations, startWall, endWall, ""); err != nil {
+			return "", err
+		}
+	}
+	if recurrenceWall != "" {
+		property := replacementEvent.GetProperty(ics.ComponentPropertyRecurrenceId)
+		if property == nil {
+			return "", fmt.Errorf("replacement recurrence override is missing RECURRENCE-ID")
+		}
+		property.Value = recurrenceWall
+		parameters := cloneParameters(property.ICalParameters)
+		delete(parameters, "TZID")
+		delete(parameters, "VALUE")
+		property.ICalParameters = parameters
 	}
 	parsedCalendar.AddVEvent(replacementEvent)
 	return parsedCalendar.Serialize(ics.WithNewLine("\r\n")), nil
