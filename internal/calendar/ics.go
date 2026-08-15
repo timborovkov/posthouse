@@ -160,11 +160,13 @@ func ParseRange(data []byte, rangeStart, rangeEnd time.Time) ([]model.Event, err
 				return nil, fmt.Errorf("parse RRULE for event %s: %w", event.ID, err)
 			}
 			rule.DTStart(event.Start)
-			rule, err = fastForwardRule(rule, lookback)
+			rule, exhausted, err := fastForwardRule(rule, lookback)
 			if err != nil {
 				return nil, fmt.Errorf("fast-forward RRULE for event %s: %w", event.ID, err)
 			}
-			set.RRule(rule)
+			if !exhausted {
+				set.RRule(rule)
+			}
 		} else {
 			set.DTStart(event.Start)
 		}
@@ -247,10 +249,10 @@ func ParseRange(data []byte, rangeStart, rangeEnd time.Time) ([]model.Event, err
 	return result, nil
 }
 
-func fastForwardRule(rule *rrule.RRule, lookback time.Time) (*rrule.RRule, error) {
+func fastForwardRule(rule *rrule.RRule, lookback time.Time) (*rrule.RRule, bool, error) {
 	options := rule.OrigOptions
-	if options.Count != 0 || !options.Dtstart.Before(lookback) {
-		return rule, nil
+	if !options.Dtstart.Before(lookback) {
+		return rule, false, nil
 	}
 	var unit time.Duration
 	switch options.Freq {
@@ -261,7 +263,7 @@ func fastForwardRule(rule *rrule.RRule, lookback time.Time) (*rrule.RRule, error
 	case rrule.HOURLY:
 		unit = time.Hour
 	default:
-		return rule, nil
+		return rule, false, nil
 	}
 	interval := options.Interval
 	if interval < 1 {
@@ -272,10 +274,24 @@ func fastForwardRule(rule *rrule.RRule, lookback time.Time) (*rrule.RRule, error
 		steps--
 	}
 	if steps == 0 {
-		return rule, nil
+		return rule, false, nil
+	}
+	if options.Count != 0 {
+		if hasRecurrenceSelectors(options) {
+			return rule, false, nil
+		}
+		if steps >= int64(options.Count) {
+			return nil, true, nil
+		}
+		options.Count -= int(steps)
 	}
 	options.Dtstart = options.Dtstart.Add(time.Duration(steps*int64(interval)) * unit)
-	return rrule.NewRRule(options)
+	shifted, err := rrule.NewRRule(options)
+	return shifted, false, err
+}
+
+func hasRecurrenceSelectors(options rrule.ROption) bool {
+	return len(options.Bysetpos)+len(options.Bymonth)+len(options.Bymonthday)+len(options.Byyearday)+len(options.Byweekno)+len(options.Byweekday)+len(options.Byhour)+len(options.Byminute)+len(options.Bysecond)+len(options.Byeaster) != 0
 }
 
 func clearRecurrenceSet(event *model.Event) {

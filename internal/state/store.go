@@ -551,42 +551,37 @@ func (s *Store) Rekey(ctx context.Context, newKey []byte) error {
 			return fmt.Errorf("store cache rekey recovery record: %w", err)
 		}
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT c.entry_id,c.sequence,e.namespace,e.key_hash,c.ciphertext FROM cache_chunks c JOIN cache_entries e ON e.id=c.entry_id ORDER BY c.entry_id,c.sequence`)
-	if err != nil {
-		return fmt.Errorf("list cache entries for rekey: %w", err)
-	}
 	type encryptedChunk struct {
 		entryID          int64
 		sequence         int
 		namespace        string
 		hash, ciphertext []byte
 	}
-	var chunks []encryptedChunk
-	for rows.Next() {
+	lastEntryID, lastSequence := int64(0), -1
+	for {
+		rows, err := tx.QueryContext(ctx, `SELECT c.entry_id,c.sequence,e.namespace,e.key_hash,c.ciphertext FROM cache_chunks c JOIN cache_entries e ON e.id=c.entry_id WHERE c.entry_id>? OR (c.entry_id=? AND c.sequence>?) ORDER BY c.entry_id,c.sequence LIMIT 1`, lastEntryID, lastEntryID, lastSequence)
+		if err != nil {
+			return fmt.Errorf("list cache entries for rekey: %w", err)
+		}
 		var chunk encryptedChunk
-		if err := rows.Scan(&chunk.entryID, &chunk.sequence, &chunk.namespace, &chunk.hash, &chunk.ciphertext); err != nil {
-			_ = rows.Close()
+		found := rows.Next()
+		if found {
+			err = rows.Scan(&chunk.entryID, &chunk.sequence, &chunk.namespace, &chunk.hash, &chunk.ciphertext)
+		}
+		rowErr := rows.Err()
+		closeErr := rows.Close()
+		if err != nil {
 			return err
 		}
-		chunks = append(chunks, chunk)
-	}
-	_ = rows.Close()
-	operationRows, err := tx.QueryContext(ctx, `SELECT token_hash,ciphertext FROM operations`)
-	if err != nil {
-		return fmt.Errorf("list operations for rekey: %w", err)
-	}
-	type encryptedOperation struct{ hash, ciphertext []byte }
-	var operations []encryptedOperation
-	for operationRows.Next() {
-		var value encryptedOperation
-		if err := operationRows.Scan(&value.hash, &value.ciphertext); err != nil {
-			_ = operationRows.Close()
-			return err
+		if rowErr != nil {
+			return rowErr
 		}
-		operations = append(operations, value)
-	}
-	_ = operationRows.Close()
-	for _, chunk := range chunks {
+		if closeErr != nil {
+			return closeErr
+		}
+		if !found {
+			break
+		}
 		aad := chunkAAD(chunk.namespace, chunk.hash, chunk.sequence)
 		plaintext, err := open(s.key, chunk.ciphertext, aad)
 		if err != nil {
@@ -599,8 +594,40 @@ func (s *Store) Rekey(ctx context.Context, newKey []byte) error {
 		if _, err := tx.ExecContext(ctx, `UPDATE cache_chunks SET ciphertext=? WHERE entry_id=? AND sequence=?`, ciphertext, chunk.entryID, chunk.sequence); err != nil {
 			return err
 		}
+		lastEntryID, lastSequence = chunk.entryID, chunk.sequence
 	}
-	for _, value := range operations {
+	type encryptedOperation struct{ hash, ciphertext []byte }
+	var lastOperationHash []byte
+	for {
+		query := `SELECT token_hash,ciphertext FROM operations ORDER BY token_hash LIMIT 1`
+		var args []any
+		if lastOperationHash != nil {
+			query = `SELECT token_hash,ciphertext FROM operations WHERE token_hash>? ORDER BY token_hash LIMIT 1`
+			args = append(args, lastOperationHash)
+		}
+		rows, err := tx.QueryContext(ctx, query, args...)
+		if err != nil {
+			return fmt.Errorf("list operations for rekey: %w", err)
+		}
+		var value encryptedOperation
+		found := rows.Next()
+		if found {
+			err = rows.Scan(&value.hash, &value.ciphertext)
+		}
+		rowErr := rows.Err()
+		closeErr := rows.Close()
+		if err != nil {
+			return err
+		}
+		if rowErr != nil {
+			return rowErr
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+		if !found {
+			break
+		}
 		plaintext, err := open(s.key, value.ciphertext, value.hash)
 		if err != nil {
 			return err
@@ -612,6 +639,7 @@ func (s *Store) Rekey(ctx context.Context, newKey []byte) error {
 		if _, err := tx.ExecContext(ctx, `UPDATE operations SET ciphertext=? WHERE token_hash=?`, ciphertext, value.hash); err != nil {
 			return err
 		}
+		lastOperationHash = append(lastOperationHash[:0], value.hash...)
 	}
 	var marker []byte
 	if err := tx.QueryRowContext(ctx, `SELECT ciphertext FROM state_meta WHERE name='key-check'`).Scan(&marker); err != nil {

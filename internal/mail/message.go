@@ -64,6 +64,10 @@ type flagChange struct {
 }
 
 func Get(connection model.Connection, folder string, uid uint32) (FetchedMessage, error) {
+	return GetContext(context.Background(), connection, folder, uid)
+}
+
+func GetContext(ctx context.Context, connection model.Connection, folder string, uid uint32) (FetchedMessage, error) {
 	if connection.Mail == nil || connection.Mail.IMAP.Address == "" {
 		return FetchedMessage{}, fmt.Errorf("connection %s has no IMAP capability", connection.ID)
 	}
@@ -76,10 +80,11 @@ func Get(connection model.Connection, folder string, uid uint32) (FetchedMessage
 	if folder == "" {
 		folder = "INBOX"
 	}
-	client, err := authenticatedIMAP(connection)
+	client, stop, err := authenticatedIMAPContext(ctx, connection)
 	if err != nil {
 		return FetchedMessage{}, err
 	}
+	defer stop()
 	defer client.Close()
 	defer client.Logout()
 	selected, err := client.Select(folder, &imap.SelectOptions{ReadOnly: true}).Wait()
@@ -157,7 +162,11 @@ func readBoundedLiteral(reader io.Reader, limit int64) ([]byte, error) {
 }
 
 func GetAttachment(connection model.Connection, folder string, uid uint32, attachmentID string) (model.Attachment, []byte, uint32, error) {
-	message, err := Get(connection, folder, uid)
+	return GetAttachmentContext(context.Background(), connection, folder, uid, attachmentID)
+}
+
+func GetAttachmentContext(ctx context.Context, connection model.Connection, folder string, uid uint32, attachmentID string) (model.Attachment, []byte, uint32, error) {
+	message, err := GetContext(ctx, connection, folder, uid)
 	if err != nil {
 		return model.Attachment{}, nil, 0, err
 	}

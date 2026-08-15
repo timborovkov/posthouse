@@ -4,6 +4,7 @@ package state_test
 // not left recoverable as plaintext in the SQLite file.
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
@@ -157,11 +158,17 @@ func TestRekeyPreservesCacheAndPreparedOperations(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	if err := store.Put(ctx, state.CacheEntry{Namespace: "event", Key: "one", Kind: "event", Value: []byte("private event")}); err != nil {
+	largeValue := bytesOf(9, (1<<20)+17)
+	if err := store.Put(ctx, state.CacheEntry{Namespace: "event", Key: "one", Kind: "event", Value: largeValue}); err != nil {
 		t.Fatal(err)
 	}
 	prepared := model.PreparedOperation{Token: "rekey-token", Kind: "calendar.update", ConnectionID: "work", CreatedAt: time.Now(), ExpiresAt: time.Now().Add(time.Minute), Status: "prepared"}
 	if err := store.PutOperation(ctx, state.OperationRecord{Public: prepared, Payload: []byte(`{"title":"private"}`), Digest: "digest"}); err != nil {
+		t.Fatal(err)
+	}
+	second := prepared
+	second.Token = "rekey-token-two"
+	if err := store.PutOperation(ctx, state.OperationRecord{Public: second, Payload: []byte(`{"title":"second"}`), Digest: "digest-two"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Rekey(ctx, newKey); err != nil {
@@ -179,12 +186,16 @@ func TestRekeyPreservesCacheAndPreparedOperations(t *testing.T) {
 	}
 	defer reopened.Close()
 	entry, ok, err := reopened.Get(ctx, "event", "one", false)
-	if err != nil || !ok || string(entry.Value) != "private event" {
-		t.Fatalf("cache after rekey = %q, %v, %v", entry.Value, ok, err)
+	if err != nil || !ok || !bytes.Equal(entry.Value, largeValue) {
+		t.Fatalf("multi-chunk cache after rekey = %d bytes, %v, %v", len(entry.Value), ok, err)
 	}
 	operation, err := reopened.GetOperation(ctx, prepared.Token)
 	if err != nil || string(operation.Payload) != `{"title":"private"}` {
 		t.Fatalf("operation after rekey = %#v, %v", operation, err)
+	}
+	operation, err = reopened.GetOperation(ctx, second.Token)
+	if err != nil || string(operation.Payload) != `{"title":"second"}` {
+		t.Fatalf("second operation after rekey = %#v, %v", operation, err)
 	}
 }
 

@@ -446,6 +446,25 @@ func TestIncompleteMailRefreshPreservesLastCompleteScopedCache(t *testing.T) {
 	}
 }
 
+func TestScopedMailCacheTrustsProviderBodyQueryMatch(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	application := serviceWithConnections(t, mailConnection("work"))
+	scope := "body query"
+	options := postmail.SearchOptions{Query: "needle"}
+	providerMatch := model.Message{ConnectionID: "work", Folder: "INBOX", UID: 7, Subject: "unrelated metadata", Preview: "no match here", ReceivedAt: instant(12)}
+	if err := application.cacheMailResult("work", "INBOX", scope, options, postmail.SearchResult{UIDValidity: 1, UIDNext: 8, Messages: []model.Message{providerMatch}}); err != nil {
+		t.Fatal(err)
+	}
+	result, ok := application.cachedMailResult("work", "INBOX", scope, options, mailCursorState{}, 10)
+	if !ok || len(result.Messages) != 1 || result.Messages[0].UID != 7 {
+		t.Fatalf("provider-confirmed scoped match = %#v, %v", result, ok)
+	}
+	result, ok = application.cachedMailResult("work", "INBOX", "different scope", options, mailCursorState{}, 10)
+	if !ok || len(result.Messages) != 0 {
+		t.Fatalf("broad metadata fallback trusted an unconfirmed body match: %#v, %v", result, ok)
+	}
+}
+
 func TestPrepareSendValidatesSerializationBeforeToken(t *testing.T) {
 	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
 	connection := mailConnection("work")
@@ -611,7 +630,7 @@ func TestLiveAttachmentCacheValidatesUIDValidityAndPreservesMetadata(t *testing.
 	uidValidity := uint32(11)
 	application.mailboxUIDValidity = func(context.Context, model.Connection, string) (uint32, error) { return uidValidity, nil }
 	fetches := 0
-	application.mailGetAttachment = func(model.Connection, string, uint32, string) (model.Attachment, []byte, uint32, error) {
+	application.mailGetAttachment = func(context.Context, model.Connection, string, uint32, string) (model.Attachment, []byte, uint32, error) {
 		fetches++
 		if uidValidity == 13 {
 			return model.Attachment{}, nil, 0, errors.New("provider message missing")
@@ -637,6 +656,18 @@ func TestLiveAttachmentCacheValidatesUIDValidityAndPreservesMetadata(t *testing.
 	uidValidity = 13
 	if _, staleData, err := application.GetAttachmentMode(ctx, "work", "INBOX", 7, "file", ""); err == nil || len(staleData) != 0 {
 		t.Fatalf("confirmed UIDVALIDITY mismatch returned old bytes %q: %v", staleData, err)
+	}
+}
+
+func TestAttachmentFetchReceivesRequestContext(t *testing.T) {
+	application := serviceWithConnections(t, mailConnection("work"))
+	application.mailGetAttachment = func(ctx context.Context, _ model.Connection, _ string, _ uint32, _ string) (model.Attachment, []byte, uint32, error) {
+		return model.Attachment{}, nil, 0, ctx.Err()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, _, err := application.GetAttachmentMode(ctx, "work", "INBOX", 7, "file", "refresh"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled attachment fetch returned %v", err)
 	}
 }
 

@@ -229,7 +229,29 @@ func observanceTransitions(base *ics.ComponentBase, daylight bool) ([]zoneTransi
 		if err != nil {
 			return nil, fmt.Errorf("parse timezone RRULE: %w", err)
 		}
-		starts = rule.Between(time.Date(1900, 1, 1, 0, 0, 0, 0, time.UTC), time.Date(2101, 1, 1, 0, 0, 0, 0, time.UTC), true)
+		rangeStart := time.Date(1900, 1, 1, 0, 0, 0, 0, time.UTC)
+		rangeEnd := time.Date(2101, 1, 1, 0, 0, 0, 0, time.UTC)
+		rule, exhausted, err := fastForwardRule(rule, rangeStart)
+		if err != nil {
+			return nil, fmt.Errorf("fast-forward timezone RRULE: %w", err)
+		}
+		starts = nil
+		if !exhausted {
+			next := rule.Iterator()
+			for {
+				transition, ok := next()
+				if !ok || transition.After(rangeEnd) {
+					break
+				}
+				if transition.Before(rangeStart) {
+					continue
+				}
+				starts = append(starts, transition)
+				if len(starts) > 10000 {
+					return nil, fmt.Errorf("timezone recurrence expansion exceeds 10000 transitions")
+				}
+			}
+		}
 	}
 	for _, property := range base.GetProperties(ics.ComponentPropertyRdate) {
 		for _, value := range strings.Split(property.Value, ",") {
@@ -238,6 +260,9 @@ func observanceTransitions(base *ics.ComponentBase, daylight bool) ([]zoneTransi
 				return nil, fmt.Errorf("parse timezone RDATE: %w", err)
 			}
 			starts = append(starts, parsed)
+			if len(starts) > 10000 {
+				return nil, fmt.Errorf("timezone recurrence expansion exceeds 10000 transitions")
+			}
 		}
 	}
 	name := propertyValue(base, "TZNAME")

@@ -333,6 +333,47 @@ END:VCALENDAR`
 	}
 }
 
+func TestParseRangeFastForwardsFiniteDenseRecurrence(t *testing.T) {
+	data := `BEGIN:VCALENDAR
+VERSION:2.0
+BEGIN:VEVENT
+UID:finite-dense
+DTSTART:20260801T000000Z
+DTEND:20260801T000030Z
+RRULE:FREQ=MINUTELY;COUNT=20000
+SUMMARY:Finite dense series
+END:VEVENT
+END:VCALENDAR`
+	seriesStart := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	start := seriesStart.Add(19900 * time.Minute)
+	events, err := ParseRange([]byte(data), start, start.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 60 || !events[0].Start.Equal(start) || !events[59].Start.Equal(start.Add(59*time.Minute)) {
+		t.Fatalf("finite fast-forward returned %#v", events)
+	}
+}
+
+func TestParseRejectsDenseTimezoneRecurrence(t *testing.T) {
+	data := `BEGIN:VCALENDAR
+VERSION:2.0
+BEGIN:VTIMEZONE
+TZID:Hostile/Dense
+BEGIN:STANDARD
+DTSTART:19700101T000000
+RRULE:FREQ=SECONDLY
+TZOFFSETFROM:+0000
+TZOFFSETTO:+0000
+END:STANDARD
+END:VTIMEZONE
+END:VCALENDAR`
+	_, err := Parse([]byte(data))
+	if err == nil || !strings.Contains(err.Error(), "exceeds 10000 transitions") {
+		t.Fatalf("dense timezone recurrence returned %v", err)
+	}
+}
+
 func TestParseRangeKeepsLocalTimeAcrossDST(t *testing.T) {
 	data := `BEGIN:VCALENDAR
 VERSION:2.0

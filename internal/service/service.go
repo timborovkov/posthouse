@@ -43,7 +43,7 @@ type Service struct {
 	mailAppendRawContext   func(context.Context, model.Connection, string, []byte, []imap.Flag) (uint32, error)
 	mailMarkDeleted        func(model.Connection, string, uint32, postmail.MessagePrecondition) error
 	mailMarkDeletedContext func(context.Context, model.Connection, string, uint32, postmail.MessagePrecondition) error
-	mailGetAttachment      func(model.Connection, string, uint32, string) (model.Attachment, []byte, uint32, error)
+	mailGetAttachment      func(context.Context, model.Connection, string, uint32, string) (model.Attachment, []byte, uint32, error)
 	mailboxUIDValidity     func(context.Context, model.Connection, string) (uint32, error)
 	stateMu                sync.Mutex
 	state                  *state.Store
@@ -56,7 +56,7 @@ func New(store *config.Store) *Service {
 		store: store, calendar: calendar.NewClient(nil), mailSearchContext: postmail.SearchContext,
 		mailSnapshotContext: postmail.SnapshotMessageContext,
 		mailAppendContext:   postmail.AppendContext, mailMarkDeletedContext: postmail.MarkDeletedContext,
-		mailGetAttachment: postmail.GetAttachment, mailboxUIDValidity: postmail.MailboxUIDValidityContext,
+		mailGetAttachment: postmail.GetAttachmentContext, mailboxUIDValidity: postmail.MailboxUIDValidityContext,
 		mailBuild: postmail.BuildMessage, mailSendRawContext: postmail.SendSerializedContext, mailAppendRawContext: postmail.AppendSerializedContext,
 		now: func() time.Time { return time.Now().UTC() },
 	}
@@ -1197,6 +1197,7 @@ func (s *Service) GetAttachmentMode(ctx context.Context, connectionID, folder st
 			folder = "INBOX"
 		}
 	}
+	confirmedUIDMismatch := false
 	if mode == "" {
 		if attachment, data, ok := s.cachedAttachment(ctx, connection.ID, folder, uid, attachmentID); ok {
 			ledger, stateErr := s.ensureState()
@@ -1213,13 +1214,14 @@ func (s *Service) GetAttachmentMode(ctx context.Context, connectionID, folder st
 				attachment.Stale = false
 				return attachment, data, nil
 			}
+			confirmedUIDMismatch = validityOK && liveUIDValidity != cachedUIDValidity
 			if stateErr == nil {
 				_ = s.cacheMailboxUIDValidity(ledger, connection.ID, folder, liveUIDValidity)
 			}
 		}
 	}
 	if mode != "offline" {
-		attachment, data, uidValidity, fetchErr := s.mailGetAttachment(connection, folder, uid, attachmentID)
+		attachment, data, uidValidity, fetchErr := s.mailGetAttachment(ctx, connection, folder, uid, attachmentID)
 		if fetchErr == nil {
 			if ledger, stateErr := s.ensureState(); stateErr == nil {
 				_ = s.cacheMailboxUIDValidity(ledger, connection.ID, folder, uidValidity)
@@ -1237,9 +1239,11 @@ func (s *Service) GetAttachmentMode(ctx context.Context, connectionID, folder st
 		}
 		err = fetchErr
 	}
-	if attachment, data, ok := s.cachedAttachment(ctx, connection.ID, folder, uid, attachmentID); ok {
-		attachment.Stale = true
-		return attachment, data, nil
+	if !confirmedUIDMismatch {
+		if attachment, data, ok := s.cachedAttachment(ctx, connection.ID, folder, uid, attachmentID); ok {
+			attachment.Stale = true
+			return attachment, data, nil
+		}
 	}
 	if err != nil {
 		return model.Attachment{}, nil, err
@@ -1729,8 +1733,10 @@ func (s *Service) cachedMailResult(connectionID, folder string, scope any, optio
 		return postmail.SearchResult{}, false
 	}
 	entry, ok, err := ledger.Get(context.Background(), "message_metadata", scopedCacheKey(connectionID, scope), false)
+	scopedResult := ok
 	if err == nil && !ok {
 		entry, ok, err = ledger.Get(context.Background(), "message_metadata_index", mailboxCacheKey(connectionID, folder), false)
+		scopedResult = false
 	}
 	if err != nil || !ok {
 		return postmail.SearchResult{}, false
@@ -1744,7 +1750,7 @@ func (s *Service) cachedMailResult(connectionID, folder string, scope any, optio
 	}
 	filtered := make([]model.Message, 0, len(result.Messages))
 	for _, message := range result.Messages {
-		if !matchesCachedMessage(message, options) {
+		if !scopedResult && !matchesCachedMessage(message, options) {
 			continue
 		}
 		if cursorState.UIDNext != 0 && message.UID >= cursorState.UIDNext {
