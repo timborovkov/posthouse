@@ -407,6 +407,42 @@ func TestMergeUpdatedSeriesRestoresExistingTZIDAfterPayloadRoundTrip(t *testing.
 	}
 }
 
+func TestMergeUpdatedEventPreservesEachEndpointTimezone(t *testing.T) {
+	existing := []byte("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:flight\r\nDTSTART;TZID=America/New_York:20260302T090000\r\nDTEND;TZID=Europe/London:20260302T160000\r\nSUMMARY:Old\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n")
+	replacement := "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:flight\r\nDTSTART:20260302T140000Z\r\nDTEND:20260302T160000Z\r\nSUMMARY:New\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+	merged, err := mergeUpdatedEvent(existing, replacement, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(merged, "DTSTART;TZID=America/New_York:20260302T090000") || !strings.Contains(merged, "DTEND;TZID=Europe/London:20260302T160000") {
+		t.Fatalf("updated event mixed endpoint timezones:\n%s", merged)
+	}
+}
+
+func TestGenerateCarriesTZIDOnRecurrenceSets(t *testing.T) {
+	newYork, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Fatal(err)
+	}
+	london, err := time.LoadLocation("Europe/London")
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := model.Event{ID: "recurrence-zones", Title: "Zones", Start: time.Date(2026, 3, 2, 9, 0, 0, 0, newYork), End: time.Date(2026, 3, 2, 10, 0, 0, 0, newYork),
+		RecurrenceDates: []time.Time{time.Date(2026, 3, 9, 9, 0, 0, 0, newYork), time.Date(2026, 3, 16, 9, 0, 0, 0, london)},
+		ExceptionDates:  []time.Time{time.Date(2026, 3, 23, 9, 0, 0, 0, newYork)},
+	}
+	_, generated, err := Generate(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range []string{"RDATE;TZID=America/New_York:20260309T090000", "RDATE;TZID=Europe/London:20260316T090000", "EXDATE;TZID=America/New_York:20260323T090000"} {
+		if !strings.Contains(generated, line) {
+			t.Fatalf("generated calendar is missing %q:\n%s", line, generated)
+		}
+	}
+}
+
 func TestFilename(t *testing.T) {
 	if got := Filename(model.Event{Title: "Team Planning / Q3"}); got != "team-planning-q3.ics" {
 		t.Fatalf("Filename returned %q", got)

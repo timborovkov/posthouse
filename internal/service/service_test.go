@@ -864,6 +864,26 @@ func TestCompleteMailRefreshRemovesAbsentUIDs(t *testing.T) {
 	}
 }
 
+func TestOlderMailTraversalRetainsMessagesBeyondUIDSnapshot(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	application := serviceWithConnections(t, mailConnection("work"))
+	application.now = func() time.Time { return instant(14) }
+	options := postmail.SearchOptions{Since: instant(8), MaxUIDExclusive: 4}
+	newer := model.Message{ConnectionID: "work", Folder: "INBOX", UID: 4, ReceivedAt: instant(13)}
+	old := model.Message{ConnectionID: "work", Folder: "INBOX", UID: 2, ReceivedAt: instant(11)}
+	if err := application.cacheMailResult("work", "INBOX", "newer request", postmail.SearchOptions{Since: instant(8)}, postmail.SearchResult{UIDValidity: 1, UIDNext: 5, Messages: []model.Message{newer, old}}); err != nil {
+		t.Fatal(err)
+	}
+	refreshed := postmail.SearchResult{UIDValidity: 1, UIDNext: 4, Messages: []model.Message{{ConnectionID: "work", Folder: "INBOX", UID: 3, ReceivedAt: instant(12)}}}
+	if err := application.cacheMailResult("work", "INBOX", "older traversal", options, refreshed); err != nil {
+		t.Fatal(err)
+	}
+	result, ok := application.cachedMailResult("work", "INBOX", "different scope", postmail.SearchOptions{Since: instant(8)}, mailCursorState{}, 10)
+	if !ok || messageUIDs(result.Messages) != "work:4,work:3" {
+		t.Fatalf("older traversal removed newer cached mail: %#v, %v", result, ok)
+	}
+}
+
 func TestDefaultFolderChangeDoesNotReuseOldScopedMailCache(t *testing.T) {
 	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
 	connection := mailConnection("work")
@@ -1062,6 +1082,7 @@ func TestPreserveCollectionReadOnlyPolicy(t *testing.T) {
 }
 
 func TestMergeDiscoveryUsesCanonicalIDAndLatestCollectionPolicies(t *testing.T) {
+	t.Setenv("CALENDAR_PASSWORD", "test-password")
 	original := model.Connection{
 		ID: "work", Name: "Original",
 		Calendar: &model.CalendarConfig{
@@ -1079,7 +1100,11 @@ func TestMergeDiscoveryUsesCanonicalIDAndLatestCollectionPolicies(t *testing.T) 
 	discoveredCalendar := *original.Calendar
 	discoveredCalendar.Collections = []model.CalendarCollection{{ID: "team", Name: "Discovered", Path: "/team/"}}
 	discovered.Calendar = &discoveredCalendar
-	updatedConfig, updated, err := mergeDiscoveredConnection(model.Config{Connections: []model.Connection{latest}}, original.ID, providerConfigID(original), discovered)
+	_, providerID, err := resolveDiscoveryConnection(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updatedConfig, updated, err := mergeDiscoveredConnection(model.Config{Connections: []model.Connection{latest}}, original.ID, providerID, discovered)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1088,6 +1113,21 @@ func TestMergeDiscoveryUsesCanonicalIDAndLatestCollectionPolicies(t *testing.T) 
 	}
 	if updatedConfig.Connections[0].Name != updated.Name || !updatedConfig.Connections[0].Calendar.Collections[0].ReadOnly {
 		t.Fatalf("persisted discovery = %#v, returned %#v", updatedConfig.Connections[0], updated)
+	}
+}
+
+func TestMergeDiscoveryRejectsResolvedProviderSecretRotation(t *testing.T) {
+	connection := mailConnection("work")
+	connection.Mail.Secret = model.SecretRef{Env: "WORK_PASSWORD"}
+	connection.Mail.IMAP.Address = "localhost:3143"
+	t.Setenv("WORK_PASSWORD", "provider-a")
+	_, providerID, err := resolveDiscoveryConnection(connection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("WORK_PASSWORD", "provider-b")
+	if _, _, err := mergeDiscoveredConnection(model.Config{Connections: []model.Connection{connection}}, connection.ID, providerID, connection); err == nil || !strings.Contains(err.Error(), "changed during discovery") {
+		t.Fatalf("rotated provider secret returned %v", err)
 	}
 }
 

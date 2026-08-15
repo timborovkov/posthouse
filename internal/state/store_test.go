@@ -373,6 +373,39 @@ func TestPreparedOperationsRespectStateLimit(t *testing.T) {
 	}
 }
 
+func TestPreparedOperationReservesCompletionCapacity(t *testing.T) {
+	store, err := state.OpenWithKey(filepath.Join(t.TempDir(), "state.db"), 8<<10, bytesOf(8, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	if err := store.Put(ctx, state.CacheEntry{Namespace: "message_body", Key: "evictable", Kind: "message_body", Value: bytes.Repeat([]byte("c"), 4<<10)}); err != nil {
+		t.Fatal(err)
+	}
+	prepared := model.PreparedOperation{Token: "reserved-result", Kind: "calendar.update", ConnectionID: "work", CreatedAt: time.Now(), ExpiresAt: time.Now().Add(time.Minute), Status: "prepared"}
+	record := state.OperationRecord{Public: prepared, Payload: json.RawMessage(`{"title":"small"}`), Digest: "digest"}
+	if err := store.PutOperation(ctx, record); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := store.Get(ctx, "message_body", "evictable", true); err != nil || found {
+		t.Fatalf("completion reservation did not evict cache: found=%v err=%v", found, err)
+	}
+	claimed, won, err := store.ClaimOperation(ctx, prepared.Token)
+	if err != nil || !won {
+		t.Fatalf("ClaimOperation won=%v err=%v", won, err)
+	}
+	claimed.Public.Status = "succeeded"
+	claimed.Public.Result = map[string]any{"event": map[string]any{"title": "small", "href": "/event.ics"}}
+	if err := store.CompleteOperation(ctx, claimed); err != nil {
+		t.Fatal(err)
+	}
+	stats, err := store.Stats(ctx)
+	if err != nil || stats.Bytes > stats.MaxBytes {
+		t.Fatalf("completed operation exceeded capacity: %#v err=%v", stats, err)
+	}
+}
+
 func TestWrongKeyFailsWhenOpeningState(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.db")
 	store, err := state.OpenWithKey(path, 2<<20, bytesOf(1, 32))

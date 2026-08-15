@@ -641,15 +641,7 @@ func Generate(event model.Event) (model.Event, string, error) {
 		lines = append(lines, "RRULE:"+event.RecurrenceRule)
 	}
 	if len(event.RecurrenceDates) > 0 {
-		values := make([]string, len(event.RecurrenceDates))
-		for index, value := range event.RecurrenceDates {
-			_, values[index] = formatRecurrenceTime("RDATE", value, event.AllDay)
-		}
-		key := "RDATE"
-		if event.AllDay {
-			key += ";VALUE=DATE"
-		}
-		lines = append(lines, key+":"+strings.Join(values, ","))
+		lines = append(lines, formatRecurrenceLines("RDATE", event.RecurrenceDates, event.AllDay)...)
 	}
 	if len(event.RecurrencePeriods) > 0 {
 		values := make([]string, len(event.RecurrencePeriods))
@@ -662,15 +654,7 @@ func Generate(event model.Event) (model.Event, string, error) {
 		lines = append(lines, "RDATE;VALUE=PERIOD:"+strings.Join(values, ","))
 	}
 	if len(event.ExceptionDates) > 0 {
-		values := make([]string, len(event.ExceptionDates))
-		for index, value := range event.ExceptionDates {
-			_, values[index] = formatRecurrenceTime("EXDATE", value, event.AllDay)
-		}
-		key := "EXDATE"
-		if event.AllDay {
-			key += ";VALUE=DATE"
-		}
-		lines = append(lines, key+":"+strings.Join(values, ","))
+		lines = append(lines, formatRecurrenceLines("EXDATE", event.ExceptionDates, event.AllDay)...)
 	}
 	if event.Sequence > 0 {
 		lines = append(lines, fmt.Sprintf("SEQUENCE:%d", event.Sequence))
@@ -831,6 +815,23 @@ func formatRecurrenceTime(name string, value time.Time, allDay bool) (string, st
 		return name + ";TZID=" + timezone, value.Format("20060102T150405")
 	}
 	return name, value.UTC().Format("20060102T150405Z")
+}
+
+func formatRecurrenceLines(name string, values []time.Time, allDay bool) []string {
+	groups := make(map[string][]string)
+	keys := make([]string, 0, len(values))
+	for _, value := range values {
+		key, formatted := formatRecurrenceTime(name, value, allDay)
+		if _, exists := groups[key]; !exists {
+			keys = append(keys, key)
+		}
+		groups[key] = append(groups[key], formatted)
+	}
+	lines := make([]string, 0, len(keys))
+	for _, key := range keys {
+		lines = append(lines, key+":"+strings.Join(groups[key], ","))
+	}
+	return lines
 }
 
 func formatTZID(location *time.Location) (string, bool) {

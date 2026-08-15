@@ -1802,7 +1802,10 @@ func (s *Service) DiscoverConnection(ctx context.Context, id string) (model.Conn
 		return model.Connection{}, err
 	}
 	resolvedID := connection.ID
-	providerID := providerConfigID(connection)
+	connection, providerID, err := resolveDiscoveryConnection(connection)
+	if err != nil {
+		return model.Connection{}, fmt.Errorf("resolve discovery provider: %w", err)
+	}
 	if connection.Mail != nil && connection.Mail.IMAP.Address != "" {
 		discovery, err := postmail.DiscoverContext(ctx, connection)
 		if err != nil {
@@ -1835,7 +1838,8 @@ func mergeDiscoveredConnection(current model.Config, resolvedID, providerID stri
 		if latest.ID != resolvedID {
 			continue
 		}
-		if providerConfigID(latest) != providerID {
+		_, latestProviderID, err := resolveDiscoveryConnection(latest)
+		if err != nil || latestProviderID != providerID {
 			return model.Config{}, model.Connection{}, fmt.Errorf("connection %s changed during discovery; run discovery again", resolvedID)
 		}
 		updated := latest
@@ -1853,6 +1857,33 @@ func mergeDiscoveredConnection(current model.Config, resolvedID, providerID stri
 		return current, updated, nil
 	}
 	return model.Config{}, model.Connection{}, fmt.Errorf("connection %s was removed during discovery", resolvedID)
+}
+
+func resolveDiscoveryConnection(connection model.Connection) (model.Connection, string, error) {
+	resolved := connection
+	values := make([]string, 0, 3)
+	if connection.Mail != nil && connection.Mail.IMAP.Address != "" {
+		var err error
+		resolved, err = resolveMailConnection(resolved)
+		if err != nil {
+			return connection, "", err
+		}
+		values = append(values, resolved.Mail.ResolvedSecret)
+	}
+	if connection.Calendar != nil && connection.Calendar.Kind == "caldav" {
+		var err error
+		resolved, err = resolveCalendarConnection(resolved)
+		if err != nil {
+			return connection, "", err
+		}
+		values = append(values, resolved.Calendar.ResolvedURL, resolved.Calendar.ResolvedSecret)
+	}
+	parts := []string{providerConfigID(connection)}
+	for _, value := range values {
+		digest := sha256.Sum256([]byte(value))
+		parts = append(parts, hex.EncodeToString(digest[:]))
+	}
+	return resolved, framedCacheKey(parts...), nil
 }
 
 func preserveCollectionPolicies(existing, discovered []model.CalendarCollection) []model.CalendarCollection {
@@ -2071,7 +2102,9 @@ func (s *Service) cacheMailResultWithID(connection model.Connection, cacheID, fo
 		if found && json.Unmarshal(current, &existing) == nil && existing.UIDValidity == result.UIDValidity {
 			if !result.HasMore && strings.TrimSpace(options.Query) == "" && !options.Unread {
 				kept := existing
-				kept.Messages = slices.DeleteFunc(kept.Messages, func(message model.Message) bool { return matchesCachedMessage(message, options) })
+				kept.Messages = slices.DeleteFunc(kept.Messages, func(message model.Message) bool {
+					return (options.MaxUIDExclusive == 0 || message.UID < options.MaxUIDExclusive) && matchesCachedMessage(message, options)
+				})
 				index = mergeMailResults(kept, combined)
 			} else {
 				index = mergeMailResults(existing, result)

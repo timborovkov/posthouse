@@ -28,11 +28,12 @@ import (
 )
 
 const (
-	keyringService       = "posthouse.cache"
-	legacyKeyringService = "posthouse"
-	cacheKeyName         = "cache-master-key"
-	rekeyRecoveryName    = "rekey-recovery"
-	chunkSize            = 1 << 20
+	keyringService              = "posthouse.cache"
+	legacyKeyringService        = "posthouse"
+	cacheKeyName                = "cache-master-key"
+	rekeyRecoveryName           = "rekey-recovery"
+	chunkSize                   = 1 << 20
+	operationCompletionOverhead = 4 << 10
 )
 
 var (
@@ -220,7 +221,7 @@ func (s *Store) migrate(ctx context.Context) error {
 		`CREATE TABLE IF NOT EXISTS operations (
 			token_hash BLOB PRIMARY KEY, kind TEXT NOT NULL, connection_id TEXT NOT NULL,
 			created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, executed_at INTEGER NOT NULL DEFAULT 0,
-			status TEXT NOT NULL, ciphertext BLOB NOT NULL
+			status TEXT NOT NULL, ciphertext BLOB NOT NULL, reserved_bytes INTEGER NOT NULL DEFAULT 0
 		)`,
 		`CREATE TABLE IF NOT EXISTS state_meta (
 			name TEXT PRIMARY KEY, ciphertext BLOB NOT NULL
@@ -243,6 +244,43 @@ func (s *Store) migrate(ctx context.Context) error {
 			case <-timer.C:
 			}
 		}
+	}
+	if err := s.ensureOperationReservationColumn(ctx); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Store) ensureOperationReservationColumn(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(operations)`)
+	if err != nil {
+		return fmt.Errorf("inspect operation schema: %w", err)
+	}
+	found := false
+	for rows.Next() {
+		var cid, notNull, primaryKey int
+		var name, dataType string
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &dataType, &notNull, &defaultValue, &primaryKey); err != nil {
+			rows.Close()
+			return fmt.Errorf("inspect operation column: %w", err)
+		}
+		found = found || name == "reserved_bytes"
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("inspect operation schema: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("inspect operation schema: %w", err)
+	}
+	if !found {
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE operations ADD COLUMN reserved_bytes INTEGER NOT NULL DEFAULT 0`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return fmt.Errorf("add operation reservation column: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `UPDATE operations SET reserved_bytes=CASE WHEN status IN ('prepared','executing') THEN 2*length(ciphertext)+? ELSE length(ciphertext) END WHERE reserved_bytes=0`, operationCompletionOverhead); err != nil {
+		return fmt.Errorf("initialize operation reservations: %w", err)
 	}
 	return nil
 }
@@ -454,7 +492,7 @@ func (s *Store) Stats(ctx context.Context) (Stats, error) {
 		return Stats{}, fmt.Errorf("read cache status: %w", err)
 	}
 	var operationBytes int64
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(SUM(length(ciphertext)),0) FROM operations`).Scan(&stats.Operations, &operationBytes); err != nil {
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(SUM(reserved_bytes),0) FROM operations`).Scan(&stats.Operations, &operationBytes); err != nil {
 		return Stats{}, fmt.Errorf("read operation status: %w", err)
 	}
 	stats.Bytes += operationBytes
@@ -538,14 +576,15 @@ func (s *Store) PutOperation(ctx context.Context, record OperationRecord) error 
 		return fmt.Errorf("purge expired prepared operations: %w", err)
 	}
 	var operationBytes int64
-	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(SUM(length(ciphertext)),0) FROM operations`).Scan(&operationBytes); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(SUM(reserved_bytes),0) FROM operations`).Scan(&operationBytes); err != nil {
 		return fmt.Errorf("measure prepared operations: %w", err)
 	}
-	if operationBytes+int64(len(ciphertext)) > s.maxBytes {
+	reservation := int64(2*len(ciphertext) + operationCompletionOverhead)
+	if operationBytes+reservation > s.maxBytes {
 		return fmt.Errorf("encrypted state exceeds configured %d-byte limit", s.maxBytes)
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO operations(token_hash,kind,connection_id,created_at,expires_at,executed_at,status,ciphertext) VALUES(?,?,?,?,?,?,?,?)`,
-		tokenHash[:], record.Public.Kind, record.Public.ConnectionID, record.Public.CreatedAt.Unix(), record.Public.ExpiresAt.Unix(), 0, record.Public.Status, ciphertext)
+	_, err = tx.ExecContext(ctx, `INSERT INTO operations(token_hash,kind,connection_id,created_at,expires_at,executed_at,status,ciphertext,reserved_bytes) VALUES(?,?,?,?,?,?,?,?,?)`,
+		tokenHash[:], record.Public.Kind, record.Public.ConnectionID, record.Public.CreatedAt.Unix(), record.Public.ExpiresAt.Unix(), 0, record.Public.Status, ciphertext, reservation)
 	if err != nil {
 		return fmt.Errorf("store prepared operation: %w", err)
 	}
@@ -608,12 +647,6 @@ func (s *Store) updateOperation(ctx context.Context, record OperationRecord, exp
 	if err != nil {
 		return err
 	}
-	query := `UPDATE operations SET status=?,executed_at=?,ciphertext=? WHERE token_hash=?`
-	arguments := []any{record.Public.Status, record.Public.ExecutedAt.Unix(), ciphertext, tokenHash[:]}
-	if expectedStatus != "" {
-		query += ` AND status=?`
-		arguments = append(arguments, expectedStatus)
-	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin prepared operation update: %w", err)
@@ -621,6 +654,33 @@ func (s *Store) updateOperation(ctx context.Context, record OperationRecord, exp
 	defer tx.Rollback()
 	if err := s.lockAndVerifyKey(ctx, tx); err != nil {
 		return err
+	}
+	var existingReservation int64
+	if err := tx.QueryRowContext(ctx, `SELECT reserved_bytes FROM operations WHERE token_hash=?`, tokenHash[:]).Scan(&existingReservation); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("prepared operation does not exist")
+		}
+		return fmt.Errorf("read prepared operation reservation: %w", err)
+	}
+	if int64(len(ciphertext)) > existingReservation {
+		return fmt.Errorf("operation result exceeds its reserved encrypted state capacity")
+	}
+	reservation := existingReservation
+	if record.Public.Status != "prepared" && record.Public.Status != "executing" {
+		reservation = int64(len(ciphertext))
+	}
+	var otherReservations int64
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(SUM(reserved_bytes),0) FROM operations WHERE token_hash<>?`, tokenHash[:]).Scan(&otherReservations); err != nil {
+		return fmt.Errorf("measure operation reservations: %w", err)
+	}
+	if otherReservations+reservation > s.maxBytes {
+		return fmt.Errorf("encrypted state exceeds configured %d-byte limit", s.maxBytes)
+	}
+	query := `UPDATE operations SET status=?,executed_at=?,ciphertext=?,reserved_bytes=? WHERE token_hash=?`
+	arguments := []any{record.Public.Status, record.Public.ExecutedAt.Unix(), ciphertext, reservation, tokenHash[:]}
+	if expectedStatus != "" {
+		query += ` AND status=?`
+		arguments = append(arguments, expectedStatus)
 	}
 	result, err := tx.ExecContext(ctx, query, arguments...)
 	if err != nil {

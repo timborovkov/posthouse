@@ -410,34 +410,27 @@ func mergeUpdatedEvent(existing []byte, replacement, recurrenceID string) (strin
 }
 
 func preserveEventTimezone(current, replacement *ics.VEvent, locations map[string]*time.Location) error {
-	start := current.GetProperty(ics.ComponentPropertyDtStart)
-	if start == nil || len(start.ICalParameters["TZID"]) == 0 {
-		return nil
-	}
-	timezone := strings.Trim(start.ICalParameters["TZID"][0], `"`)
-	location := locations[timezone]
-	if location == nil {
-		var err error
-		location, err = time.LoadLocation(timezone)
-		if err != nil {
-			return fmt.Errorf("load existing event TZID %s: %w", timezone, err)
-		}
-	}
 	for _, property := range []ics.ComponentProperty{ics.ComponentPropertyDtStart, ics.ComponentPropertyDtEnd} {
+		currentProperty := current.GetProperty(property)
 		replacementProperty := replacement.GetProperty(property)
-		if replacementProperty == nil || replacementProperty.GetValueType() == ics.ValueDataTypeDate {
+		if currentProperty == nil || replacementProperty == nil || replacementProperty.GetValueType() == ics.ValueDataTypeDate || len(currentProperty.ICalParameters["TZID"]) == 0 {
 			continue
+		}
+		timezone := strings.Trim(currentProperty.ICalParameters["TZID"][0], `"`)
+		location := locations[timezone]
+		if location == nil {
+			var err error
+			location, err = time.LoadLocation(timezone)
+			if err != nil {
+				return fmt.Errorf("load existing event %s TZID %s: %w", property, timezone, err)
+			}
 		}
 		instant, err := propertyTime(replacementProperty, nil)
 		if err != nil {
 			return fmt.Errorf("parse replacement %s: %w", property, err)
 		}
-		parameters := start.ICalParameters
-		if currentProperty := current.GetProperty(property); currentProperty != nil && len(currentProperty.ICalParameters["TZID"]) > 0 {
-			parameters = currentProperty.ICalParameters
-		}
 		replacementProperty.Value = instant.In(location).Format("20060102T150405")
-		replacementProperty.ICalParameters = cloneParameters(parameters)
+		replacementProperty.ICalParameters = cloneParameters(currentProperty.ICalParameters)
 	}
 	return nil
 }
