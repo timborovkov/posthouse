@@ -33,6 +33,7 @@ type Service struct {
 	mailSearch             func(model.Connection, postmail.SearchOptions) (postmail.SearchResult, error)
 	mailSearchContext      func(context.Context, model.Connection, postmail.SearchOptions) (postmail.SearchResult, error)
 	mailSnapshot           func(model.Connection, string, uint32) (postmail.MessagePrecondition, error)
+	mailSnapshotContext    func(context.Context, model.Connection, string, uint32) (postmail.MessagePrecondition, error)
 	mailAppend             func(model.Connection, string, model.SendMessage, []imap.Flag) (uint32, error)
 	mailAppendContext      func(context.Context, model.Connection, string, model.SendMessage, []imap.Flag) (uint32, error)
 	mailBuild              func(model.Connection, model.SendMessage) ([]byte, error)
@@ -51,8 +52,8 @@ type Service struct {
 func New(store *config.Store) *Service {
 	return &Service{
 		store: store, calendar: calendar.NewClient(nil), mailSearchContext: postmail.SearchContext,
-		mailSnapshot:      postmail.SnapshotMessage,
-		mailAppendContext: postmail.AppendContext, mailMarkDeletedContext: postmail.MarkDeletedContext,
+		mailSnapshotContext: postmail.SnapshotMessageContext,
+		mailAppendContext:   postmail.AppendContext, mailMarkDeletedContext: postmail.MarkDeletedContext,
 		mailBuild: postmail.BuildMessage, mailSendRawContext: postmail.SendSerializedContext, mailAppendRawContext: postmail.AppendSerializedContext,
 		now: func() time.Time { return time.Now().UTC() },
 	}
@@ -728,7 +729,7 @@ func (s *Service) PrepareMailAction(ctx context.Context, connectionID, kind stri
 	if (kind == "mail.archive" || kind == "mail.trash") && payload.Destination == "" {
 		return model.PreparedOperation{}, fmt.Errorf("connection %s has no discovered destination folder; run connection discover", connection.ID)
 	}
-	payload.Precondition, err = s.mailSnapshot(connection, payload.Folder, payload.UID)
+	payload.Precondition, err = s.snapshotMessage(ctx, connection, payload.Folder, payload.UID)
 	if err != nil {
 		return model.PreparedOperation{}, err
 	}
@@ -764,7 +765,7 @@ func (s *Service) PrepareDraft(ctx context.Context, connectionID, kind string, f
 	}
 	payload := draftPayload{Folder: folder, UID: uid, Message: message}
 	if kind != "mail.draft.create" {
-		payload.Precondition, err = s.mailSnapshot(connection, folder, uid)
+		payload.Precondition, err = s.snapshotMessage(ctx, connection, folder, uid)
 		if err != nil {
 			return model.PreparedOperation{}, err
 		}
@@ -940,9 +941,10 @@ func (s *Service) ExecuteOperation(ctx context.Context, token string) (model.Ope
 		record.Public.Status = "failed"
 		var uncertain *postmail.UncertainError
 		var uncertainAppend *postmail.UncertainAppendError
+		var uncertainMutation *postmail.UncertainMutationError
 		var uncertainCalendar *calendar.UncertainError
 		var partial *uncertainOperationError
-		if errors.As(executeErr, &uncertain) || errors.As(executeErr, &uncertainAppend) || errors.As(executeErr, &uncertainCalendar) || errors.As(executeErr, &partial) {
+		if errors.As(executeErr, &uncertain) || errors.As(executeErr, &uncertainAppend) || errors.As(executeErr, &uncertainMutation) || errors.As(executeErr, &uncertainCalendar) || errors.As(executeErr, &partial) {
 			record.Public.Status = "uncertain"
 		}
 		if record.Public.Result == nil {
@@ -1075,7 +1077,9 @@ func (s *Service) execute(ctx context.Context, connection model.Connection, kind
 			return map[string]any{"deleted": true}, nil
 		}
 		if kind == "mail.draft.update" {
-			current, err := s.mailSnapshot(connection, draft.Folder, draft.UID)
+			var current postmail.MessagePrecondition
+			var err error
+			current, err = s.snapshotMessage(ctx, connection, draft.Folder, draft.UID)
 			if err != nil || current != draft.Precondition {
 				return nil, fmt.Errorf("provider draft changed; refresh and prepare the operation again")
 			}
@@ -1123,6 +1127,13 @@ func (s *Service) execute(ctx context.Context, connection model.Connection, kind
 	default:
 		return nil, fmt.Errorf("unsupported prepared operation kind %q", kind)
 	}
+}
+
+func (s *Service) snapshotMessage(ctx context.Context, connection model.Connection, folder string, uid uint32) (postmail.MessagePrecondition, error) {
+	if s.mailSnapshot != nil {
+		return s.mailSnapshot(connection, folder, uid)
+	}
+	return s.mailSnapshotContext(ctx, connection, folder, uid)
 }
 
 func (s *Service) GetMessage(connectionID, folder string, uid uint32) (model.MessageDetail, error) {
@@ -1452,16 +1463,29 @@ func (s *Service) DiscoverConnection(ctx context.Context, id string) (model.Conn
 		connection.Mail.Folders = mergeFolders(connection.Mail.Folders, discovery.Folders)
 	}
 	if connection.Calendar != nil && connection.Calendar.Kind == "caldav" {
+		existingCollections := connection.Calendar.Collections
 		discovery, err := calendar.DiscoverCalDAV(ctx, connection)
 		if err != nil {
 			return model.Connection{}, err
 		}
-		connection.Calendar.Collections = discovery.Calendars
+		connection.Calendar.Collections = preserveCollectionPolicies(existingCollections, discovery.Calendars)
 	}
 	if err := s.UpsertConnection(connection, true); err != nil {
 		return model.Connection{}, err
 	}
 	return publicConnection(connection), nil
+}
+
+func preserveCollectionPolicies(existing, discovered []model.CalendarCollection) []model.CalendarCollection {
+	for index := range discovered {
+		for _, configured := range existing {
+			if (configured.ID != "" && strings.EqualFold(configured.ID, discovered[index].ID)) || (configured.Path != "" && configured.Path == discovered[index].Path) {
+				discovered[index].ReadOnly = configured.ReadOnly
+				break
+			}
+		}
+	}
+	return discovered
 }
 
 func (s *Service) DoctorConnection(ctx context.Context, id string) (model.DoctorResult, error) {

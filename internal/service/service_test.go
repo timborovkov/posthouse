@@ -500,6 +500,68 @@ func TestPrepareCalendarDeleteRequiresETag(t *testing.T) {
 	}
 }
 
+func TestDraftPreconditionRefreshPropagatesCancellation(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	connection := mailConnection("work")
+	connection.Mail.Folders.Drafts = "Drafts"
+	application := serviceWithConnections(t, connection)
+	precondition := postmail.MessagePrecondition{UIDValidity: 1, ModSeq: 2}
+	calls := 0
+	started := make(chan struct{})
+	application.mailSnapshotContext = func(ctx context.Context, _ model.Connection, _ string, _ uint32) (postmail.MessagePrecondition, error) {
+		calls++
+		if calls == 1 {
+			return precondition, nil
+		}
+		close(started)
+		<-ctx.Done()
+		return postmail.MessagePrecondition{}, ctx.Err()
+	}
+	prepared, err := application.PrepareDraft(context.Background(), "work", "mail.draft.update", "Drafts", 7, model.SendMessage{To: []string{"person@example.test"}, Subject: "draft", Text: "body"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { _, executeErr := application.ExecuteOperation(ctx, prepared.Token); done <- executeErr }()
+	<-started
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("draft precondition refresh ignored cancellation")
+	}
+}
+
+func TestIMAPMutationTransportLossPersistsUncertainStatus(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	connection := mailConnection("work")
+	connection.Mail.Folders.Drafts = "Drafts"
+	application := serviceWithConnections(t, connection)
+	precondition := postmail.MessagePrecondition{UIDValidity: 1, ModSeq: 2}
+	application.mailSnapshot = func(model.Connection, string, uint32) (postmail.MessagePrecondition, error) { return precondition, nil }
+	application.mailMarkDeleted = func(model.Connection, string, uint32, postmail.MessagePrecondition) error {
+		return &postmail.UncertainMutationError{Err: errors.New("connection closed")}
+	}
+	prepared, err := application.PrepareDraft(context.Background(), "work", "mail.draft.delete", "Drafts", 7, model.SendMessage{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := application.ExecuteOperation(context.Background(), prepared.Token)
+	if err == nil || result.Status != "uncertain" {
+		t.Fatalf("ExecuteOperation result=%#v error=%v", result, err)
+	}
+}
+
+func TestPreserveCollectionReadOnlyPolicy(t *testing.T) {
+	existing := []model.CalendarCollection{{ID: "team", Path: "/team/", ReadOnly: true}, {ID: "personal", Path: "/personal/"}}
+	discovered := []model.CalendarCollection{{ID: "team", Path: "/team/"}, {ID: "personal-new", Path: "/personal/"}}
+	merged := preserveCollectionPolicies(existing, discovered)
+	if !merged[0].ReadOnly || merged[1].ReadOnly {
+		t.Fatalf("preserved collections = %#v", merged)
+	}
+}
+
 func TestOfflineMessageAndAttachmentReads(t *testing.T) {
 	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
 	application := serviceWithConnections(t, mailConnection("work"))

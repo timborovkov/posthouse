@@ -238,6 +238,19 @@ func capabilities(connection model.Connection) []string {
 }
 
 func Validate(cfg model.Config) error {
+	if cfg.Cache.MaxBytes < 0 {
+		return fmt.Errorf("cache.max_bytes must be positive")
+	}
+	for name, days := range map[string]int{
+		"message_metadata_days": cfg.Cache.MessageMetadataDays,
+		"message_body_days":     cfg.Cache.MessageBodyDays,
+		"event_past_days":       cfg.Cache.EventPastDays,
+		"event_future_days":     cfg.Cache.EventFutureDays,
+	} {
+		if days < 0 {
+			return fmt.Errorf("cache.%s must be positive", name)
+		}
+	}
 	seen := make(map[string]struct{}, len(cfg.Connections))
 	for index, connection := range cfg.Connections {
 		prefix := fmt.Sprintf("connections[%d]", index)

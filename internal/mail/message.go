@@ -51,6 +51,13 @@ func (err *UncertainAppendError) Error() string {
 
 func (err *UncertainAppendError) Unwrap() error { return err.Err }
 
+type UncertainMutationError struct{ Err error }
+
+func (err *UncertainMutationError) Error() string {
+	return "IMAP mutation outcome is uncertain: " + err.Err.Error()
+}
+func (err *UncertainMutationError) Unwrap() error { return err.Err }
+
 type flagChange struct {
 	flag  imap.Flag
 	value *bool
@@ -320,10 +327,15 @@ func Discover(connection model.Connection) (Discovery, error) {
 }
 
 func SnapshotMessage(connection model.Connection, folder string, uid uint32) (MessagePrecondition, error) {
-	client, err := authenticatedIMAP(connection)
+	return SnapshotMessageContext(context.Background(), connection, folder, uid)
+}
+
+func SnapshotMessageContext(ctx context.Context, connection model.Connection, folder string, uid uint32) (MessagePrecondition, error) {
+	client, stop, err := authenticatedIMAPContext(ctx, connection)
 	if err != nil {
 		return MessagePrecondition{}, err
 	}
+	defer stop()
 	defer client.Close()
 	defer client.Logout()
 	folder = defaultFolder(connection, folder)
@@ -370,6 +382,7 @@ func SetFlagsContext(ctx context.Context, connection model.Connection, folder st
 	set := imap.UIDSetNum(imap.UID(uid))
 	changes := []flagChange{{imap.FlagSeen, seen}, {imap.FlagFlagged, flagged}}
 	modSeq := expected.ModSeq
+	mutated := false
 	for index, change := range changes {
 		flag, value := change.flag, change.value
 		if value == nil {
@@ -383,13 +396,20 @@ func SetFlagsContext(ctx context.Context, connection model.Connection, folder st
 		if modSeq == 0 {
 			storeOptions = nil
 		}
-		if err := client.Store(set, &imap.StoreFlags{Op: op, Silent: true, Flags: []imap.Flag{flag}}, storeOptions).Close(); err != nil {
-			return fmt.Errorf("update IMAP flags: %w", err)
+		if err := ctx.Err(); err != nil {
+			return err
 		}
+		if err := client.Store(set, &imap.StoreFlags{Op: op, Silent: true, Flags: []imap.Flag{flag}}, storeOptions).Close(); err != nil {
+			if mutated {
+				return &UncertainMutationError{Err: fmt.Errorf("update IMAP flags after a prior change: %w", err)}
+			}
+			return classifyMutationError("update IMAP flags", err)
+		}
+		mutated = true
 		if modSeq != 0 && hasFlagChange(changes[index+1:]) {
 			items, err := client.Fetch(set, &imap.FetchOptions{UID: true, ModSeq: true}).Collect()
 			if err != nil || len(items) != 1 {
-				return fmt.Errorf("refresh IMAP message precondition after flag update")
+				return &UncertainMutationError{Err: fmt.Errorf("refresh IMAP message precondition after flag update")}
 			}
 			modSeq = items[0].ModSeq
 		}
@@ -432,8 +452,11 @@ func MoveContext(ctx context.Context, connection model.Connection, folder string
 	if !client.Caps().Has(imap.CapMove) {
 		return fmt.Errorf("IMAP server does not advertise MOVE; refusing unsafe COPY/EXPUNGE fallback")
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if _, err := client.Move(imap.UIDSetNum(imap.UID(uid)), destination).Wait(); err != nil {
-		return fmt.Errorf("move IMAP message: %w", err)
+		return classifyMutationError("move IMAP message", err)
 	}
 	return nil
 }
@@ -515,10 +538,22 @@ func MarkDeletedContext(ctx context.Context, connection model.Connection, folder
 	if expected.ModSeq == 0 {
 		storeOptions = nil
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err := client.Store(imap.UIDSetNum(imap.UID(uid)), &imap.StoreFlags{Op: imap.StoreFlagsAdd, Silent: true, Flags: []imap.Flag{imap.FlagDeleted}}, storeOptions).Close(); err != nil {
-		return fmt.Errorf("mark IMAP draft deleted: %w", err)
+		return classifyMutationError("mark IMAP draft deleted", err)
 	}
 	return nil
+}
+
+func classifyMutationError(operation string, err error) error {
+	wrapped := fmt.Errorf("%s: %w", operation, err)
+	var statusErr *imap.Error
+	if errors.As(err, &statusErr) && (statusErr.Type == imap.StatusResponseTypeNo || statusErr.Type == imap.StatusResponseTypeBad) {
+		return wrapped
+	}
+	return &UncertainMutationError{Err: wrapped}
 }
 
 func validateSelectedMessage(client *imapclient.Client, folder string, uid uint32, uidValidity uint32, expected MessagePrecondition) error {

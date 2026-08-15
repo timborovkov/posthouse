@@ -51,6 +51,23 @@ func TestValidateRejectsRemoteCleartextSMTPAuthentication(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsNegativeCacheRetention(t *testing.T) {
+	for name, mutate := range map[string]func(*model.CacheConfig){
+		"metadata": func(cache *model.CacheConfig) { cache.MessageMetadataDays = -1 },
+		"body":     func(cache *model.CacheConfig) { cache.MessageBodyDays = -1 },
+		"past":     func(cache *model.CacheConfig) { cache.EventPastDays = -1 },
+		"future":   func(cache *model.CacheConfig) { cache.EventFutureDays = -1 },
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := model.Config{Version: 2}
+			mutate(&cfg.Cache)
+			if err := Validate(cfg); err == nil {
+				t.Fatal("Validate accepted negative retention")
+			}
+		})
+	}
+}
+
 func TestStoreRoundTripAndPermissions(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "nested", "config.json")
 	store, err := New(path)

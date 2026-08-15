@@ -71,3 +71,15 @@ func TestAppendWaitErrorDistinguishesTaggedRejection(t *testing.T) {
 		t.Fatalf("transport loss was not classified uncertain: %v", ambiguous)
 	}
 }
+
+func TestMutationErrorDistinguishesTaggedRejection(t *testing.T) {
+	rejected := classifyMutationError("move", &imap.Error{Type: imap.StatusResponseTypeNo, Text: "rejected"})
+	var uncertain *UncertainMutationError
+	if errors.As(rejected, &uncertain) {
+		t.Fatalf("tagged rejection was uncertain: %v", rejected)
+	}
+	ambiguous := classifyMutationError("move", errors.New("connection closed"))
+	if !errors.As(ambiguous, &uncertain) {
+		t.Fatalf("transport loss was not uncertain: %v", ambiguous)
+	}
+}
