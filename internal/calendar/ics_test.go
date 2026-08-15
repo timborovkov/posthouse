@@ -2,6 +2,7 @@ package calendar
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -176,6 +177,62 @@ func TestBasicAuthClientRejectsCrossOriginRequest(t *testing.T) {
 	request, _ := http.NewRequest(http.MethodGet, "https://attacker.example/item.ics", nil)
 	if _, err := client.Do(request); err == nil || called {
 		t.Fatalf("cross-origin request returned err=%v called=%v", err, called)
+	}
+}
+
+func TestCalDAVWriteTransportLossIsUncertain(t *testing.T) {
+	origin, _ := url.Parse("https://calendar.example.test/")
+	client := &basicAuthClient{origin: origin, client: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, fmt.Errorf("connection closed")
+	})}}
+	request, _ := http.NewRequest(http.MethodPut, origin.String()+"team/event.ics", strings.NewReader("calendar"))
+	_, err := doCalDAVMutation(client, request)
+	var uncertain *UncertainError
+	if !errors.As(err, &uncertain) {
+		t.Fatalf("transport loss returned %T %v", err, err)
+	}
+}
+
+func TestMergeOccurrenceResolvesEmbeddedTimezone(t *testing.T) {
+	existing := []byte(`BEGIN:VCALENDAR
+VERSION:2.0
+BEGIN:VTIMEZONE
+TZID:Custom/Tallinn
+BEGIN:DAYLIGHT
+DTSTART:19700329T030000
+RRULE:FREQ=YEARLY;BYMONTH=3;BYDAY=-1SU
+TZOFFSETFROM:+0200
+TZOFFSETTO:+0300
+END:DAYLIGHT
+BEGIN:STANDARD
+DTSTART:19701025T040000
+RRULE:FREQ=YEARLY;BYMONTH=10;BYDAY=-1SU
+TZOFFSETFROM:+0300
+TZOFFSETTO:+0200
+END:STANDARD
+END:VTIMEZONE
+BEGIN:VEVENT
+UID:series
+DTSTART;TZID=Custom/Tallinn:20260323T090000
+DTEND;TZID=Custom/Tallinn:20260323T100000
+RRULE:FREQ=WEEKLY;COUNT=3
+SUMMARY:Master
+END:VEVENT
+BEGIN:VEVENT
+UID:series
+RECURRENCE-ID;TZID=Custom/Tallinn:20260330T090000
+DTSTART;TZID=Custom/Tallinn:20260330T110000
+DTEND;TZID=Custom/Tallinn:20260330T120000
+SUMMARY:Old override
+END:VEVENT
+END:VCALENDAR`)
+	replacement := "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:series\r\nRECURRENCE-ID:20260330T060000Z\r\nDTSTART:20260330T100000Z\r\nDTEND:20260330T110000Z\r\nSUMMARY:New override\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+	merged, err := mergeOccurrence(existing, replacement, "2026-03-30T06:00:00Z")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(merged, "Old override") || strings.Count(merged, "RECURRENCE-ID") != 1 || !strings.Contains(merged, "New override") {
+		t.Fatalf("override was not replaced:\n%s", merged)
 	}
 }
 

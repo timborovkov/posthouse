@@ -258,6 +258,75 @@ func TestPreparedOperationRejectsChangedConnection(t *testing.T) {
 	}
 }
 
+func TestPreparedOperationRejectsRotatedProviderSecret(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	connection := mailConnection("work")
+	connection.Mail.SMTP = model.SMTPConfig{Address: "localhost:3025", Insecure: true}
+	application := serviceWithConnections(t, connection)
+	prepared, err := application.PrepareSend(context.Background(), model.SendMessage{ConnectionID: "work", To: []string{"person@example.test"}, Subject: "subject", Text: "body"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PASSWORD", "rotated-password")
+	if _, err := application.ExecuteOperation(context.Background(), prepared.Token); err == nil || !strings.Contains(err.Error(), "preconditions changed") {
+		t.Fatalf("ExecuteOperation error = %v", err)
+	}
+}
+
+func TestPrepareSendUsesEffectiveSMTPIdentity(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	connection := mailConnection("work")
+	connection.Mail.Username = "work@example.test"
+	connection.Mail.SMTP = model.SMTPConfig{Address: "localhost:3025", Insecure: true}
+	application := serviceWithConnections(t, connection)
+	prepared, err := application.PrepareSend(context.Background(), model.SendMessage{ConnectionID: connection.ID, To: []string{"person@example.test"}, Subject: "subject", Text: "body"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prepared.Identity.Email != connection.Mail.Username {
+		t.Fatalf("prepared identity = %#v", prepared.Identity)
+	}
+	preview, ok := prepared.Preview["acting_identity"].(model.Identity)
+	if !ok || preview.Email != connection.Mail.Username {
+		t.Fatalf("preview identity = %#v", prepared.Preview["acting_identity"])
+	}
+}
+
+func TestSearchMessagesContextCancelsProviderSearch(t *testing.T) {
+	application := serviceWithConnections(t, mailConnection("work"))
+	application.mailSearchContext = func(ctx context.Context, _ model.Connection, _ postmail.SearchOptions) (postmail.SearchResult, error) {
+		<-ctx.Done()
+		return postmail.SearchResult{}, ctx.Err()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	started := time.Now()
+	if _, err := application.SearchMessagesContext(ctx, model.Selector{}, postmail.SearchOptions{Mode: "refresh"}, 10, ""); err == nil {
+		t.Fatal("cancelled search returned no error")
+	}
+	if time.Since(started) > time.Second {
+		t.Fatal("cancelled search did not return promptly")
+	}
+}
+
+func TestFilteredEventCacheDoesNotPruneOtherCollections(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	connection := model.Connection{ID: "work", Name: "Work", Calendar: &model.CalendarConfig{Kind: "caldav", URL: "http://localhost:5232", Username: "work", Secret: model.SecretRef{Env: "CALENDAR_PASSWORD"}, Collections: []model.CalendarCollection{{ID: "team-id", Name: "Team", Path: "/team/"}, {ID: "personal-id", Name: "Personal", Path: "/personal/"}}}}
+	application := serviceWithConnections(t, connection)
+	start, end := instant(8), instant(18)
+	all := []model.Event{{ID: "team", CollectionID: "team-id", Start: instant(9), End: instant(10)}, {ID: "personal", CollectionID: "personal-id", Start: instant(11), End: instant(12)}}
+	if err := application.cacheEvents(connection.ID, "all", all, start, end, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.cacheEvents(connection.ID, "team query", all[:1], start, end, false); err != nil {
+		t.Fatal(err)
+	}
+	events, ok := application.cachedEvents(connection, "different scope", []string{"Personal"}, start, end, "")
+	if !ok || len(events) != 1 || events[0].ID != "personal" {
+		t.Fatalf("offline personal collection = %#v, %v", events, ok)
+	}
+}
+
 func TestOfflineMessageAndAttachmentReads(t *testing.T) {
 	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
 	application := serviceWithConnections(t, mailConnection("work"))
@@ -809,6 +878,8 @@ func TestReplyRecipientsPreferReplyTo(t *testing.T) {
 
 func serviceWithConnections(t *testing.T, connections ...model.Connection) *Service {
 	t.Helper()
+	t.Setenv("PASSWORD", "test-password")
+	t.Setenv("CALENDAR_PASSWORD", "test-password")
 	store, err := config.New(filepath.Join(t.TempDir(), "config.json"))
 	if err != nil {
 		t.Fatalf("config.New returned error: %v", err)

@@ -61,6 +61,25 @@ func TestEncryptedCacheAndOperationRoundTrip(t *testing.T) {
 	}
 }
 
+func TestGetPurgesExpiredEntry(t *testing.T) {
+	store, err := state.OpenWithKey(filepath.Join(t.TempDir(), "state.db"), 2<<20, bytesOf(4, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	if err := store.Put(ctx, state.CacheEntry{Namespace: "message_body", Key: "expired", Kind: "message_body", ExpiresAt: time.Now().Add(-time.Minute), Value: []byte("expired secret")}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := store.Get(ctx, "message_body", "expired", false); err != nil || ok {
+		t.Fatalf("expired Get ok=%v err=%v", ok, err)
+	}
+	status, err := store.Stats(ctx)
+	if err != nil || status.Entries != 0 {
+		t.Fatalf("expired entry was not purged: %#v, %v", status, err)
+	}
+}
+
 func TestClaimOperationRecordsExecutionStart(t *testing.T) {
 	store, err := state.OpenWithKey(filepath.Join(t.TempDir(), "state.db"), 2<<20, bytesOf(6, 32))
 	if err != nil {

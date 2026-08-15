@@ -111,16 +111,30 @@ type messageSearchInput struct {
 }
 
 type sendMessageInput struct {
-	Connection  string                  `json:"connection" jsonschema:"exact connection ID or unique name"`
-	To          []string                `json:"to"`
-	CC          []string                `json:"cc,omitempty"`
-	BCC         []string                `json:"bcc,omitempty"`
-	Subject     string                  `json:"subject"`
-	Text        string                  `json:"text"`
-	ReplyTo     string                  `json:"reply_to,omitempty"`
-	InReplyTo   string                  `json:"in_reply_to,omitempty"`
-	References  []string                `json:"references,omitempty"`
-	Attachments []model.AttachmentInput `json:"attachments,omitempty"`
+	Connection  string               `json:"connection" jsonschema:"exact connection ID or unique name"`
+	To          []string             `json:"to"`
+	CC          []string             `json:"cc,omitempty"`
+	BCC         []string             `json:"bcc,omitempty"`
+	Subject     string               `json:"subject"`
+	Text        string               `json:"text"`
+	ReplyTo     string               `json:"reply_to,omitempty"`
+	InReplyTo   string               `json:"in_reply_to,omitempty"`
+	References  []string             `json:"references,omitempty"`
+	Attachments []mcpAttachmentInput `json:"attachments,omitempty"`
+}
+
+type mcpAttachmentInput struct {
+	Name        string `json:"name"`
+	ContentType string `json:"content_type,omitempty"`
+	Data        []byte `json:"data" jsonschema:"base64-encoded attachment bytes"`
+}
+
+func mcpAttachments(inputs []mcpAttachmentInput) []model.AttachmentInput {
+	result := make([]model.AttachmentInput, len(inputs))
+	for index, input := range inputs {
+		result[index] = model.AttachmentInput{Name: input.Name, ContentType: input.ContentType, Data: input.Data}
+	}
+	return result
 }
 
 type messageReplyInput struct {
@@ -136,11 +150,27 @@ type messageForwardInput struct {
 }
 
 type messageDraftInput struct {
-	Connection string            `json:"connection"`
-	Action     string            `json:"action" jsonschema:"create, update, or delete"`
-	Folder     string            `json:"folder,omitempty"`
-	UID        uint32            `json:"uid,omitempty"`
-	Message    model.SendMessage `json:"message,omitempty"`
+	Connection string          `json:"connection"`
+	Action     string          `json:"action" jsonschema:"create, update, or delete"`
+	Folder     string          `json:"folder,omitempty"`
+	UID        uint32          `json:"uid,omitempty"`
+	Message    mcpDraftMessage `json:"message,omitempty"`
+}
+
+type mcpDraftMessage struct {
+	To          []string             `json:"to,omitempty"`
+	CC          []string             `json:"cc,omitempty"`
+	BCC         []string             `json:"bcc,omitempty"`
+	Subject     string               `json:"subject,omitempty"`
+	Text        string               `json:"text,omitempty"`
+	ReplyTo     string               `json:"reply_to,omitempty"`
+	InReplyTo   string               `json:"in_reply_to,omitempty"`
+	References  []string             `json:"references,omitempty"`
+	Attachments []mcpAttachmentInput `json:"attachments,omitempty"`
+}
+
+func (input mcpDraftMessage) model() model.SendMessage {
+	return model.SendMessage{To: input.To, CC: input.CC, BCC: input.BCC, Subject: input.Subject, Text: input.Text, ReplyTo: input.ReplyTo, InReplyTo: input.InReplyTo, References: input.References, Attachments: mcpAttachments(input.Attachments)}
 }
 
 type operationOutput struct {
@@ -241,7 +271,7 @@ func (s *Server) registerTools() {
 		})
 
 	mcp.AddTool(s.mcp, &mcp.Tool{Name: "messages_search", Title: "Search messages", Description: "List or search messages across selected IMAP connections, up to 100 per page. Pass next_cursor back unchanged with identical filters; cursors validate each mailbox UID namespace.", Annotations: readOnly},
-		func(_ context.Context, _ *mcp.CallToolRequest, input messageSearchInput) (*mcp.CallToolResult, model.MessagePage, error) {
+		func(ctx context.Context, _ *mcp.CallToolRequest, input messageSearchInput) (*mcp.CallToolResult, model.MessagePage, error) {
 			since, err := optionalTime(input.Since)
 			if err != nil {
 				return nil, model.MessagePage{}, fmt.Errorf("since: %w", err)
@@ -253,13 +283,13 @@ func (s *Server) registerTools() {
 			if input.Mode != "" && input.Mode != "offline" && input.Mode != "refresh" {
 				return nil, model.MessagePage{}, fmt.Errorf("mode must be offline or refresh")
 			}
-			page, err := s.service.SearchMessages(input.selector(), postmail.SearchOptions{Folder: input.Folder, Query: input.Query, Since: since, Before: before, Unread: input.Unread, Mode: input.Mode}, input.PageSize, input.Cursor)
+			page, err := s.service.SearchMessagesContext(ctx, input.selector(), postmail.SearchOptions{Folder: input.Folder, Query: input.Query, Since: since, Before: before, Unread: input.Unread, Mode: input.Mode}, input.PageSize, input.Cursor)
 			return nil, page, err
 		})
 
 	mcp.AddTool(s.mcp, &mcp.Tool{Name: "messages_send_prepare", Title: "Prepare message send", Description: "Prepare a plain-text email with optional attachments through exactly one SMTP connection. Returns a ten-minute opaque token and exact side-effect preview; no message is sent until operation_execute is called.", Annotations: readOnly},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input sendMessageInput) (*mcp.CallToolResult, model.PreparedOperation, error) {
-			prepared, err := s.service.PrepareSend(ctx, model.SendMessage{ConnectionID: input.Connection, To: input.To, CC: input.CC, BCC: input.BCC, Subject: input.Subject, Text: input.Text, ReplyTo: input.ReplyTo, InReplyTo: input.InReplyTo, References: input.References, Attachments: input.Attachments})
+			prepared, err := s.service.PrepareSend(ctx, model.SendMessage{ConnectionID: input.Connection, To: input.To, CC: input.CC, BCC: input.BCC, Subject: input.Subject, Text: input.Text, ReplyTo: input.ReplyTo, InReplyTo: input.InReplyTo, References: input.References, Attachments: mcpAttachments(input.Attachments)})
 			return nil, prepared, err
 		})
 
@@ -277,7 +307,7 @@ func (s *Server) registerTools() {
 
 	mcp.AddTool(s.mcp, &mcp.Tool{Name: "messages_draft_prepare", Title: "Prepare provider draft mutation", Description: "Prepare create, update, or non-expunging delete of one provider-side draft through exactly one IMAP connection.", Annotations: readOnly},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input messageDraftInput) (*mcp.CallToolResult, model.PreparedOperation, error) {
-			prepared, err := s.service.PrepareDraft(ctx, input.Connection, "mail.draft."+input.Action, input.Folder, input.UID, input.Message)
+			prepared, err := s.service.PrepareDraft(ctx, input.Connection, "mail.draft."+input.Action, input.Folder, input.UID, input.Message.model())
 			return nil, prepared, err
 		})
 
@@ -325,7 +355,7 @@ func (s *Server) registerTools() {
 			return nil, prepared, err
 		})
 
-	mcp.AddTool(s.mcp, &mcp.Tool{Name: "events_list", Title: "List calendar events", Description: "List and search read-only ICS calendar feeds across selected connections in an optional time range, up to 500 per page. Pass next_cursor back unchanged with identical filters.", Annotations: readOnly},
+	mcp.AddTool(s.mcp, &mcp.Tool{Name: "events_list", Title: "List calendar events", Description: "List and search ICS feeds and CalDAV calendar collections across selected connections in an optional time range, up to 500 per page. Pass next_cursor back unchanged with identical filters.", Annotations: readOnly},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input eventListInput) (*mcp.CallToolResult, model.EventPage, error) {
 			start, err := optionalTime(input.Start)
 			if err != nil {

@@ -1,6 +1,7 @@
 package calendar
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
@@ -14,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	ics "github.com/arran4/golang-ical"
 	"github.com/emersion/go-webdav/caldav"
 
 	"github.com/timborovkov/posthouse/internal/config"
@@ -23,6 +25,13 @@ import (
 type ConflictError struct{ Message string }
 
 func (e *ConflictError) Error() string { return e.Message }
+
+// UncertainError reports a mutating request whose response was lost after the
+// HTTP client accepted it. Callers must inspect provider state before retrying.
+type UncertainError struct{ Err error }
+
+func (e *UncertainError) Error() string { return "CalDAV write outcome is uncertain: " + e.Err.Error() }
+func (e *UncertainError) Unwrap() error { return e.Err }
 
 type PartialError struct {
 	Errors                []model.SourceError
@@ -184,9 +193,9 @@ func PutCalDAVEvent(ctx context.Context, connection model.Connection, event mode
 		}
 		request.Header.Set("If-Match", quoteETag(event.ETag))
 	}
-	response, err := httpClient.Do(request)
+	response, err := doCalDAVMutation(httpClient, request)
 	if err != nil {
-		return model.Event{}, safeTransportError("write CalDAV event", err)
+		return model.Event{}, err
 	}
 	defer response.Body.Close()
 	if response.StatusCode == http.StatusPreconditionFailed {
@@ -223,9 +232,9 @@ func DeleteCalDAVEvent(ctx context.Context, connection model.Connection, collect
 		return err
 	}
 	request.Header.Set("If-Match", quoteETag(etag))
-	response, err := httpClient.Do(request)
+	response, err := doCalDAVMutation(httpClient, request)
 	if err != nil {
-		return safeTransportError("delete CalDAV event", err)
+		return err
 	}
 	defer response.Body.Close()
 	if response.StatusCode == http.StatusPreconditionFailed {
@@ -235,6 +244,14 @@ func DeleteCalDAVEvent(ctx context.Context, connection model.Connection, collect
 		return responseError("delete CalDAV event", response)
 	}
 	return nil
+}
+
+func doCalDAVMutation(client *basicAuthClient, request *http.Request) (*http.Response, error) {
+	response, err := client.Do(request)
+	if err != nil {
+		return nil, &UncertainError{Err: safeTransportError("perform CalDAV mutation", err)}
+	}
+	return response, nil
 }
 
 func ValidateCalDAVHref(connection model.Connection, collectionID, href string) error {
@@ -287,6 +304,14 @@ func mergeOccurrence(existing []byte, replacement, recurrenceID string) (string,
 		return "", fmt.Errorf("invalid recurrence ID: %w", err)
 	}
 	target := recurrenceTime.UTC().Format(time.RFC3339)
+	parsedCalendar, err := ics.ParseCalendar(bytes.NewReader(existing))
+	if err != nil {
+		return "", fmt.Errorf("parse existing CalDAV object: %w", err)
+	}
+	locations, err := embeddedTimezones(parsedCalendar)
+	if err != nil {
+		return "", err
+	}
 	lines := unfold(string(existing))
 	replacementLines := unfold(replacement)
 	var replacementEvent []string
@@ -328,7 +353,7 @@ func mergeOccurrence(existing []byte, replacement, recurrenceID string) (string,
 			if !ok || !strings.EqualFold(strings.Split(nameAndParams, ";")[0], "RECURRENCE-ID") {
 				continue
 			}
-			parsed, _, parseErr := parseTime(nameAndParams, value)
+			parsed, _, parseErr := parseTimeWithLocations(nameAndParams, value, locations)
 			if parseErr == nil && parsed.UTC().Format(time.RFC3339) == target {
 				matches = true
 			}

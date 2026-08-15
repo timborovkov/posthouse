@@ -46,6 +46,24 @@ func TestCalendarICSWritesSecureFileAndRefusesOverwrite(t *testing.T) {
 	}
 }
 
+func TestCalendarCancelRequiresStableID(t *testing.T) {
+	application := testCLI(t, new(bytes.Buffer))
+	err := application.Run(context.Background(), []string{"calendar", "ics", "--method", "cancel", "--title", "Planning", "--start", "2026-08-17T09:00:00Z", "--end", "2026-08-17T10:00:00Z"})
+	if err == nil || !strings.Contains(err.Error(), "requires --id") {
+		t.Fatalf("cancel without ID returned %v", err)
+	}
+}
+
+func TestMailMarkRejectsContradictoryFlags(t *testing.T) {
+	application := testCLI(t, new(bytes.Buffer))
+	for _, flags := range [][]string{{"--read", "--unread"}, {"--flagged", "--unflagged"}} {
+		args := append([]string{"mail", "mark", "--connection", "work", "--uid", "1"}, flags...)
+		if err := application.Run(context.Background(), args); err == nil || !strings.Contains(err.Error(), "unambiguous") {
+			t.Fatalf("mail mark %v returned %v", flags, err)
+		}
+	}
+}
+
 func TestHeadlessCacheRekeyReportsEnvironmentRotation(t *testing.T) {
 	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
 	t.Setenv("POSTHOUSE_CACHE_KEY_NEW", base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{1}, 32)))

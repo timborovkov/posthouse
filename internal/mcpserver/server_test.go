@@ -2,6 +2,7 @@ package mcpserver
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -52,11 +53,17 @@ func TestServerListsAndCallsReadOnlyConnectionTool(t *testing.T) {
 		t.Fatalf("ListTools returned error: %v", err)
 	}
 	names := make([]string, 0, len(listed.Tools))
-	var executeTool *mcp.Tool
+	var executeTool, sendTool, draftTool *mcp.Tool
 	for _, tool := range listed.Tools {
 		names = append(names, tool.Name)
 		if tool.Name == "operation_execute" {
 			executeTool = tool
+		}
+		if tool.Name == "messages_send_prepare" {
+			sendTool = tool
+		}
+		if tool.Name == "messages_draft_prepare" {
+			draftTool = tool
 		}
 	}
 	for _, want := range []string{"connections_list", "messages_search", "messages_get", "messages_send_prepare", "messages_reply_prepare", "messages_forward_prepare", "messages_draft_prepare", "messages_action_prepare", "events_list", "event_ics_generate", "event_create_prepare", "operation_execute", "connection_doctor", "sync", "cache_status"} {
@@ -69,6 +76,12 @@ func TestServerListsAndCallsReadOnlyConnectionTool(t *testing.T) {
 	}
 	if executeTool == nil || executeTool.Annotations == nil || executeTool.Annotations.DestructiveHint == nil || !*executeTool.Annotations.DestructiveHint || !executeTool.Annotations.IdempotentHint {
 		t.Fatalf("operation_execute annotations=%#v", executeTool)
+	}
+	for _, tool := range []*mcp.Tool{sendTool, draftTool} {
+		schema, _ := json.Marshal(tool.InputSchema)
+		if strings.Contains(string(schema), `"path"`) {
+			t.Fatalf("remote attachment schema exposes host filesystem paths: %s", schema)
+		}
 	}
 
 	result, err := clientSession.CallTool(context.Background(), &mcp.CallToolParams{Name: "connections_list", Arguments: map[string]any{"page_size": 1}})

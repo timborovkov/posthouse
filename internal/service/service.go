@@ -28,24 +28,25 @@ import (
 )
 
 type Service struct {
-	store           *config.Store
-	calendar        *calendar.Client
-	mailSearch      func(model.Connection, postmail.SearchOptions) (postmail.SearchResult, error)
-	mailSnapshot    func(model.Connection, string, uint32) (postmail.MessagePrecondition, error)
-	mailAppend      func(model.Connection, string, model.SendMessage, []imap.Flag) (uint32, error)
-	mailBuild       func(model.Connection, model.SendMessage) ([]byte, error)
-	mailSendRaw     func(model.Connection, model.SendMessage, []byte) error
-	mailAppendRaw   func(model.Connection, string, []byte, []imap.Flag) (uint32, error)
-	mailMarkDeleted func(model.Connection, string, uint32, postmail.MessagePrecondition) error
-	stateMu         sync.Mutex
-	state           *state.Store
-	stateErr        error
-	now             func() time.Time
+	store             *config.Store
+	calendar          *calendar.Client
+	mailSearch        func(model.Connection, postmail.SearchOptions) (postmail.SearchResult, error)
+	mailSearchContext func(context.Context, model.Connection, postmail.SearchOptions) (postmail.SearchResult, error)
+	mailSnapshot      func(model.Connection, string, uint32) (postmail.MessagePrecondition, error)
+	mailAppend        func(model.Connection, string, model.SendMessage, []imap.Flag) (uint32, error)
+	mailBuild         func(model.Connection, model.SendMessage) ([]byte, error)
+	mailSendRaw       func(model.Connection, model.SendMessage, []byte) error
+	mailAppendRaw     func(model.Connection, string, []byte, []imap.Flag) (uint32, error)
+	mailMarkDeleted   func(model.Connection, string, uint32, postmail.MessagePrecondition) error
+	stateMu           sync.Mutex
+	state             *state.Store
+	stateErr          error
+	now               func() time.Time
 }
 
 func New(store *config.Store) *Service {
 	return &Service{
-		store: store, calendar: calendar.NewClient(nil), mailSearch: postmail.Search,
+		store: store, calendar: calendar.NewClient(nil), mailSearchContext: postmail.SearchContext,
 		mailSnapshot: postmail.SnapshotMessage, mailAppend: postmail.Append, mailMarkDeleted: postmail.MarkDeleted,
 		mailBuild: postmail.BuildMessage, mailSendRaw: postmail.SendSerialized, mailAppendRaw: postmail.AppendSerialized,
 		now: func() time.Time { return time.Now().UTC() },
@@ -210,6 +211,10 @@ type mailCursorPosition struct {
 }
 
 func (s *Service) SearchMessages(selection model.Selector, options postmail.SearchOptions, requestedPageSize int, cursor string) (model.MessagePage, error) {
+	return s.SearchMessagesContext(context.Background(), selection, options, requestedPageSize, cursor)
+}
+
+func (s *Service) SearchMessagesContext(ctx context.Context, selection model.Selector, options postmail.SearchOptions, requestedPageSize int, cursor string) (model.MessagePage, error) {
 	pageSize, err := pagination.PageSize(requestedPageSize, 25, 100)
 	if err != nil {
 		return model.MessagePage{}, err
@@ -267,7 +272,11 @@ func (s *Service) SearchMessages(selection model.Selector, options postmail.Sear
 				err = fmt.Errorf("no cached result for this source and query")
 			}
 		} else {
-			result, err = s.mailSearch(connection, connectionOptions)
+			if s.mailSearch != nil {
+				result, err = s.mailSearch(connection, connectionOptions)
+			} else {
+				result, err = s.mailSearchContext(ctx, connection, connectionOptions)
+			}
 		}
 		if err != nil {
 			sourceError := sourceError(connection.ID, "mail_unavailable", err)
@@ -462,7 +471,7 @@ func (s *Service) ListEventsMode(ctx context.Context, selection model.Selector, 
 		partialResult := false
 		if mode == "offline" {
 			var ok bool
-			events, ok = s.cachedEvents(connection.ID, scope, selection.Collections, start, end, query)
+			events, ok = s.cachedEvents(connection, scope, selection.Collections, start, end, query)
 			if !ok {
 				err = fmt.Errorf("no cached result for this source and query")
 			}
@@ -482,7 +491,7 @@ func (s *Service) ListEventsMode(ctx context.Context, selection model.Selector, 
 		if err != nil {
 			sourceError := sourceError(connection.ID, "calendar_unavailable", err)
 			if mode != "offline" && mode != "refresh" {
-				if cached, ok := s.cachedEvents(connection.ID, scope, selection.Collections, start, end, query); ok {
+				if cached, ok := s.cachedEvents(connection, scope, selection.Collections, start, end, query); ok {
 					events = cached
 					successfulSources++
 					sourceError.Stale = true
@@ -502,7 +511,8 @@ func (s *Service) ListEventsMode(ctx context.Context, selection model.Selector, 
 			}
 		} else if mode != "offline" {
 			successfulSources++
-			if cacheErr := s.cacheEvents(connection.ID, scope, events, start, end, !partialResult); cacheErr != nil {
+			completeSnapshot := !partialResult && strings.TrimSpace(query) == "" && len(selection.Collections) == 0
+			if cacheErr := s.cacheEvents(connection.ID, scope, events, start, end, completeSnapshot); cacheErr != nil {
 				pageErrors = append(pageErrors, sourceError(connection.ID, "cache_write_failed", cacheErr))
 			}
 		} else {
@@ -898,8 +908,9 @@ func (s *Service) ExecuteOperation(ctx context.Context, token string) (model.Ope
 		record.Public.Status = "failed"
 		var uncertain *postmail.UncertainError
 		var uncertainAppend *postmail.UncertainAppendError
+		var uncertainCalendar *calendar.UncertainError
 		var partial *uncertainOperationError
-		if errors.As(executeErr, &uncertain) || errors.As(executeErr, &uncertainAppend) || errors.As(executeErr, &partial) {
+		if errors.As(executeErr, &uncertain) || errors.As(executeErr, &uncertainAppend) || errors.As(executeErr, &uncertainCalendar) || errors.As(executeErr, &partial) {
 			record.Public.Status = "uncertain"
 		}
 		if record.Public.Result == nil {
@@ -1160,7 +1171,14 @@ func (s *Service) exactConnection(id, capability string) (model.Connection, erro
 	if err != nil {
 		return model.Connection{}, err
 	}
-	return selector.One(cfg.Connections, id, capability)
+	connection, err := selector.One(cfg.Connections, id, capability)
+	if err != nil {
+		return model.Connection{}, err
+	}
+	if connection.Identity.Email == "" && connection.Mail != nil {
+		connection.Identity.Email = connection.Mail.Username
+	}
+	return connection, nil
 }
 
 func operationResult(prepared model.PreparedOperation) model.OperationResult {
@@ -1278,8 +1296,41 @@ func digestConnection(connection model.Connection) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("encode connection precondition: %w", err)
 	}
-	digest := sha256.Sum256(data)
-	return hex.EncodeToString(digest[:]), nil
+	digest := sha256.New()
+	_, _ = digest.Write(data)
+	writeSecret := func(label string, ref model.SecretRef, legacyEnv string) error {
+		if ref.Env == "" && ref.Keychain == "" && legacyEnv == "" {
+			return nil
+		}
+		var value string
+		var resolveErr error
+		if ref.Env != "" || ref.Keychain != "" {
+			value, resolveErr = config.ResolveSecret(ref)
+		} else {
+			value, resolveErr = config.Secret(legacyEnv)
+		}
+		if resolveErr != nil {
+			return fmt.Errorf("resolve %s precondition: %w", label, resolveErr)
+		}
+		_, _ = digest.Write([]byte("\x00" + label + "\x00" + value))
+		return nil
+	}
+	if connection.Mail != nil {
+		if err := writeSecret("mail.secret", connection.Mail.Secret, connection.Mail.SecretEnv); err != nil {
+			return "", err
+		}
+	}
+	if connection.Calendar != nil {
+		if err := writeSecret("calendar.url", connection.Calendar.URLSecret, connection.Calendar.URLSecretEnv); err != nil {
+			return "", err
+		}
+		if connection.Calendar.Kind == "caldav" {
+			if err := writeSecret("calendar.secret", connection.Calendar.Secret, ""); err != nil {
+				return "", err
+			}
+		}
+	}
+	return hex.EncodeToString(digest.Sum(nil)), nil
 }
 
 func attachmentPreviews(attachments []model.AttachmentInput) []map[string]any {
@@ -1426,7 +1477,7 @@ func (s *Service) Sync(ctx context.Context, selection model.Selector) (map[strin
 		mailSince := s.now().Add(-time.Duration(cacheConfig.MessageMetadataDays) * 24 * time.Hour)
 		cursor := ""
 		for {
-			page, err := s.SearchMessages(mailSelection, postmail.SearchOptions{Since: mailSince, Mode: "refresh"}, 100, cursor)
+			page, err := s.SearchMessagesContext(ctx, mailSelection, postmail.SearchOptions{Since: mailSince, Mode: "refresh"}, 100, cursor)
 			if err != nil {
 				if requestedCapability == "mail" || requestedCapability == "mail.read" {
 					return nil, err
@@ -1496,7 +1547,7 @@ func (s *Service) cacheMailResult(connectionID, folder string, scope any, result
 		return err
 	}
 	combined := result
-	if entry, ok, getErr := ledger.Get(context.Background(), "message_metadata", scopedCacheKey(connectionID, scope), true); getErr == nil && ok {
+	if entry, ok, getErr := ledger.Get(context.Background(), "message_metadata", scopedCacheKey(connectionID, scope), false); getErr == nil && ok {
 		var existing postmail.SearchResult
 		if json.Unmarshal(entry.Value, &existing) == nil && existing.UIDValidity == result.UIDValidity {
 			byUID := make(map[uint32]model.Message, len(existing.Messages)+len(result.Messages))
@@ -1532,7 +1583,7 @@ func (s *Service) cacheMailResult(connectionID, folder string, scope any, result
 	}
 	index := result
 	indexKey := mailboxCacheKey(connectionID, folder)
-	if entry, ok, getErr := ledger.Get(context.Background(), "message_metadata_index", indexKey, true); getErr == nil && ok {
+	if entry, ok, getErr := ledger.Get(context.Background(), "message_metadata_index", indexKey, false); getErr == nil && ok {
 		var existing postmail.SearchResult
 		if json.Unmarshal(entry.Value, &existing) == nil && existing.UIDValidity == result.UIDValidity {
 			index = mergeMailResults(existing, result)
@@ -1551,9 +1602,9 @@ func (s *Service) cachedMailResult(connectionID, folder string, scope any, optio
 	if err != nil {
 		return postmail.SearchResult{}, false
 	}
-	entry, ok, err := ledger.Get(context.Background(), "message_metadata", scopedCacheKey(connectionID, scope), true)
+	entry, ok, err := ledger.Get(context.Background(), "message_metadata", scopedCacheKey(connectionID, scope), false)
 	if err == nil && !ok {
-		entry, ok, err = ledger.Get(context.Background(), "message_metadata_index", mailboxCacheKey(connectionID, folder), true)
+		entry, ok, err = ledger.Get(context.Background(), "message_metadata_index", mailboxCacheKey(connectionID, folder), false)
 	}
 	if err != nil || !ok {
 		return postmail.SearchResult{}, false
@@ -1661,7 +1712,7 @@ func (s *Service) cacheEvents(connectionID string, scope any, events []model.Eve
 	}
 	scoped := append([]model.Event(nil), events...)
 	if !complete {
-		if entry, ok, getErr := ledger.Get(context.Background(), "events", scopedCacheKey(connectionID, scope), true); getErr == nil && ok {
+		if entry, ok, getErr := ledger.Get(context.Background(), "events", scopedCacheKey(connectionID, scope), false); getErr == nil && ok {
 			var existing []model.Event
 			if json.Unmarshal(entry.Value, &existing) == nil {
 				scoped = mergeEvents(existing, scoped)
@@ -1676,7 +1727,7 @@ func (s *Service) cacheEvents(connectionID string, scope any, events []model.Eve
 		return err
 	}
 	index := append([]model.Event(nil), events...)
-	if entry, ok, getErr := ledger.Get(context.Background(), "event_index", connectionID, true); getErr == nil && ok {
+	if entry, ok, getErr := ledger.Get(context.Background(), "event_index", connectionID, false); getErr == nil && ok {
 		var existing []model.Event
 		if json.Unmarshal(entry.Value, &existing) == nil {
 			if complete {
@@ -1698,15 +1749,15 @@ func (s *Service) cacheEvents(connectionID string, scope any, events []model.Eve
 	return ledger.Put(context.Background(), state.CacheEntry{Namespace: "event_index", Key: connectionID, ConnectionID: connectionID, Kind: "event", CachedAt: now, ExpiresAt: now.Add(s.eventTTL()), Value: indexData})
 }
 
-func (s *Service) cachedEvents(connectionID string, scope any, collections []string, start, end time.Time, query string) ([]model.Event, bool) {
+func (s *Service) cachedEvents(connection model.Connection, scope any, collections []string, start, end time.Time, query string) ([]model.Event, bool) {
 	ledger, err := s.ensureState()
 	if err != nil {
 		return nil, false
 	}
-	entry, ok, err := ledger.Get(context.Background(), "events", scopedCacheKey(connectionID, scope), true)
+	entry, ok, err := ledger.Get(context.Background(), "events", scopedCacheKey(connection.ID, scope), false)
 	fromIndex := false
 	if err == nil && !ok {
-		entry, ok, err = ledger.Get(context.Background(), "event_index", connectionID, true)
+		entry, ok, err = ledger.Get(context.Background(), "event_index", connection.ID, false)
 		fromIndex = ok
 	}
 	if err != nil || !ok {
@@ -1718,8 +1769,9 @@ func (s *Service) cachedEvents(connectionID string, scope any, collections []str
 	}
 	filtered := events[:0]
 	query = strings.ToLower(strings.TrimSpace(query))
+	collectionIDs := selectedCollectionIDs(connection, collections)
 	for _, event := range events {
-		if fromIndex && len(collections) > 0 && !slices.ContainsFunc(collections, func(value string) bool { return strings.EqualFold(value, event.CollectionID) }) {
+		if fromIndex && len(collectionIDs) > 0 && !slices.ContainsFunc(collectionIDs, func(value string) bool { return strings.EqualFold(value, event.CollectionID) }) {
 			continue
 		}
 		if !calendarEventOverlaps(event, start, end) {
@@ -1732,6 +1784,27 @@ func (s *Service) cachedEvents(connectionID string, scope any, collections []str
 		filtered = append(filtered, event)
 	}
 	return filtered, true
+}
+
+func selectedCollectionIDs(connection model.Connection, selected []string) []string {
+	if len(selected) == 0 || connection.Calendar == nil {
+		return selected
+	}
+	result := make([]string, 0, len(selected))
+	for _, value := range selected {
+		matched := false
+		for _, collection := range connection.Calendar.Collections {
+			if strings.EqualFold(value, collection.ID) || strings.EqualFold(value, collection.Name) {
+				result = append(result, collection.ID)
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			result = append(result, value)
+		}
+	}
+	return result
 }
 
 func mergeEvents(existing, fresh []model.Event) []model.Event {
@@ -1781,7 +1854,7 @@ func (s *Service) cachedMessage(connectionID, folder string, uid uint32) (model.
 	if !ok {
 		return model.MessageDetail{}, false
 	}
-	entry, ok, err := ledger.Get(context.Background(), "message_body", messageCacheKey(connectionID, folder, uidValidity, uid), true)
+	entry, ok, err := ledger.Get(context.Background(), "message_body", messageCacheKey(connectionID, folder, uidValidity, uid), false)
 	if err != nil || !ok {
 		return model.MessageDetail{}, false
 	}
@@ -1802,7 +1875,7 @@ func (s *Service) cachedAttachment(ctx context.Context, connectionID, folder str
 	if !ok {
 		return model.Attachment{}, nil, false
 	}
-	entry, ok, err := ledger.Get(ctx, "attachment", messageCacheKey(connectionID, folder, uidValidity, uid)+"/"+attachmentID, true)
+	entry, ok, err := ledger.Get(ctx, "attachment", messageCacheKey(connectionID, folder, uidValidity, uid)+"/"+attachmentID, false)
 	if err != nil || !ok {
 		return model.Attachment{}, nil, false
 	}
@@ -1862,7 +1935,7 @@ func (s *Service) cacheMailboxUIDValidity(ledger *state.Store, connectionID, fol
 }
 
 func (s *Service) cachedMailboxUIDValidity(ledger *state.Store, connectionID, folder string) (uint32, bool) {
-	entry, ok, err := ledger.Get(context.Background(), "mailbox_uidvalidity", mailboxCacheKey(connectionID, folder), true)
+	entry, ok, err := ledger.Get(context.Background(), "mailbox_uidvalidity", mailboxCacheKey(connectionID, folder), false)
 	if err != nil || !ok {
 		return 0, false
 	}

@@ -144,7 +144,7 @@ func (p *posthouseApp) refresh() {
 		next := snapshot{generation:generation}
 		connections, err := p.service.Connections(model.Selector{})
 		if err != nil { next.err = err.Error() } else { next.connections = connections }
-		if connectionsHaveCapability(connections,"mail.read") { messages, mailErr := p.service.SearchMessages(model.Selector{}, mail.SearchOptions{Query: query}, 100, ""); if mailErr == nil { next.messages = messages.Messages } else { next.err = appendError(next.err, mailErr) } }
+		if connectionsHaveCapability(connections,"mail.read") { messages, mailErr := p.service.SearchMessagesContext(ctx, model.Selector{}, mail.SearchOptions{Query: query}, 100, ""); if mailErr == nil { next.messages = messages.Messages } else { next.err = appendError(next.err, mailErr) } }
 		if connectionsHaveCapability(connections,"calendar.read") { events, calendarErr := p.service.ListEvents(ctx, model.Selector{}, time.Now().Add(-24*time.Hour), time.Now().Add(90*24*time.Hour), query, 500, ""); if calendarErr == nil { next.events = events.Events } else { next.err = appendError(next.err, calendarErr) } }
 		if cache, cacheErr := p.service.CacheStatus(ctx); cacheErr == nil { next.cache = fmt.Sprintf("%d entries · %.1f MiB / %.1f MiB", cache.Entries, float64(cache.Bytes)/(1<<20), float64(cache.MaxBytes)/(1<<20)) } else { next.cache = "cache unavailable: "+cacheErr.Error() }
 		if ctx.Err()!=nil { return }

@@ -301,6 +301,9 @@ func (s *Store) Get(ctx context.Context, namespace, key string, allowExpired boo
 	entry.Namespace, entry.Key = namespace, key
 	entry.CachedAt, entry.ExpiresAt = time.Unix(cachedAt, 0).UTC(), time.Unix(expiresAt, 0).UTC()
 	if !allowExpired && time.Now().After(entry.ExpiresAt) {
+		if _, err := s.db.ExecContext(ctx, `DELETE FROM cache_entries WHERE id=?`, id); err != nil {
+			return CacheEntry{}, false, fmt.Errorf("purge expired cache entry: %w", err)
+		}
 		return CacheEntry{}, false, nil
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT sequence,ciphertext FROM cache_chunks WHERE entry_id=? ORDER BY sequence`, id)

@@ -182,7 +182,7 @@ func (p *posthouseApp) refresh() {
 			next.connections = connections
 		}
 		if connectionsHaveCapability(connections, "mail.read") {
-			messages, mailErr := p.service.SearchMessages(model.Selector{}, mail.SearchOptions{Query: query}, 100, "")
+			messages, mailErr := p.service.SearchMessagesContext(ctx, model.Selector{}, mail.SearchOptions{Query: query}, 100, "")
 			if mailErr == nil {
 				next.messages = messages.Messages
 			} else {

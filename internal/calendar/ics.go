@@ -541,6 +541,10 @@ func unfold(data string) []string {
 }
 
 func parseTime(key, value string) (time.Time, bool, error) {
+	return parseTimeWithLocations(key, value, nil)
+}
+
+func parseTimeWithLocations(key, value string, locations map[string]*time.Location) (time.Time, bool, error) {
 	if strings.Contains(strings.ToUpper(key), "VALUE=DATE") || len(value) == 8 {
 		parsed, err := time.Parse("20060102", value)
 		return parsed, true, err
@@ -553,9 +557,14 @@ func parseTime(key, value string) (time.Time, bool, error) {
 	for _, parameter := range strings.Split(key, ";")[1:] {
 		name, zone, ok := strings.Cut(parameter, "=")
 		if ok && strings.EqualFold(name, "TZID") {
-			loaded, err := time.LoadLocation(strings.Trim(zone, `"`))
-			if err != nil {
-				return time.Time{}, false, fmt.Errorf("load TZID %s: %w", zone, err)
+			zone = strings.Trim(zone, `"`)
+			loaded := locations[zone]
+			if loaded == nil {
+				var err error
+				loaded, err = time.LoadLocation(zone)
+				if err != nil {
+					return time.Time{}, false, fmt.Errorf("load TZID %s: %w", zone, err)
+				}
 			}
 			location = loaded
 		}

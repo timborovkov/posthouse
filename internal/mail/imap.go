@@ -1,6 +1,7 @@
 package mail
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"slices"
@@ -41,6 +42,13 @@ type searchCandidate struct {
 }
 
 func Search(connection model.Connection, options SearchOptions) (SearchResult, error) {
+	return SearchContext(context.Background(), connection, options)
+}
+
+func SearchContext(ctx context.Context, connection model.Connection, options SearchOptions) (SearchResult, error) {
+	if err := ctx.Err(); err != nil {
+		return SearchResult{}, err
+	}
 	if connection.Mail == nil || connection.Mail.IMAP.Address == "" {
 		return SearchResult{}, fmt.Errorf("connection %s has no IMAP capability", connection.ID)
 	}
@@ -65,12 +73,27 @@ func Search(connection model.Connection, options SearchOptions) (SearchResult, e
 		return SearchResult{}, err
 	}
 	defer client.Close()
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = client.Close()
+		case <-done:
+		}
+	}()
 	if err := client.Login(connection.Mail.Username, secret).Wait(); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return SearchResult{}, ctxErr
+		}
 		return SearchResult{}, fmt.Errorf("authenticate to IMAP: %w", err)
 	}
 	defer client.Logout()
 	selected, err := client.Select(options.Folder, &imap.SelectOptions{ReadOnly: true}).Wait()
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return SearchResult{}, ctxErr
+		}
 		return SearchResult{}, fmt.Errorf("select IMAP folder %s: %w", options.Folder, err)
 	}
 	if options.ExpectedUIDValidity != 0 && selected.UIDValidity != options.ExpectedUIDValidity {
@@ -101,6 +124,9 @@ func Search(connection model.Connection, options SearchOptions) (SearchResult, e
 	if providerOrdered {
 		sortedUIDs, sortErr := client.UIDSort(&imapclient.SortOptions{SearchCriteria: criteria, SortCriteria: []imapclient.SortCriterion{{Key: imapclient.SortKeyArrival, Reverse: true}}}).Wait()
 		if sortErr != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return SearchResult{}, ctxErr
+			}
 			return SearchResult{}, fmt.Errorf("sort IMAP folder: %w", sortErr)
 		}
 		uids = make([]imap.UID, len(sortedUIDs))
@@ -110,6 +136,9 @@ func Search(connection model.Connection, options SearchOptions) (SearchResult, e
 	} else {
 		searchData, searchErr := client.UIDSearch(criteria, nil).Wait()
 		if searchErr != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return SearchResult{}, ctxErr
+			}
 			return SearchResult{}, fmt.Errorf("search IMAP folder: %w", searchErr)
 		}
 		uids = searchData.AllUIDs()
@@ -122,6 +151,9 @@ func Search(connection model.Connection, options SearchOptions) (SearchResult, e
 	}
 	candidates, err := fetchSearchCandidates(client, connection.ID, options, uids, providerOrdered)
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return SearchResult{}, ctxErr
+		}
 		return SearchResult{}, err
 	}
 	hasMore := len(candidates) > options.Limit

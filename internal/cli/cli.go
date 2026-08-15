@@ -200,7 +200,7 @@ func (c *CLI) mail(ctx context.Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		messages, err := c.service.SearchMessages(flags.selector("mail"), postmail.SearchOptions{Folder: *folder, Query: *query, Since: sinceTime, Before: beforeTime, Unread: *unread, Mode: mode}, *pageSize, *cursor)
+		messages, err := c.service.SearchMessagesContext(ctx, flags.selector("mail"), postmail.SearchOptions{Folder: *folder, Query: *query, Since: sinceTime, Before: beforeTime, Unread: *unread, Mode: mode}, *pageSize, *cursor)
 		if err != nil {
 			return err
 		}
@@ -331,7 +331,7 @@ func (c *CLI) mail(ctx context.Context, args []string) error {
 		if err := flags.Parse(args[1:]); err != nil {
 			return err
 		}
-		if *connection == "" || *uid == 0 || (*read == *unread && *flagged == *unflagged) {
+		if *connection == "" || *uid == 0 || (*read && *unread) || (*flagged && *unflagged) || (!*read && !*unread && !*flagged && !*unflagged) {
 			return fmt.Errorf("mail mark requires target and one unambiguous state change")
 		}
 		messageUID, err := checkedUID(*uid)
@@ -476,6 +476,9 @@ func (c *CLI) calendar(ctx context.Context, args []string) error {
 		}
 		if *title == "" || *start == "" || *end == "" {
 			return fmt.Errorf("calendar ics requires --title, --start, and --end")
+		}
+		if strings.EqualFold(*method, "cancel") && *id == "" {
+			return fmt.Errorf("calendar ics --method cancel requires --id")
 		}
 		startTime, err := time.Parse(time.RFC3339, *start)
 		if err != nil {
