@@ -166,3 +166,13 @@ func TestValidateRequiresFolderForAlwaysSentCopy(t *testing.T) {
 		t.Fatalf("Validate rejected configured sent-copy folder: %v", err)
 	}
 }
+
+func TestValidateRejectsDuplicateCalendarCollectionIDs(t *testing.T) {
+	cfg := model.Config{Version: 2, Connections: []model.Connection{{ID: "calendar", Name: "Calendar", Calendar: &model.CalendarConfig{
+		Kind: "caldav", URL: "https://calendar.example.test/", Username: "calendar", Secret: model.SecretRef{Env: "CALENDAR_PASSWORD"},
+		Collections: []model.CalendarCollection{{ID: "Team", Path: "/team/"}, {ID: "team", Path: "/other/"}},
+	}}}}
+	if err := Validate(cfg); err == nil || !strings.Contains(err.Error(), "duplicate collection id") {
+		t.Fatalf("Validate duplicate collections error = %v", err)
+	}
+}

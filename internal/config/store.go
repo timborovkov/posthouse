@@ -320,6 +320,17 @@ func Validate(cfg model.Config) error {
 		}
 		if connection.Calendar != nil {
 			cal := connection.Calendar
+			collectionIDs := make(map[string]struct{}, len(cal.Collections))
+			for collectionIndex, collection := range cal.Collections {
+				id := strings.ToLower(strings.TrimSpace(collection.ID))
+				if id == "" {
+					return fmt.Errorf("%s.calendar.collections[%d].id is required", prefix, collectionIndex)
+				}
+				if _, exists := collectionIDs[id]; exists {
+					return fmt.Errorf("%s.calendar has duplicate collection id %q", prefix, collection.ID)
+				}
+				collectionIDs[id] = struct{}{}
+			}
 			hasURL := strings.TrimSpace(cal.URL) != ""
 			hasSecretURL := validSecretRef(cal.URLSecret) || (cal.URLSecretEnv != "" && cal.URLSecret.Env == "" && cal.URLSecret.Keychain == "")
 			if hasURL == hasSecretURL {

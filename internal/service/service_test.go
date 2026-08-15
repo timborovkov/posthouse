@@ -373,6 +373,32 @@ func TestInFlightCalendarWriteCannotPopulateReplacementCache(t *testing.T) {
 	}
 }
 
+func TestProviderCacheIdentityUsesResolvedSecretValues(t *testing.T) {
+	connection := model.Connection{ID: "calendar", Calendar: &model.CalendarConfig{Kind: "feed", URLSecret: model.SecretRef{Env: "SECRET_CALENDAR_URL"}}}
+	t.Setenv("SECRET_CALENDAR_URL", "https://calendar-one.example.test/feed.ics")
+	first := calendarCacheID(connection)
+	if first == "" {
+		t.Fatal("resolved calendar URL produced no cache identity")
+	}
+	t.Setenv("SECRET_CALENDAR_URL", "https://calendar-two.example.test/feed.ics")
+	if second := calendarCacheID(connection); second == "" || second == first {
+		t.Fatalf("rotated calendar URL cache identity = %q, first %q", second, first)
+	}
+	t.Setenv("SECRET_CALENDAR_URL", "")
+	if unresolved := calendarCacheID(connection); unresolved != "" {
+		t.Fatalf("unresolved calendar URL cache identity = %q", unresolved)
+	}
+	mail := mailConnection("mail")
+	mail.Mail.Secret = model.SecretRef{Env: "PASSWORD"}
+	mail.Mail.SecretEnv = ""
+	t.Setenv("PASSWORD", "first-account-password")
+	firstMail := mailCacheID(mail)
+	t.Setenv("PASSWORD", "second-account-password")
+	if secondMail := mailCacheID(mail); firstMail == "" || secondMail == "" || secondMail == firstMail {
+		t.Fatalf("rotated mail credential cache identities = %q and %q", firstMail, secondMail)
+	}
+}
+
 func TestPreparedOperationRejectsRotatedProviderSecret(t *testing.T) {
 	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
 	connection := mailConnection("work")
@@ -741,7 +767,7 @@ func TestOfflineMessageAndAttachmentReads(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cacheID := providerCacheID(connection)
+	cacheID := mailCacheID(connection)
 	detail := model.MessageDetail{Message: model.Message{ConnectionID: "work", Folder: "INBOX", UID: 7, Subject: "cached"}, Text: "offline body", Attachments: []model.Attachment{{ID: "file", Name: "file.txt", ContentType: "text/plain", Size: 7}}}
 	data, _ := json.Marshal(detail)
 	ctx := context.Background()
@@ -755,7 +781,7 @@ func TestOfflineMessageAndAttachmentReads(t *testing.T) {
 		t.Fatal(err)
 	}
 	cachedAttachment, cachedContent, err := application.GetAttachmentMode(ctx, "work", "INBOX", 7, "file", "")
-	if err != nil || cachedAttachment.Stale || cachedAttachment.CachedAt.IsZero() || string(cachedContent) != "content" {
+	if err != nil || !cachedAttachment.Stale || cachedAttachment.CachedAt.IsZero() || string(cachedContent) != "content" {
 		t.Fatalf("cache-first attachment = %#v %q, %v", cachedAttachment, cachedContent, err)
 	}
 	got, err := application.GetMessageMode("work", "INBOX", 7, "offline")
@@ -802,7 +828,7 @@ func TestMailboxUIDValidityLivesAsLongAsBodyCache(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	entry, ok, err := ledger.Get(context.Background(), "mailbox_uidvalidity", mailboxCacheKey(providerCacheID(connection), "INBOX"), true)
+	entry, ok, err := ledger.Get(context.Background(), "mailbox_uidvalidity", mailboxCacheKey(mailCacheID(connection), "INBOX"), true)
 	if err != nil || !ok {
 		t.Fatalf("UIDVALIDITY cache entry = %#v, %v", entry, err)
 	}
@@ -811,15 +837,16 @@ func TestMailboxUIDValidityLivesAsLongAsBodyCache(t *testing.T) {
 	}
 }
 
-func TestLiveAttachmentCacheValidatesUIDValidityAndPreservesMetadata(t *testing.T) {
+func TestLiveAttachmentRefetchesAndOnlyFallsBackAsStale(t *testing.T) {
 	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
 	application := serviceWithConnections(t, mailConnection("work"))
 	uidValidity := uint32(11)
+	providerMissing := false
 	application.mailboxUIDValidity = func(context.Context, model.Connection, string) (uint32, error) { return uidValidity, nil }
 	fetches := 0
 	application.mailGetAttachment = func(context.Context, model.Connection, string, uint32, string) (model.Attachment, []byte, uint32, error) {
 		fetches++
-		if uidValidity == 13 {
+		if providerMissing {
 			return model.Attachment{}, nil, 0, errors.New("provider message missing")
 		}
 		attachment := model.Attachment{ID: "file", Name: "report.pdf", ContentType: "application/pdf", Inline: true, ContentID: "report"}
@@ -832,15 +859,22 @@ func TestLiveAttachmentCacheValidatesUIDValidityAndPreservesMetadata(t *testing.
 			t.Fatalf("attachment request %d = %#v %q, %v", request, attachment, data, err)
 		}
 	}
-	if fetches != 1 {
+	if fetches != 2 {
 		t.Fatalf("same-UIDVALIDITY continuation fetched provider %d times", fetches)
 	}
+	providerMissing = true
+	stale, staleData, err := application.GetAttachmentMode(ctx, "work", "INBOX", 7, "file", "")
+	if err != nil || !stale.Stale || string(staleData) != "content-11" || fetches != 3 {
+		t.Fatalf("same-UIDVALIDITY provider removal returned %#v %q after %d fetches: %v", stale, staleData, fetches, err)
+	}
+	providerMissing = false
 	uidValidity = 12
 	_, data, err := application.GetAttachmentMode(ctx, "work", "INBOX", 7, "file", "")
-	if err != nil || string(data) != "content-12" || fetches != 2 {
+	if err != nil || string(data) != "content-12" || fetches != 4 {
 		t.Fatalf("changed UIDVALIDITY returned %q after %d fetches: %v", data, fetches, err)
 	}
 	uidValidity = 13
+	providerMissing = true
 	if _, staleData, err := application.GetAttachmentMode(ctx, "work", "INBOX", 7, "file", ""); err == nil || len(staleData) != 0 {
 		t.Fatalf("confirmed UIDVALIDITY mismatch returned old bytes %q: %v", staleData, err)
 	}
@@ -874,7 +908,7 @@ func TestMessageFetchReceivesContextAndRejectsOldMailboxCache(t *testing.T) {
 	}
 	cached := model.MessageDetail{Message: model.Message{ConnectionID: "work", Folder: "INBOX", UID: 7, Subject: "old mailbox"}}
 	data, _ := json.Marshal(cached)
-	if err := ledger.Put(context.Background(), state.CacheEntry{Namespace: "message_body", Key: messageCacheKey(providerCacheID(connection), "INBOX", 11, 7), Kind: "message_body", ExpiresAt: time.Now().Add(time.Hour), Value: data}); err != nil {
+	if err := ledger.Put(context.Background(), state.CacheEntry{Namespace: "message_body", Key: messageCacheKey(mailCacheID(connection), "INBOX", 11, 7), Kind: "message_body", ExpiresAt: time.Now().Add(time.Hour), Value: data}); err != nil {
 		t.Fatal(err)
 	}
 	application.mailboxUIDValidity = func(context.Context, model.Connection, string) (uint32, error) { return 12, nil }

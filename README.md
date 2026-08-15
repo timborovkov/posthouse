@@ -192,6 +192,7 @@ The Docker suites exercise two mail identities, concurrent cross-process executi
 - Defaults: 90 days of message metadata, 30 days of bodies, events from 90 days past through 365 days future, and attachments only after explicit access.
 - Default encrypted-state limit: 2 GiB, accounting for both cache data and prepared-operation ciphertext, with LRU attachment eviction before message bodies. Old expired operation records are purged during preparation.
 - Live-first is the default; stale-cache fallback is explicit in result metadata. `--offline` never contacts providers and `--refresh` refuses stale fallback.
+- Cache namespaces are bound to canonical provider configuration plus non-reversible digests of resolved endpoint and credential secrets; unresolved identities cannot read or populate provider cache.
 - Private content never belongs in logs, connection listings, fixtures, or error bodies. Configuration files are atomically written with mode `0600`.
 - No cache is a provider backup. Clearing it removes local cached content, not provider data or the separate prepared-operation ledger.
 - Generic protocol compatibility is covered by deterministic local servers; real Fastmail/iCloud or other provider checks may be added later but do not gate v0.2.
