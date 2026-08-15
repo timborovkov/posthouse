@@ -7,11 +7,12 @@ import (
 	"net"
 	"net/url"
 	"os"
+	pathpkg "path"
 	"path/filepath"
 	"sort"
 	"strings"
-	"sync"
 
+	"github.com/timborovkov/posthouse/internal/filelock"
 	"github.com/timborovkov/posthouse/internal/model"
 	"github.com/zalando/go-keyring"
 )
@@ -25,8 +26,6 @@ const (
 type Store struct {
 	path string
 }
-
-var configUpdateLocks sync.Map
 
 func New(path string) (*Store, error) {
 	if path == "" {
@@ -110,23 +109,7 @@ func (s *Store) Update(change func(model.Config) (model.Config, error)) error {
 }
 
 func (s *Store) withConfigLock(action func() error) error {
-	if err := os.MkdirAll(filepath.Dir(s.path), 0o700); err != nil {
-		return fmt.Errorf("create config directory: %w", err)
-	}
-	value, _ := configUpdateLocks.LoadOrStore(s.path, &sync.Mutex{})
-	mutex := value.(*sync.Mutex)
-	mutex.Lock()
-	defer mutex.Unlock()
-	lock, err := os.OpenFile(s.path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		return fmt.Errorf("open config lock: %w", err)
-	}
-	defer lock.Close()
-	if err := lockConfigFile(lock); err != nil {
-		return fmt.Errorf("lock config: %w", err)
-	}
-	defer unlockConfigFile(lock)
-	return action()
+	return filelock.Exclusive(s.path+".lock", action)
 }
 
 func (s *Store) saveUnlocked(cfg model.Config) error {
@@ -383,6 +366,9 @@ func Validate(cfg model.Config) error {
 					return fmt.Errorf("%s.calendar has duplicate collection id %q", prefix, collection.ID)
 				}
 				collectionIDs[id] = struct{}{}
+				if err := validateCalDAVCollectionPath(collection.Path); err != nil {
+					return fmt.Errorf("%s.calendar.collections[%d].path %w", prefix, collectionIndex, err)
+				}
 			}
 			hasURL := strings.TrimSpace(cal.URL) != ""
 			hasSecretURL := validSecretRef(cal.URLSecret) || (cal.URLSecretEnv != "" && cal.URLSecret.Env == "" && cal.URLSecret.Keychain == "")
@@ -442,6 +428,20 @@ func validateCalendarURL(value string) error {
 		return nil
 	}
 	return fmt.Errorf("must use HTTPS, except for loopback HTTP development endpoints")
+}
+
+func validateCalDAVCollectionPath(value string) error {
+	parsed, err := url.Parse(strings.TrimSpace(value))
+	if err != nil || parsed.Path == "" || !strings.HasPrefix(parsed.Path, "/") {
+		return fmt.Errorf("must be a nonempty absolute path")
+	}
+	if parsed.Scheme != "" || parsed.Host != "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return fmt.Errorf("must not contain an origin, credentials, query, or fragment")
+	}
+	if pathpkg.Clean(parsed.Path) != strings.TrimSuffix(parsed.Path, "/") || !strings.HasSuffix(parsed.Path, "/") {
+		return fmt.Errorf("must be a clean collection directory ending in /")
+	}
+	return nil
 }
 
 func isLoopbackHostname(host string) bool {

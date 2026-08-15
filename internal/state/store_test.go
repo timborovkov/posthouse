@@ -381,6 +381,53 @@ func TestWrongKeyFailsWhenOpeningState(t *testing.T) {
 	}
 }
 
+func TestMutateSerializesReadModifyWriteAcrossStores(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	key := bytesOf(4, 32)
+	first, err := state.OpenWithKey(path, 2<<20, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	second, err := state.OpenWithKey(path, 2<<20, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	entry := state.CacheEntry{Namespace: "event_index", Key: "shared", ConnectionID: "work", Kind: "event", ExpiresAt: time.Now().Add(time.Hour)}
+	start := make(chan struct{})
+	errors := make(chan error, 2)
+	for index, store := range []*state.Store{first, second} {
+		go func(index int, store *state.Store) {
+			<-start
+			errors <- store.Mutate(context.Background(), entry, func(current []byte, found bool) ([]byte, error) {
+				var values []int
+				if found {
+					if err := json.Unmarshal(current, &values); err != nil {
+						return nil, err
+					}
+				}
+				time.Sleep(50 * time.Millisecond)
+				return json.Marshal(append(values, index))
+			})
+		}(index, store)
+	}
+	close(start)
+	for range 2 {
+		if err := <-errors; err != nil {
+			t.Fatal(err)
+		}
+	}
+	stored, ok, err := first.Get(context.Background(), entry.Namespace, entry.Key, false)
+	if err != nil || !ok {
+		t.Fatalf("Get = %#v, %v, %v", stored, ok, err)
+	}
+	var values []int
+	if err := json.Unmarshal(stored.Value, &values); err != nil || len(values) != 2 {
+		t.Fatalf("merged values = %#v, %v", values, err)
+	}
+}
+
 func bytesOf(value byte, count int) []byte {
 	result := make([]byte, count)
 	for i := range result {

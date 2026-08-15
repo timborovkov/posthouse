@@ -54,3 +54,11 @@ func TestMatchGranularCapability(t *testing.T) {
 		t.Fatalf("Match returned %#v, %v", got, err)
 	}
 }
+
+func TestOnePrefersExactIDOverAnotherConnectionName(t *testing.T) {
+	connections := []model.Connection{{ID: "work", Name: "Primary"}, {ID: "personal", Name: "WORK"}}
+	got, err := One(connections, "WoRk", "")
+	if err != nil || got.ID != "work" {
+		t.Fatalf("One returned %#v, %v", got, err)
+	}
+}

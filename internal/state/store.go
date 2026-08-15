@@ -23,6 +23,7 @@ import (
 	"modernc.org/sqlite"
 	sqlite3 "modernc.org/sqlite/lib"
 
+	"github.com/timborovkov/posthouse/internal/filelock"
 	"github.com/timborovkov/posthouse/internal/model"
 )
 
@@ -35,8 +36,15 @@ const (
 )
 
 var (
-	credentialGet = keyring.Get
-	credentialSet = keyring.Set
+	credentialGet    = keyring.Get
+	credentialSet    = keyring.Set
+	cacheKeyLockPath = func() (string, error) {
+		cacheRoot, err := os.UserCacheDir()
+		if err != nil {
+			return "", err
+		}
+		return filepath.Join(cacheRoot, "posthouse", "cache-master-key.lock"), nil
+	}
 )
 
 type Store struct {
@@ -83,7 +91,7 @@ func DefaultPath(configPath, configured string) string {
 }
 
 func Open(path string, maxBytes int64) (*Store, error) {
-	key, err := serializedMasterKey(path)
+	key, err := serializedMasterKey()
 	if err != nil {
 		return nil, err
 	}
@@ -111,36 +119,21 @@ func Open(path string, maxBytes int64) (*Store, error) {
 	return store, nil
 }
 
-func serializedMasterKey(path string) ([]byte, error) {
+func serializedMasterKey() ([]byte, error) {
 	if os.Getenv("POSTHOUSE_CACHE_KEY") != "" {
 		return masterKey()
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return nil, fmt.Errorf("create state directory: %w", err)
-	}
-	db, err := openDatabase(path)
+	lockPath, err := cacheKeyLockPath()
 	if err != nil {
-		return nil, fmt.Errorf("open state database for cache-key initialization: %w", err)
+		return nil, fmt.Errorf("find cache directory for master-key lock: %w", err)
 	}
-	defer db.Close()
-	db.SetMaxOpenConns(1)
-	connection, err := db.Conn(context.Background())
-	if err != nil {
-		return nil, fmt.Errorf("reserve cache-key initialization connection: %w", err)
-	}
-	defer connection.Close()
-	if _, err := connection.ExecContext(context.Background(), `BEGIN EXCLUSIVE`); err != nil {
-		return nil, fmt.Errorf("serialize cache-key initialization: %w", err)
-	}
-	key, keyErr := masterKey()
-	if keyErr != nil {
-		_, _ = connection.ExecContext(context.Background(), `ROLLBACK`)
-		return nil, keyErr
-	}
-	if _, err := connection.ExecContext(context.Background(), `COMMIT`); err != nil {
-		return nil, fmt.Errorf("commit cache-key initialization: %w", err)
-	}
-	return key, nil
+	var key []byte
+	err = filelock.Exclusive(lockPath, func() error {
+		var keyErr error
+		key, keyErr = masterKey()
+		return keyErr
+	})
+	return key, err
 }
 
 func recoverRekeyKey(path string, oldKey []byte) ([]byte, error) {
@@ -286,9 +279,91 @@ func (s *Store) Put(ctx context.Context, entry CacheEntry) error {
 	if err := s.lockAndVerifyKey(ctx, tx); err != nil {
 		return err
 	}
+	if err := s.putEntryTx(ctx, tx, entry); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit cache write: %w", err)
+	}
+	return s.evict(ctx)
+}
+
+// Mutate atomically reads, transforms, and replaces one encrypted cache entry.
+func (s *Store) Mutate(ctx context.Context, entry CacheEntry, transform func(current []byte, found bool) ([]byte, error)) error {
+	s.keyMu.RLock()
+	defer s.keyMu.RUnlock()
+	if entry.Namespace == "" || entry.Key == "" {
+		return fmt.Errorf("cache namespace and key are required")
+	}
+	if entry.CachedAt.IsZero() {
+		entry.CachedAt = time.Now().UTC()
+	}
+	if entry.ExpiresAt.IsZero() {
+		entry.ExpiresAt = entry.CachedAt.Add(30 * 24 * time.Hour)
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin cache mutation: %w", err)
+	}
+	defer tx.Rollback()
+	if err := s.lockAndVerifyKey(ctx, tx); err != nil {
+		return err
+	}
+	current, found, err := s.readEntryValueTx(ctx, tx, entry.Namespace, entry.Key)
+	if err != nil {
+		return err
+	}
+	entry.Value, err = transform(current, found)
+	if err != nil {
+		return err
+	}
+	if err := s.putEntryTx(ctx, tx, entry); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit cache mutation: %w", err)
+	}
+	return s.evict(ctx)
+}
+
+func (s *Store) readEntryValueTx(ctx context.Context, tx *sql.Tx, namespace, key string) ([]byte, bool, error) {
+	keyHash := cacheKeyHash(namespace, key)
+	var id, expiresAt int64
+	err := tx.QueryRowContext(ctx, `SELECT id,expires_at FROM cache_entries WHERE namespace=? AND key_hash=?`, namespace, keyHash).Scan(&id, &expiresAt)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && time.Now().Unix() > expiresAt) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("read cache entry for mutation: %w", err)
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT sequence,ciphertext FROM cache_chunks WHERE entry_id=? ORDER BY sequence`, id)
+	if err != nil {
+		return nil, false, fmt.Errorf("read cache chunks for mutation: %w", err)
+	}
+	defer rows.Close()
+	var value []byte
+	for rows.Next() {
+		var sequence int
+		var ciphertext []byte
+		if err := rows.Scan(&sequence, &ciphertext); err != nil {
+			return nil, false, fmt.Errorf("scan cache chunk for mutation: %w", err)
+		}
+		plaintext, err := open(s.key, ciphertext, chunkAAD(namespace, keyHash, sequence))
+		if err != nil {
+			return nil, false, fmt.Errorf("decrypt cache chunk for mutation: %w", err)
+		}
+		value = append(value, plaintext...)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, fmt.Errorf("iterate cache chunks for mutation: %w", err)
+	}
+	return value, true, nil
+}
+
+func (s *Store) putEntryTx(ctx context.Context, tx *sql.Tx, entry CacheEntry) error {
 	keyHash := cacheKeyHash(entry.Namespace, entry.Key)
 	var id int64
-	err = tx.QueryRowContext(ctx, `INSERT INTO cache_entries
+	err := tx.QueryRowContext(ctx, `INSERT INTO cache_entries
 		(namespace,key_hash,connection_id,kind,provider_id,cached_at,expires_at,accessed_at,size_bytes,ciphertext)
 		VALUES(?,?,?,?,?,?,?,?,?,NULL)
 		ON CONFLICT(namespace,key_hash) DO UPDATE SET connection_id=excluded.connection_id,kind=excluded.kind,
@@ -317,10 +392,7 @@ func (s *Store) Put(ctx context.Context, entry CacheEntry) error {
 			break
 		}
 	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit cache write: %w", err)
-	}
-	return s.evict(ctx)
+	return nil
 }
 
 func (s *Store) Get(ctx context.Context, namespace, key string, allowExpired bool) (CacheEntry, bool, error) {

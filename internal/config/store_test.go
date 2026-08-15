@@ -154,6 +154,26 @@ func TestValidateCalendarLiteralURLSecurity(t *testing.T) {
 	}
 }
 
+func TestValidateRequiresSafeCalDAVCollectionPath(t *testing.T) {
+	cfg := model.Config{Version: 2, Connections: []model.Connection{{
+		ID: "work", Name: "Work",
+		Calendar: &model.CalendarConfig{
+			Kind: "caldav", URL: "https://calendar.example.test/", Username: "work",
+			Secret:      model.SecretRef{Env: "CALENDAR_PASSWORD"},
+			Collections: []model.CalendarCollection{{ID: "team", Path: "/calendars/team/"}},
+		},
+	}}}
+	if err := Validate(cfg); err != nil {
+		t.Fatalf("Validate rejected safe collection path: %v", err)
+	}
+	for _, value := range []string{"", "relative/", "/calendars/../team/", "/calendars/team", "https://other.example.test/team/", "/team/?query=1", "/team/#fragment"} {
+		cfg.Connections[0].Calendar.Collections[0].Path = value
+		if err := Validate(cfg); err == nil {
+			t.Fatalf("Validate accepted collection path %q", value)
+		}
+	}
+}
+
 func TestValidateRejectsNegativeCacheRetention(t *testing.T) {
 	for name, mutate := range map[string]func(*model.CacheConfig){
 		"metadata": func(cache *model.CacheConfig) { cache.MessageMetadataDays = -1 },

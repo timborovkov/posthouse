@@ -14,8 +14,10 @@ import (
 
 func TestKeychainRekeyRecoversAfterActivationFailure(t *testing.T) {
 	t.Setenv("POSTHOUSE_CACHE_KEY", "")
-	oldGet, oldSet := credentialGet, credentialSet
-	t.Cleanup(func() { credentialGet, credentialSet = oldGet, oldSet })
+	oldGet, oldSet, oldLockPath := credentialGet, credentialSet, cacheKeyLockPath
+	t.Cleanup(func() { credentialGet, credentialSet, cacheKeyLockPath = oldGet, oldSet, oldLockPath })
+	lockPath := filepath.Join(t.TempDir(), "cache-key.lock")
+	cacheKeyLockPath = func() (string, error) { return lockPath, nil }
 	oldKey, newKey := make([]byte, 32), make([]byte, 32)
 	for index := range newKey {
 		newKey[index] = 9
@@ -73,8 +75,10 @@ func TestKeychainRekeyRecoversAfterActivationFailure(t *testing.T) {
 
 func TestConcurrentFirstOpenUsesOneKeychainKey(t *testing.T) {
 	t.Setenv("POSTHOUSE_CACHE_KEY", "")
-	oldGet, oldSet := credentialGet, credentialSet
-	t.Cleanup(func() { credentialGet, credentialSet = oldGet, oldSet })
+	oldGet, oldSet, oldLockPath := credentialGet, credentialSet, cacheKeyLockPath
+	t.Cleanup(func() { credentialGet, credentialSet, cacheKeyLockPath = oldGet, oldSet, oldLockPath })
+	lockPath := filepath.Join(t.TempDir(), "cache-key.lock")
+	cacheKeyLockPath = func() (string, error) { return lockPath, nil }
 	var mu sync.Mutex
 	secrets := make(map[string]string)
 	sets := 0
@@ -95,18 +99,19 @@ func TestConcurrentFirstOpenUsesOneKeychainKey(t *testing.T) {
 		return nil
 	}
 
-	path := filepath.Join(t.TempDir(), "posthouse.db")
+	directory := t.TempDir()
+	paths := []string{filepath.Join(directory, "one.db"), filepath.Join(directory, "two.db")}
 	start := make(chan struct{})
 	results := make(chan error, 2)
-	for range 2 {
-		go func() {
+	for _, path := range paths {
+		go func(path string) {
 			<-start
 			store, err := Open(path, 2<<20)
 			if err == nil {
 				err = store.Close()
 			}
 			results <- err
-		}()
+		}(path)
 	}
 	close(start)
 	for range 2 {

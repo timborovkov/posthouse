@@ -1,6 +1,6 @@
 //go:build darwin || dragonfly || freebsd || linux || netbsd || openbsd || solaris
 
-package config
+package filelock
 
 import (
 	"os"
@@ -8,10 +8,10 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func lockConfigFile(file *os.File) error {
+func lock(file *os.File) error {
 	return unix.Flock(int(file.Fd()), unix.LOCK_EX)
 }
 
-func unlockConfigFile(file *os.File) error {
+func unlock(file *os.File) error {
 	return unix.Flock(int(file.Fd()), unix.LOCK_UN)
 }

@@ -1,6 +1,6 @@
 //go:build windows
 
-package config
+package filelock
 
 import (
 	"os"
@@ -8,12 +8,12 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-func lockConfigFile(file *os.File) error {
+func lock(file *os.File) error {
 	var overlapped windows.Overlapped
 	return windows.LockFileEx(windows.Handle(file.Fd()), windows.LOCKFILE_EXCLUSIVE_LOCK, 0, 1, 0, &overlapped)
 }
 
-func unlockConfigFile(file *os.File) error {
+func unlock(file *os.File) error {
 	var overlapped windows.Overlapped
 	return windows.UnlockFileEx(windows.Handle(file.Fd()), 0, 1, 0, &overlapped)
 }

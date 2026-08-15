@@ -671,6 +671,14 @@ func (s *Service) PrepareSend(ctx context.Context, message model.SendMessage) (m
 	if err != nil {
 		return model.PreparedOperation{}, err
 	}
+	connection, err = resolveMailConnection(connection)
+	if err != nil {
+		return model.PreparedOperation{}, fmt.Errorf("resolve mail provider: %w", err)
+	}
+	return s.prepareSendWithConnection(ctx, connection, message)
+}
+
+func (s *Service) prepareSendWithConnection(ctx context.Context, connection model.Connection, message model.SendMessage) (model.PreparedOperation, error) {
 	if connection.Mail.SMTP.Address == "" {
 		return model.PreparedOperation{}, fmt.Errorf("connection %s cannot send mail", connection.ID)
 	}
@@ -695,13 +703,21 @@ func (s *Service) PrepareSend(ctx context.Context, message model.SendMessage) (m
 }
 
 func (s *Service) PrepareReply(ctx context.Context, connectionID, folder string, uid uint32, text string) (model.PreparedOperation, error) {
-	original, err := s.GetMessageContext(ctx, connectionID, folder, uid)
+	connection, err := s.exactConnection(connectionID, "mail.send")
+	if err != nil {
+		return model.PreparedOperation{}, err
+	}
+	connection, err = resolveMailConnection(connection)
+	if err != nil {
+		return model.PreparedOperation{}, fmt.Errorf("resolve mail provider: %w", err)
+	}
+	original, err := s.getMessageModeWithConnection(ctx, connection, folder, uid, "")
 	if err != nil {
 		return model.PreparedOperation{}, err
 	}
 	recipients := replyRecipients(original)
-	return s.PrepareSend(ctx, model.SendMessage{
-		ConnectionID: connectionID,
+	return s.prepareSendWithConnection(ctx, connection, model.SendMessage{
+		ConnectionID: connection.ID,
 		To:           recipients,
 		Subject:      prefixedSubject(original.Subject, "Re:"),
 		Text:         quotedBody(text, original.Text),
@@ -714,12 +730,20 @@ func (s *Service) PrepareForward(ctx context.Context, connectionID, folder strin
 	if len(recipients) == 0 {
 		return model.PreparedOperation{}, fmt.Errorf("forward requires at least one recipient")
 	}
-	original, err := s.GetMessageContext(ctx, connectionID, folder, uid)
+	connection, err := s.exactConnection(connectionID, "mail.send")
 	if err != nil {
 		return model.PreparedOperation{}, err
 	}
-	return s.PrepareSend(ctx, model.SendMessage{
-		ConnectionID: connectionID,
+	connection, err = resolveMailConnection(connection)
+	if err != nil {
+		return model.PreparedOperation{}, fmt.Errorf("resolve mail provider: %w", err)
+	}
+	original, err := s.getMessageModeWithConnection(ctx, connection, folder, uid, "")
+	if err != nil {
+		return model.PreparedOperation{}, err
+	}
+	return s.prepareSendWithConnection(ctx, connection, model.SendMessage{
+		ConnectionID: connection.ID,
 		To:           recipients,
 		Subject:      prefixedSubject(original.Subject, "Fwd:"),
 		Text:         quotedBody(text, original.Text),
@@ -766,6 +790,10 @@ func (s *Service) PrepareMailAction(ctx context.Context, connectionID, kind stri
 	if err != nil {
 		return model.PreparedOperation{}, err
 	}
+	connection, err = resolveMailConnection(connection)
+	if err != nil {
+		return model.PreparedOperation{}, fmt.Errorf("resolve mail provider: %w", err)
+	}
 	switch kind {
 	case "mail.mark":
 		if payload.Seen == nil && payload.Flagged == nil {
@@ -801,6 +829,10 @@ func (s *Service) PrepareDraft(ctx context.Context, connectionID, kind string, f
 	connection, err := s.exactConnection(connectionID, "mail.read")
 	if err != nil {
 		return model.PreparedOperation{}, err
+	}
+	connection, err = resolveMailConnection(connection)
+	if err != nil {
+		return model.PreparedOperation{}, fmt.Errorf("resolve mail provider: %w", err)
 	}
 	if folder == "" {
 		folder = connection.Mail.Folders.Drafts
@@ -841,6 +873,10 @@ func (s *Service) PrepareCalendarWrite(ctx context.Context, connectionID, kind s
 	connection, err := s.exactConnection(connectionID, "calendar.write")
 	if err != nil {
 		return model.PreparedOperation{}, err
+	}
+	connection, err = resolveCalendarConnection(connection)
+	if err != nil {
+		return model.PreparedOperation{}, fmt.Errorf("resolve calendar provider: %w", err)
 	}
 	if connection.Calendar.Kind != "caldav" {
 		return model.PreparedOperation{}, fmt.Errorf("connection %s calendar is read-only", connection.ID)
@@ -897,6 +933,10 @@ func (s *Service) PrepareCalendarDelete(ctx context.Context, connectionID, colle
 	if err != nil {
 		return model.PreparedOperation{}, err
 	}
+	connection, err = resolveCalendarConnection(connection)
+	if err != nil {
+		return model.PreparedOperation{}, fmt.Errorf("resolve calendar provider: %w", err)
+	}
 	if connection.Calendar.Kind != "caldav" {
 		return model.PreparedOperation{}, fmt.Errorf("connection %s calendar is read-only", connection.ID)
 	}
@@ -931,11 +971,11 @@ func (s *Service) prepare(ctx context.Context, kind string, connection model.Con
 		Token: base64.RawURLEncoding.EncodeToString(tokenBytes), Kind: kind, ConnectionID: connection.ID,
 		Identity: connection.Identity, Preview: preview, CreatedAt: now, ExpiresAt: now.Add(10 * time.Minute), Status: "prepared",
 	}
-	resolvedConnection, err := resolveProviderConnection(connection)
+	connection, err = resolveOperationConnection(connection, kind)
 	if err != nil {
 		return model.PreparedOperation{}, err
 	}
-	connectionPrecondition, err := digestResolvedConnection(resolvedConnection)
+	connectionPrecondition, err := digestOperationConnection(connection, kind)
 	if err != nil {
 		return model.PreparedOperation{}, err
 	}
@@ -990,11 +1030,11 @@ func (s *Service) ExecuteOperation(ctx context.Context, token string) (model.Ope
 	if connection.Identity != record.Public.Identity {
 		return model.OperationResult{}, fmt.Errorf("prepared operation acting identity changed; prepare it again")
 	}
-	connection, err = resolveProviderConnection(connection)
+	connection, err = resolveOperationConnection(connection, record.Public.Kind)
 	if err != nil {
 		return model.OperationResult{}, fmt.Errorf("resolve prepared operation provider: %w", err)
 	}
-	connectionPrecondition, err := digestResolvedConnection(connection)
+	connectionPrecondition, err := digestOperationConnection(connection, record.Public.Kind)
 	if err != nil || connectionPrecondition != record.Precondition {
 		return model.OperationResult{}, fmt.Errorf("prepared operation connection or provider preconditions changed; prepare it again")
 	}
@@ -1232,6 +1272,11 @@ func (s *Service) GetMessageModeContext(ctx context.Context, connectionID, folde
 	if err != nil {
 		return model.MessageDetail{}, err
 	}
+	return s.getMessageModeWithConnection(ctx, connection, folder, uid, mode)
+}
+
+func (s *Service) getMessageModeWithConnection(ctx context.Context, connection model.Connection, folder string, uid uint32, mode string) (model.MessageDetail, error) {
+	var err error
 	if folder == "" {
 		folder = connection.Mail.Folders.Inbox
 		if folder == "" {
@@ -1546,21 +1591,29 @@ func digestResolvedConnection(connection model.Connection) (string, error) {
 	return hex.EncodeToString(digest.Sum(nil)), nil
 }
 
-func resolveProviderConnection(connection model.Connection) (model.Connection, error) {
-	var err error
-	if connection.Mail != nil {
-		connection, err = resolveMailConnection(connection)
-		if err != nil {
-			return connection, fmt.Errorf("resolve mail provider: %w", err)
-		}
-	}
-	if connection.Calendar != nil {
-		connection, err = resolveCalendarConnection(connection)
+func resolveOperationConnection(connection model.Connection, kind string) (model.Connection, error) {
+	if strings.HasPrefix(kind, "calendar.") {
+		resolved, err := resolveCalendarConnection(connection)
 		if err != nil {
 			return connection, fmt.Errorf("resolve calendar provider: %w", err)
 		}
+		return resolved, nil
 	}
-	return connection, nil
+	resolved, err := resolveMailConnection(connection)
+	if err != nil {
+		return connection, fmt.Errorf("resolve mail provider: %w", err)
+	}
+	return resolved, nil
+}
+
+func digestOperationConnection(connection model.Connection, kind string) (string, error) {
+	scoped := connection
+	if strings.HasPrefix(kind, "calendar.") {
+		scoped.Mail = nil
+	} else {
+		scoped.Calendar = nil
+	}
+	return digestResolvedConnection(scoped)
 }
 
 func resolveMailConnection(connection model.Connection) (model.Connection, error) {
@@ -1663,6 +1716,7 @@ func (s *Service) DiscoverConnection(ctx context.Context, id string) (model.Conn
 	if err != nil {
 		return model.Connection{}, err
 	}
+	resolvedID := connection.ID
 	providerID := providerConfigID(connection)
 	if connection.Mail != nil && connection.Mail.IMAP.Address != "" {
 		discovery, err := postmail.DiscoverContext(ctx, connection)
@@ -1681,34 +1735,39 @@ func (s *Service) DiscoverConnection(ctx context.Context, id string) (model.Conn
 	}
 	discovered := connection
 	err = s.store.Update(func(current model.Config) (model.Config, error) {
-		for index, latest := range current.Connections {
-			if latest.ID != id {
-				continue
-			}
-			if providerConfigID(latest) != providerID {
-				return model.Config{}, fmt.Errorf("connection %s changed during discovery; run discovery again", id)
-			}
-			updated := latest
-			if discovered.Mail != nil && updated.Mail != nil {
-				mailConfig := *updated.Mail
-				mailConfig.Folders = discovered.Mail.Folders
-				updated.Mail = &mailConfig
-			}
-			if discovered.Calendar != nil && updated.Calendar != nil && discovered.Calendar.Kind == "caldav" {
-				calendarConfig := *updated.Calendar
-				calendarConfig.Collections = slices.Clone(discovered.Calendar.Collections)
-				updated.Calendar = &calendarConfig
-			}
-			current.Connections[index] = updated
-			discovered = updated
-			return current, nil
-		}
-		return model.Config{}, fmt.Errorf("connection %s was removed during discovery", id)
+		var mergeErr error
+		current, discovered, mergeErr = mergeDiscoveredConnection(current, resolvedID, providerID, discovered)
+		return current, mergeErr
 	})
 	if err != nil {
 		return model.Connection{}, err
 	}
 	return publicConnection(discovered), nil
+}
+
+func mergeDiscoveredConnection(current model.Config, resolvedID, providerID string, discovered model.Connection) (model.Config, model.Connection, error) {
+	for index, latest := range current.Connections {
+		if latest.ID != resolvedID {
+			continue
+		}
+		if providerConfigID(latest) != providerID {
+			return model.Config{}, model.Connection{}, fmt.Errorf("connection %s changed during discovery; run discovery again", resolvedID)
+		}
+		updated := latest
+		if discovered.Mail != nil && updated.Mail != nil {
+			mailConfig := *updated.Mail
+			mailConfig.Folders = discovered.Mail.Folders
+			updated.Mail = &mailConfig
+		}
+		if discovered.Calendar != nil && updated.Calendar != nil && discovered.Calendar.Kind == "caldav" {
+			calendarConfig := *updated.Calendar
+			calendarConfig.Collections = preserveCollectionPolicies(updated.Calendar.Collections, slices.Clone(discovered.Calendar.Collections))
+			updated.Calendar = &calendarConfig
+		}
+		current.Connections[index] = updated
+		return current, updated, nil
+	}
+	return model.Config{}, model.Connection{}, fmt.Errorf("connection %s was removed during discovery", resolvedID)
 }
 
 func preserveCollectionPolicies(existing, discovered []model.CalendarCollection) []model.CalendarCollection {
@@ -1920,11 +1979,11 @@ func (s *Service) cacheMailResultWithID(connection model.Connection, cacheID, fo
 			return err
 		}
 	}
-	index := result
 	indexKey := mailboxCacheKey(cacheID, folder)
-	if entry, ok, getErr := ledger.Get(context.Background(), "message_metadata_index", indexKey, false); getErr == nil && ok {
+	return ledger.Mutate(context.Background(), state.CacheEntry{Namespace: "message_metadata_index", Key: indexKey, ConnectionID: connectionID, Kind: "message_metadata", CachedAt: now, ExpiresAt: now.Add(s.messageMetadataTTL())}, func(current []byte, found bool) ([]byte, error) {
+		index := result
 		var existing postmail.SearchResult
-		if json.Unmarshal(entry.Value, &existing) == nil && existing.UIDValidity == result.UIDValidity {
+		if found && json.Unmarshal(current, &existing) == nil && existing.UIDValidity == result.UIDValidity {
 			if !result.HasMore && strings.TrimSpace(options.Query) == "" && !options.Unread {
 				kept := existing
 				kept.Messages = slices.DeleteFunc(kept.Messages, func(message model.Message) bool { return matchesCachedMessage(message, options) })
@@ -1933,15 +1992,11 @@ func (s *Service) cacheMailResultWithID(connection model.Connection, cacheID, fo
 				index = mergeMailResults(existing, result)
 			}
 		}
-	}
-	cutoff := now.Add(-s.messageMetadataTTL())
-	index.Messages = slices.DeleteFunc(index.Messages, func(message model.Message) bool { return messageTime(message).Before(cutoff) })
-	stampMessages(index.Messages, now)
-	indexData, err := json.Marshal(index)
-	if err != nil {
-		return err
-	}
-	return ledger.Put(context.Background(), state.CacheEntry{Namespace: "message_metadata_index", Key: indexKey, ConnectionID: connectionID, Kind: "message_metadata", CachedAt: now, ExpiresAt: now.Add(s.messageMetadataTTL()), Value: indexData})
+		cutoff := now.Add(-s.messageMetadataTTL())
+		index.Messages = slices.DeleteFunc(index.Messages, func(message model.Message) bool { return messageTime(message).Before(cutoff) })
+		stampMessages(index.Messages, now)
+		return json.Marshal(index)
+	})
 }
 
 func (s *Service) cachedMailResult(connectionID, folder string, scope any, options postmail.SearchOptions, cursorState mailCursorState, limit int) (postmail.SearchResult, bool) {
@@ -2106,10 +2161,10 @@ func (s *Service) cacheEventsReplacingWithID(connection model.Connection, cacheI
 	if err := ledger.Put(context.Background(), state.CacheEntry{Namespace: "events", Key: scopedCacheKey(cacheID, scope), ConnectionID: connectionID, Kind: "event", CachedAt: now, ExpiresAt: now.Add(s.eventTTL()), Value: data}); err != nil {
 		return err
 	}
-	index := append([]model.Event(nil), events...)
-	if entry, ok, getErr := ledger.Get(context.Background(), "event_index", cacheID, false); getErr == nil && ok {
+	return ledger.Mutate(context.Background(), state.CacheEntry{Namespace: "event_index", Key: cacheID, ConnectionID: connectionID, Kind: "event", CachedAt: now, ExpiresAt: now.Add(s.eventTTL())}, func(current []byte, found bool) ([]byte, error) {
+		index := append([]model.Event(nil), events...)
 		var existing []model.Event
-		if json.Unmarshal(entry.Value, &existing) == nil {
+		if found && json.Unmarshal(current, &existing) == nil {
 			if replaceIndex {
 				kept := existing[:0]
 				for _, event := range existing {
@@ -2122,12 +2177,8 @@ func (s *Service) cacheEventsReplacingWithID(connection model.Connection, cacheI
 			}
 			index = mergeEvents(existing, index)
 		}
-	}
-	indexData, err := json.Marshal(index)
-	if err != nil {
-		return err
-	}
-	return ledger.Put(context.Background(), state.CacheEntry{Namespace: "event_index", Key: cacheID, ConnectionID: connectionID, Kind: "event", CachedAt: now, ExpiresAt: now.Add(s.eventTTL()), Value: indexData})
+		return json.Marshal(index)
+	})
 }
 
 func (s *Service) cachedEvents(connection model.Connection, scope any, collections []string, start, end time.Time, query string) ([]model.Event, bool) {

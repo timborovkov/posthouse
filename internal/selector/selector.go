@@ -64,6 +64,16 @@ func matchesCollection(connection model.Connection, wanted []string) bool {
 }
 
 func One(all []model.Connection, id string, capability string) (model.Connection, error) {
+	for _, connection := range all {
+		if !strings.EqualFold(strings.TrimSpace(connection.ID), strings.TrimSpace(id)) {
+			continue
+		}
+		matches, err := Match([]model.Connection{connection}, model.Selector{Capability: capability})
+		if err != nil {
+			return model.Connection{}, err
+		}
+		return matches[0], nil
+	}
 	matches, err := Match(all, model.Selector{Connections: []string{id}, Capability: capability})
 	if err != nil {
 		return model.Connection{}, err
