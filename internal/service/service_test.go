@@ -834,6 +834,16 @@ func TestPartialCalDAVRefreshReplacesOnlySuccessfulCollections(t *testing.T) {
 	}
 }
 
+func TestOfflineCollectionNameSelectorIncludesEveryMatchingCollection(t *testing.T) {
+	connection := model.Connection{Calendar: &model.CalendarConfig{Collections: []model.CalendarCollection{{ID: "team-a", Name: "Team"}, {ID: "team-b", Name: "Team"}, {ID: "personal", Name: "Personal"}, {ID: "stable", Name: "team-a"}}}}
+	if got := selectedCollectionIDs(connection, []string{"Team"}); !slices.Equal(got, []string{"team-a", "team-b"}) {
+		t.Fatalf("duplicate collection-name selector = %#v", got)
+	}
+	if got := selectedCollectionIDs(connection, []string{"team-a"}); !slices.Equal(got, []string{"team-a"}) {
+		t.Fatalf("exact collection ID selector = %#v", got)
+	}
+}
+
 func TestCompleteMailRefreshRemovesAbsentUIDs(t *testing.T) {
 	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
 	application := serviceWithConnections(t, mailConnection("work"))
@@ -851,6 +861,26 @@ func TestCompleteMailRefreshRemovesAbsentUIDs(t *testing.T) {
 	result, ok := application.cachedMailResult("work", "INBOX", "different", options, mailCursorState{}, 10)
 	if !ok || messageUIDs(result.Messages) != "work:2" {
 		t.Fatalf("offline mail after complete refresh = %#v, %v", result, ok)
+	}
+}
+
+func TestDefaultFolderChangeDoesNotReuseOldScopedMailCache(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	connection := mailConnection("work")
+	connection.Mail.Folders.Inbox = "INBOX"
+	application := serviceWithConnections(t, connection)
+	application.mailSearch = func(connection model.Connection, options postmail.SearchOptions) (postmail.SearchResult, error) {
+		return postmail.SearchResult{UIDValidity: 1, UIDNext: 2, Messages: []model.Message{{ConnectionID: connection.ID, Folder: mailFolder(connection, options.Folder), UID: 1, Subject: "old inbox", Date: instant(9)}}}, nil
+	}
+	if page, err := application.SearchMessages(model.Selector{}, postmail.SearchOptions{}, 10, ""); err != nil || len(page.Messages) != 1 {
+		t.Fatalf("initial search = %#v, %v", page, err)
+	}
+	connection.Mail.Folders.Inbox = "Primary"
+	if err := application.UpsertConnection(connection, true); err != nil {
+		t.Fatal(err)
+	}
+	if page, err := application.SearchMessages(model.Selector{}, postmail.SearchOptions{Mode: "offline"}, 10, ""); err == nil || len(page.Messages) != 0 {
+		t.Fatalf("offline search reused old default-folder cache: %#v, %v", page, err)
 	}
 }
 

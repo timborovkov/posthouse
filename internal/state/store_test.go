@@ -356,6 +356,9 @@ func TestPreparedOperationsRespectStateLimit(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
+	if err := store.Put(context.Background(), state.CacheEntry{Namespace: "message_body", Key: "keep", Kind: "message_body", Value: []byte("offline cache")}); err != nil {
+		t.Fatal(err)
+	}
 	prepared := model.PreparedOperation{Token: "too-large", Kind: "mail.send", ConnectionID: "work", CreatedAt: time.Now(), ExpiresAt: time.Now().Add(time.Minute), Status: "prepared"}
 	err = store.PutOperation(context.Background(), state.OperationRecord{Public: prepared, Payload: []byte(`"` + strings.Repeat("private payload", 100) + `"`), Digest: "digest"})
 	if err == nil || !strings.Contains(err.Error(), "state exceeds") {
@@ -364,6 +367,9 @@ func TestPreparedOperationsRespectStateLimit(t *testing.T) {
 	stats, err := store.Stats(context.Background())
 	if err != nil || stats.Operations != 0 {
 		t.Fatalf("Stats after rejected operation = %#v, %v", stats, err)
+	}
+	if entry, found, err := store.Get(context.Background(), "message_body", "keep", true); err != nil || !found || string(entry.Value) != "offline cache" {
+		t.Fatalf("rejected operation evicted cache: %q, %v, %v", entry.Value, found, err)
 	}
 }
 

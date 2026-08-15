@@ -2,6 +2,7 @@ package mcpserver
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/timborovkov/posthouse/internal/config"
@@ -164,5 +166,44 @@ func TestRunHTTPLoopbackStillRequiresToken(t *testing.T) {
 	err := server.RunHTTP(context.Background(), "127.0.0.1:8791", "", false, slog.Default())
 	if err == nil || !strings.Contains(err.Error(), "POSTHOUSE_MCP_TOKEN") {
 		t.Fatalf("RunHTTP loopback error = %v", err)
+	}
+}
+
+func TestHTTPBodyLimitAccommodatesDocumentedAttachment(t *testing.T) {
+	encodedAttachment := base64.StdEncoding.EncodedLen(25 << 20)
+	if maxMCPHTTPRequestBytes < int64(encodedAttachment+(1<<20)) {
+		t.Fatalf("HTTP body limit %d cannot carry a base64 25 MiB attachment plus JSON envelope", maxMCPHTTPRequestBytes)
+	}
+}
+
+func TestHTTPShutdownWaitsForInFlightHandler(t *testing.T) {
+	shutdownStarted := make(chan struct{})
+	release := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	finished := make(chan error, 1)
+	go func() {
+		finished <- serveHTTPUntilShutdown(ctx, func() error {
+			<-shutdownStarted
+			return http.ErrServerClosed
+		}, func(context.Context) error {
+			close(shutdownStarted)
+			<-release
+			return nil
+		})
+	}()
+	cancel()
+	select {
+	case <-shutdownStarted:
+	case <-time.After(time.Second):
+		t.Fatal("HTTP shutdown did not start")
+	}
+	select {
+	case err := <-finished:
+		t.Fatalf("server returned before in-flight handler completed: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+	if err := <-finished; err != nil {
+		t.Fatal(err)
 	}
 }

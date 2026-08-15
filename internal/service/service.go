@@ -271,18 +271,20 @@ func (s *Service) SearchMessagesContext(ctx context.Context, selection model.Sel
 	}
 	slices.SortFunc(connections, func(a, b model.Connection) int { return strings.Compare(a.ID, b.ID) })
 	connectionIDs := make([]string, len(connections))
+	resolvedFolders := make(map[string]string, len(connections))
 	for index, connection := range connections {
 		connectionIDs[index] = connection.ID
+		resolvedFolders[connection.ID] = mailFolder(connection, options.Folder)
 	}
 	scope := struct {
-		Selector      model.Selector `json:"selector"`
-		ConnectionIDs []string       `json:"connection_ids"`
-		Folder        string         `json:"folder"`
-		Query         string         `json:"query"`
-		Since         time.Time      `json:"since"`
-		Before        time.Time      `json:"before"`
-		Unread        bool           `json:"unread"`
-	}{selection, connectionIDs, options.Folder, options.Query, options.Since, options.Before, options.Unread}
+		Selector      model.Selector    `json:"selector"`
+		ConnectionIDs []string          `json:"connection_ids"`
+		Folders       map[string]string `json:"folders"`
+		Query         string            `json:"query"`
+		Since         time.Time         `json:"since"`
+		Before        time.Time         `json:"before"`
+		Unread        bool              `json:"unread"`
+	}{selection, connectionIDs, resolvedFolders, options.Query, options.Since, options.Before, options.Unread}
 	position := mailCursorPosition{Connections: make(map[string]mailCursorState, len(connections)), Failed: make(map[string]model.SourceError)}
 	if err := pagination.Decode(cursor, "messages", scope, &position); err != nil {
 		return model.MessagePage{}, err
@@ -2307,12 +2309,22 @@ func selectedCollectionIDs(connection model.Connection, selected []string) []str
 	}
 	result := make([]string, 0, len(selected))
 	for _, value := range selected {
+		exactID := false
+		for _, collection := range connection.Calendar.Collections {
+			if strings.EqualFold(value, collection.ID) {
+				result = append(result, collection.ID)
+				exactID = true
+				break
+			}
+		}
+		if exactID {
+			continue
+		}
 		matched := false
 		for _, collection := range connection.Calendar.Collections {
-			if strings.EqualFold(value, collection.ID) || strings.EqualFold(value, collection.Name) {
+			if strings.EqualFold(value, collection.Name) {
 				result = append(result, collection.ID)
 				matched = true
-				break
 			}
 		}
 		if !matched {

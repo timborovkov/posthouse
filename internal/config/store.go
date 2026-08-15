@@ -310,13 +310,17 @@ func Validate(cfg model.Config) error {
 		if strings.TrimSpace(connection.ID) == "" {
 			return fmt.Errorf("%s.id is required", prefix)
 		}
+		if connection.ID != strings.TrimSpace(connection.ID) {
+			return fmt.Errorf("%s.id must not have surrounding whitespace", prefix)
+		}
 		if strings.TrimSpace(connection.Name) == "" {
 			return fmt.Errorf("%s.name is required", prefix)
 		}
-		if _, ok := seen[strings.ToLower(connection.ID)]; ok {
+		canonicalID := strings.ToLower(strings.TrimSpace(connection.ID))
+		if _, ok := seen[canonicalID]; ok {
 			return fmt.Errorf("duplicate connection id %q", connection.ID)
 		}
-		seen[strings.ToLower(connection.ID)] = struct{}{}
+		seen[canonicalID] = struct{}{}
 		if connection.Mail == nil && connection.Calendar == nil {
 			return fmt.Errorf("%s needs at least one capability", prefix)
 		}

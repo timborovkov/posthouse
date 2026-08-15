@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -19,7 +20,10 @@ import (
 	"github.com/timborovkov/posthouse/internal/state"
 )
 
-const Version = "0.2.0"
+const (
+	Version                = "0.2.0"
+	maxMCPHTTPRequestBytes = 36 << 20
+)
 
 type Server struct {
 	service *service.Service
@@ -52,7 +56,7 @@ func (s *Server) RunHTTP(ctx context.Context, address string, token string, allo
 		Stateless: true, JSONResponse: true, Logger: logger, SessionTimeout: 5 * time.Minute,
 	})
 	mux := http.NewServeMux()
-	mux.Handle("/mcp", authenticate(http.MaxBytesHandler(handler, 4<<20), token))
+	mux.Handle("/mcp", authenticate(http.MaxBytesHandler(handler, maxMCPHTTPRequestBytes), token))
 	mux.HandleFunc("GET /healthz", func(writer http.ResponseWriter, _ *http.Request) {
 		writer.Header().Set("Content-Type", "application/json")
 		_, _ = writer.Write([]byte(`{"status":"ok"}`))
@@ -67,15 +71,28 @@ func (s *Server) RunHTTP(ctx context.Context, address string, token string, allo
 		_, _ = writer.Write([]byte(`{"status":"ready"}`))
 	})
 	httpServer := &http.Server{Addr: address, Handler: mux, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 2 * time.Minute}
-	go func() {
-		<-ctx.Done()
-		shutdownContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		_ = httpServer.Shutdown(shutdownContext)
-	}()
 	logger.Info("MCP server listening", "address", address, "endpoint", "/mcp")
-	if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		return err
+	return serveHTTPUntilShutdown(ctx, httpServer.ListenAndServe, httpServer.Shutdown)
+}
+
+func serveHTTPUntilShutdown(ctx context.Context, serve func() error, shutdown func(context.Context) error) error {
+	stopWatcher := make(chan struct{})
+	shutdownDone := make(chan struct{})
+	go func() {
+		defer close(shutdownDone)
+		select {
+		case <-ctx.Done():
+			shutdownContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			_ = shutdown(shutdownContext)
+		case <-stopWatcher:
+		}
+	}()
+	serveErr := serve()
+	close(stopWatcher)
+	<-shutdownDone
+	if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+		return serveErr
 	}
 	return nil
 }
@@ -129,7 +146,7 @@ type sendMessageInput struct {
 type mcpAttachmentInput struct {
 	Name        string `json:"name"`
 	ContentType string `json:"content_type,omitempty"`
-	Data        []byte `json:"data" jsonschema:"base64-encoded attachment bytes"`
+	Data        []byte `json:"data" jsonschema:"base64-encoded attachment bytes; all attachments in one operation are limited to 25 MiB total"`
 }
 
 func mcpAttachments(inputs []mcpAttachmentInput) []model.AttachmentInput {
@@ -290,7 +307,7 @@ func (s *Server) registerTools() {
 			return nil, page, err
 		})
 
-	mcp.AddTool(s.mcp, &mcp.Tool{Name: "messages_send_prepare", Title: "Prepare message send", Description: "Prepare a plain-text email with optional attachments through exactly one SMTP connection. Returns a ten-minute opaque token and exact side-effect preview; no message is sent until operation_execute is called.", Annotations: readOnly},
+	mcp.AddTool(s.mcp, &mcp.Tool{Name: "messages_send_prepare", Title: "Prepare message send", Description: "Prepare a plain-text email with up to 25 MiB total attachment data through exactly one SMTP connection. Returns a ten-minute opaque token and exact side-effect preview; no message is sent until operation_execute is called.", Annotations: readOnly},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input sendMessageInput) (*mcp.CallToolResult, model.PreparedOperation, error) {
 			prepared, err := s.service.PrepareSend(ctx, model.SendMessage{ConnectionID: input.Connection, To: input.To, CC: input.CC, BCC: input.BCC, Subject: input.Subject, Text: input.Text, ReplyTo: input.ReplyTo, InReplyTo: input.InReplyTo, References: input.References, Attachments: mcpAttachments(input.Attachments)})
 			return nil, prepared, err
@@ -308,7 +325,7 @@ func (s *Server) registerTools() {
 			return nil, prepared, err
 		})
 
-	mcp.AddTool(s.mcp, &mcp.Tool{Name: "messages_draft_prepare", Title: "Prepare provider draft mutation", Description: "Prepare create, update, or non-expunging delete of one provider-side draft through exactly one IMAP connection.", Annotations: readOnly},
+	mcp.AddTool(s.mcp, &mcp.Tool{Name: "messages_draft_prepare", Title: "Prepare provider draft mutation", Description: "Prepare create, update, or non-expunging delete of one provider-side draft through exactly one IMAP connection; attachment data is limited to 25 MiB total.", Annotations: readOnly},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input messageDraftInput) (*mcp.CallToolResult, model.PreparedOperation, error) {
 			prepared, err := s.service.PrepareDraft(ctx, input.Connection, "mail.draft."+input.Action, input.Folder, input.UID, input.Message.model())
 			return nil, prepared, err

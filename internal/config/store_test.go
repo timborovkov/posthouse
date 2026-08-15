@@ -271,3 +271,13 @@ func TestValidateRejectsDuplicateCalendarCollectionIDs(t *testing.T) {
 		t.Fatalf("Validate duplicate collections error = %v", err)
 	}
 }
+
+func TestValidateRejectsWhitespaceEquivalentConnectionIDs(t *testing.T) {
+	connection := model.Connection{ID: "work", Name: "Work", Mail: &model.MailConfig{Username: "work@example.test", SecretEnv: "WORK_PASSWORD", IMAP: model.IMAPConfig{Address: "imap.example.test:993", TLS: true}}}
+	spaced := connection
+	spaced.ID = " work "
+	spaced.Name = "Spaced"
+	if err := Validate(model.Config{Connections: []model.Connection{connection, spaced}}); err == nil || !strings.Contains(err.Error(), "surrounding whitespace") {
+		t.Fatalf("Validate whitespace-equivalent IDs error = %v", err)
+	}
+}

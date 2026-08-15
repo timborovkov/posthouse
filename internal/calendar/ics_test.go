@@ -242,6 +242,20 @@ func TestCalDAVWriteRejectsAmbiguousCollectionName(t *testing.T) {
 	}
 }
 
+func TestCalDAVReadCollectionSelectionPrefersExactIDAndIncludesDuplicateNames(t *testing.T) {
+	collections := []model.CalendarCollection{
+		{ID: "work", Name: "Personal"},
+		{ID: "personal-one", Name: "Personal"},
+		{ID: "personal-two", Name: "Work"},
+	}
+	if got := resolveSelectedCollections(collections, []string{"work"}); len(got) != 1 || got[0] != "work" {
+		t.Fatalf("exact ID selection returned %v", got)
+	}
+	if got := resolveSelectedCollections(collections, []string{"Personal"}); len(got) != 2 || got[0] != "work" || got[1] != "personal-one" {
+		t.Fatalf("duplicate name selection returned %v", got)
+	}
+}
+
 func TestBasicAuthClientRejectsCrossOriginRequest(t *testing.T) {
 	origin, _ := url.Parse("https://calendar.example.test/")
 	called := false
@@ -338,6 +352,58 @@ func TestMergeUpdatedEventPreservesUnmodeledPropertiesAndAlarms(t *testing.T) {
 	}
 	if strings.Contains(merged, "Old title") || strings.Contains(merged, "Remove me") || !strings.Contains(merged, "SUMMARY:New title") || !strings.Contains(merged, "DTSTART:20260815T110000Z") {
 		t.Fatalf("modeled fields were not replaced:\n%s", merged)
+	}
+}
+
+func TestGeneratePreservesRecurringLocalTimezoneAcrossDST(t *testing.T) {
+	location, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := model.Event{ID: "weekly", Title: "Weekly", Start: time.Date(2026, 3, 2, 9, 0, 0, 0, location), End: time.Date(2026, 3, 2, 10, 0, 0, 0, location), RecurrenceRule: "FREQ=WEEKLY;COUNT=3"}
+	_, generated, err := Generate(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(generated, "DTSTART;TZID=America/New_York:20260302T090000") {
+		t.Fatalf("generated recurring event lost local TZID:\n%s", generated)
+	}
+	events, err := ParseRange([]byte(generated), time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC), time.Date(2026, 3, 20, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 3 {
+		t.Fatalf("expanded events = %#v", events)
+	}
+	for _, occurrence := range events {
+		if occurrence.Start.In(location).Hour() != 9 {
+			t.Fatalf("occurrence drifted across DST: %v", occurrence.Start.In(location))
+		}
+	}
+}
+
+func TestMergeUpdatedSeriesRestoresExistingTZIDAfterPayloadRoundTrip(t *testing.T) {
+	existing := []byte("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:weekly\r\nDTSTART;TZID=America/New_York:20260302T090000\r\nDTEND;TZID=America/New_York:20260302T100000\r\nRRULE:FREQ=WEEKLY;COUNT=3\r\nSUMMARY:Old\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n")
+	replacement := "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:weekly\r\nDTSTAMP:20260301T120000Z\r\nDTSTART:20260302T140000Z\r\nDTEND:20260302T150000Z\r\nRRULE:FREQ=WEEKLY;COUNT=3\r\nSUMMARY:New\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+	merged, err := mergeUpdatedEvent(existing, replacement, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(merged, "DTSTART;TZID=America/New_York:20260302T090000") || !strings.Contains(merged, "DTEND;TZID=America/New_York:20260302T100000") {
+		t.Fatalf("updated series lost existing TZID:\n%s", merged)
+	}
+	location, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, err := ParseRange([]byte(merged), time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC), time.Date(2026, 3, 20, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, occurrence := range events {
+		if occurrence.Start.In(location).Hour() != 9 {
+			t.Fatalf("updated occurrence drifted across DST: %v", occurrence.Start.In(location))
+		}
 	}
 }
 

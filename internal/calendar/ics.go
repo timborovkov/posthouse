@@ -817,6 +817,9 @@ func formatTime(name string, value time.Time, allDay bool) (string, string) {
 	if allDay {
 		return name + ";VALUE=DATE", value.Format("20060102")
 	}
+	if timezone, ok := formatTZID(value.Location()); ok {
+		return name + ";TZID=" + timezone, value.Format("20060102T150405")
+	}
 	return name, value.UTC().Format("20060102T150405Z")
 }
 
@@ -824,7 +827,24 @@ func formatRecurrenceTime(name string, value time.Time, allDay bool) (string, st
 	if allDay {
 		return name + ";VALUE=DATE", value.Format("20060102")
 	}
+	if timezone, ok := formatTZID(value.Location()); ok {
+		return name + ";TZID=" + timezone, value.Format("20060102T150405")
+	}
 	return name, value.UTC().Format("20060102T150405Z")
+}
+
+func formatTZID(location *time.Location) (string, bool) {
+	if location == nil {
+		return "", false
+	}
+	name := location.String()
+	if name == "" || name == "UTC" || name == "Local" || strings.ContainsAny(name, "\r\n") {
+		return "", false
+	}
+	if strings.ContainsAny(name, `;:," `) {
+		name = `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(name) + `"`
+	}
+	return name, true
 }
 
 func fold(line string) string {

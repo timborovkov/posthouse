@@ -537,6 +537,13 @@ func (s *Store) PutOperation(ctx context.Context, record OperationRecord) error 
 	if _, err := tx.ExecContext(ctx, `DELETE FROM operations WHERE expires_at < ?`, time.Now().Add(-24*time.Hour).Unix()); err != nil {
 		return fmt.Errorf("purge expired prepared operations: %w", err)
 	}
+	var operationBytes int64
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(SUM(length(ciphertext)),0) FROM operations`).Scan(&operationBytes); err != nil {
+		return fmt.Errorf("measure prepared operations: %w", err)
+	}
+	if operationBytes+int64(len(ciphertext)) > s.maxBytes {
+		return fmt.Errorf("encrypted state exceeds configured %d-byte limit", s.maxBytes)
+	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO operations(token_hash,kind,connection_id,created_at,expires_at,executed_at,status,ciphertext) VALUES(?,?,?,?,?,?,?,?)`,
 		tokenHash[:], record.Public.Kind, record.Public.ConnectionID, record.Public.CreatedAt.Unix(), record.Public.ExpiresAt.Unix(), 0, record.Public.Status, ciphertext)
 	if err != nil {
