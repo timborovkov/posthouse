@@ -1254,6 +1254,10 @@ func TestLiveAttachmentRefetchesAndOnlyFallsBackAsStale(t *testing.T) {
 	if fetches != 2 {
 		t.Fatalf("same-UIDVALIDITY continuation fetched provider %d times", fetches)
 	}
+	cached, cachedData, err := application.GetAttachmentMode(ctx, "work", "INBOX", 7, "file", "cache")
+	if err != nil || cached.Stale || string(cachedData) != "content-11" || fetches != 2 {
+		t.Fatalf("cached continuation returned %#v %q after %d fetches: %v", cached, cachedData, fetches, err)
+	}
 	providerMissing = true
 	stale, staleData, err := application.GetAttachmentMode(ctx, "work", "INBOX", 7, "file", "")
 	if err != nil || !stale.Stale || string(staleData) != "content-11" || fetches != 3 {
@@ -1382,6 +1386,18 @@ func TestPrepareCalendarCreatePersistsGeneratedID(t *testing.T) {
 	changed, ok := prepared.Preview["changed_fields"].(model.Event)
 	if !ok || changed.ID == "" || !strings.HasPrefix(changed.ID, "posthouse-") {
 		t.Fatalf("prepared calendar identity = %#v", prepared.Preview["changed_fields"])
+	}
+	ledger, err := application.ensureState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := ledger.GetOperation(context.Background(), prepared.Token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload calendarWritePayload
+	if err := json.Unmarshal(record.Payload, &payload); err != nil || payload.StartWall != "20260814T090000" || payload.EndWall != "20260814T100000" {
+		t.Fatalf("prepared calendar wall times = %#v, %v", payload, err)
 	}
 }
 

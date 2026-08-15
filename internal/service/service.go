@@ -52,6 +52,12 @@ type Service struct {
 	now                    func() time.Time
 }
 
+type calendarWritePayload struct {
+	Event     model.Event `json:"event"`
+	StartWall string      `json:"start_wall,omitempty"`
+	EndWall   string      `json:"end_wall,omitempty"`
+}
+
 const maxOutboundAttachmentBytes int64 = 25 << 20
 
 func New(store *config.Store) *Service {
@@ -922,7 +928,12 @@ func (s *Service) PrepareCalendarWrite(ctx context.Context, connectionID, kind s
 	}
 	event = generated
 	event.ConnectionID = connection.ID
-	return s.prepare(ctx, kind, connection, event, map[string]any{
+	payload := calendarWritePayload{Event: event}
+	if !event.AllDay {
+		payload.StartWall = event.Start.Format("20060102T150405")
+		payload.EndWall = event.End.Format("20060102T150405")
+	}
+	return s.prepare(ctx, kind, connection, payload, map[string]any{
 		"acting_identity": connection.Identity, "calendar": event.CollectionID, "title": event.Title,
 		"start": event.Start, "end": event.End, "attendees": event.Attendees, "changed_fields": event,
 		"side_effects": []string{"write one CalDAV event"},
@@ -1242,11 +1253,16 @@ func (s *Service) execute(ctx context.Context, connection model.Connection, kind
 		}
 		return map[string]any{"uid": uid}, nil
 	case "calendar.create", "calendar.update":
-		var event model.Event
-		if err := json.Unmarshal(payload, &event); err != nil {
+		var mutation calendarWritePayload
+		if err := json.Unmarshal(payload, &mutation); err != nil {
 			return nil, err
 		}
-		written, err := calendar.PutCalDAVEvent(ctx, connection, event, kind == "calendar.create")
+		if mutation.Event.ID == "" {
+			if err := json.Unmarshal(payload, &mutation.Event); err != nil {
+				return nil, err
+			}
+		}
+		written, err := calendar.PutCalDAVEventWithWallTimes(ctx, connection, mutation.Event, kind == "calendar.create", mutation.StartWall, mutation.EndWall)
 		if err != nil {
 			return nil, err
 		}
@@ -1391,7 +1407,7 @@ func (s *Service) GetAttachmentMode(ctx context.Context, connectionID, folder st
 			}
 		}
 	}
-	if mode != "offline" && err == nil {
+	if mode != "offline" && mode != "cache" && err == nil {
 		requestCacheID := mailCacheID(connection)
 		attachment, data, uidValidity, fetchErr := s.mailGetAttachment(ctx, connection, folder, uid, attachmentID)
 		if fetchErr == nil {
@@ -1415,7 +1431,7 @@ func (s *Service) GetAttachmentMode(ctx context.Context, connectionID, folder st
 	}
 	if !confirmedUIDMismatch {
 		if attachment, data, ok := s.cachedAttachmentFor(ctx, connection, folder, uid, attachmentID); ok {
-			attachment.Stale = true
+			attachment.Stale = mode != "cache"
 			return attachment, data, nil
 		}
 	}

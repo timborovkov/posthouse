@@ -6,6 +6,7 @@ package tuiapp
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -163,6 +164,25 @@ func TestLateOperationResultDoesNotReplaceNewConfirmationPreview(t *testing.T) {
 	app.applyOperation(operationSnapshot{token: "old", result: model.OperationResult{Token: "old", Status: "succeeded"}})
 	if app.modalText.Get() != "new operation preview" || app.pendingToken.Get() != "new" || app.executingToken.Get() != "" {
 		t.Fatalf("late result changed preview=%q pending=%q executing=%q", app.modalText.Get(), app.pendingToken.Get(), app.executingToken.Get())
+	}
+}
+
+func TestUncertainOperationRemainsVisible(t *testing.T) {
+	app := testApp(t)
+	defer app.close()
+	app.executingToken.Set("uncertain-token")
+	app.modal.Set(true)
+	result := model.OperationResult{Token: "uncertain-token", Status: "uncertain", Result: map[string]any{"sent": true}}
+	app.applyOperation(operationSnapshot{token: "uncertain-token", result: result, err: errors.New("response lost")})
+	if app.lastOperation.Get().Status != "uncertain" || !strings.Contains(app.modalText.Get(), "uncertain-token") || !strings.Contains(app.modalText.Get(), "sent:true") || !strings.Contains(app.modalText.Get(), "response lost") {
+		t.Fatalf("uncertain result was not retained: last=%#v modal=%q", app.lastOperation.Get(), app.modalText.Get())
+	}
+}
+
+func TestPartialSourceErrorsAreVisible(t *testing.T) {
+	got := appendSourceErrors("", []model.SourceError{{ConnectionID: "work", Code: "mail_unavailable", Message: "timeout"}, {ConnectionID: "calendar", CollectionID: "team", Code: "calendar_unavailable", Message: "offline"}})
+	if !strings.Contains(got, "work: timeout") || !strings.Contains(got, "calendar/team: offline") {
+		t.Fatalf("partial source errors = %q", got)
 	}
 }
 

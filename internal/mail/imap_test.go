@@ -28,6 +28,13 @@ func TestMessagePreviewSkipsHeaders(t *testing.T) {
 	}
 }
 
+func TestMessagePreviewDecodesMultipartTransferEncoding(t *testing.T) {
+	raw := []byte("MIME-Version: 1.0\r\nContent-Type: multipart/alternative; boundary=parts\r\n\r\n--parts\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: base64\r\n\r\nSGVsbG8gZGVjb2RlZCBwcmV2aWV3\r\n--parts--\r\n")
+	if got := messagePreview(raw); got != "Hello decoded preview" {
+		t.Fatalf("decoded MIME preview = %q", got)
+	}
+}
+
 func TestMessageOrderingUsesProviderDateBeforeUID(t *testing.T) {
 	newer := model.Message{UID: 2, ReceivedAt: time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)}
 	older := model.Message{UID: 9, ReceivedAt: time.Date(2026, 8, 15, 11, 0, 0, 0, time.UTC)}

@@ -328,6 +328,9 @@ func messageTime(message model.Message) time.Time {
 }
 
 func messagePreview(data []byte) string {
+	if parsed, err := parseMessage(data); err == nil && parsed.Detail.Preview != "" {
+		return parsed.Detail.Preview
+	}
 	if index := strings.Index(string(data), "\r\n\r\n"); index >= 0 {
 		data = data[index+4:]
 	} else if index := strings.Index(string(data), "\n\n"); index >= 0 {

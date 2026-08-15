@@ -433,6 +433,18 @@ func TestMergeUpdatedEventPreservesFloatingTimes(t *testing.T) {
 	}
 }
 
+func TestMergeUpdatedEventUsesPreparedFloatingWallTimes(t *testing.T) {
+	existing := []byte("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:floating\r\nDTSTART:20260302T090000\r\nDTEND:20260302T100000\r\nSUMMARY:Old\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n")
+	replacement := "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:floating\r\nDTSTART:20260302T140000Z\r\nDTEND:20260302T150000Z\r\nSUMMARY:New\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+	merged, err := mergeUpdatedEventWithWallTimes(existing, replacement, "", "20260302T090000", "20260302T100000")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(merged, "DTSTART:20260302T090000\r\n") || !strings.Contains(merged, "DTEND:20260302T100000\r\n") {
+		t.Fatalf("executor timezone changed prepared floating walls:\n%s", merged)
+	}
+}
+
 func TestGenerateCarriesTZIDOnRecurrenceSets(t *testing.T) {
 	newYork, err := time.LoadLocation("America/New_York")
 	if err != nil {

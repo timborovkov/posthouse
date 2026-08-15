@@ -183,6 +183,10 @@ func resolveSelectedCollections(collections []model.CalendarCollection, selected
 }
 
 func PutCalDAVEvent(ctx context.Context, connection model.Connection, event model.Event, create bool) (model.Event, error) {
+	return PutCalDAVEventWithWallTimes(ctx, connection, event, create, "", "")
+}
+
+func PutCalDAVEventWithWallTimes(ctx context.Context, connection model.Connection, event model.Event, create bool, startWall, endWall string) (model.Event, error) {
 	_, httpClient, endpoint, err := calDAVClient(connection)
 	if err != nil {
 		return model.Event{}, err
@@ -208,7 +212,7 @@ func PutCalDAVEvent(ctx context.Context, connection model.Connection, event mode
 		if err != nil {
 			return model.Event{}, err
 		}
-		data, err = mergeUpdatedEvent(existing, data, event.RecurrenceID)
+		data, err = mergeUpdatedEventWithWallTimes(existing, data, event.RecurrenceID, startWall, endWall)
 		if err != nil {
 			return model.Event{}, err
 		}
@@ -360,6 +364,10 @@ func mergeOccurrence(existing []byte, replacement, recurrenceID string) (string,
 }
 
 func mergeUpdatedEvent(existing []byte, replacement, recurrenceID string) (string, error) {
+	return mergeUpdatedEventWithWallTimes(existing, replacement, recurrenceID, "", "")
+}
+
+func mergeUpdatedEventWithWallTimes(existing []byte, replacement, recurrenceID, startWall, endWall string) (string, error) {
 	parsedCalendar, err := ics.ParseCalendar(bytes.NewReader(existing))
 	if err != nil {
 		return "", fmt.Errorf("parse existing CalDAV object: %w", err)
@@ -396,7 +404,7 @@ func mergeUpdatedEvent(existing []byte, replacement, recurrenceID string) (strin
 		if currentRecurrence != targetRecurrence {
 			continue
 		}
-		if err := preserveEventTimezone(current, replacementEvent, locations); err != nil {
+		if err := preserveEventTimezone(current, replacementEvent, locations, startWall, endWall); err != nil {
 			return "", err
 		}
 		mergeModeledEventProperties(current, replacementEvent)
@@ -409,14 +417,18 @@ func mergeUpdatedEvent(existing []byte, replacement, recurrenceID string) (strin
 	return parsedCalendar.Serialize(ics.WithNewLine("\r\n")), nil
 }
 
-func preserveEventTimezone(current, replacement *ics.VEvent, locations map[string]*time.Location) error {
-	for _, property := range []ics.ComponentProperty{ics.ComponentPropertyDtStart, ics.ComponentPropertyDtEnd} {
+func preserveEventTimezone(current, replacement *ics.VEvent, locations map[string]*time.Location, startWall, endWall string) error {
+	for index, property := range []ics.ComponentProperty{ics.ComponentPropertyDtStart, ics.ComponentPropertyDtEnd} {
 		currentProperty := current.GetProperty(property)
 		replacementProperty := replacement.GetProperty(property)
 		if currentProperty == nil || replacementProperty == nil || replacementProperty.GetValueType() == ics.ValueDataTypeDate {
 			continue
 		}
 		location := time.Local
+		wall := startWall
+		if index == 1 {
+			wall = endWall
+		}
 		if len(currentProperty.ICalParameters["TZID"]) > 0 {
 			timezone := strings.Trim(currentProperty.ICalParameters["TZID"][0], `"`)
 			location = locations[timezone]
@@ -428,6 +440,10 @@ func preserveEventTimezone(current, replacement *ics.VEvent, locations map[strin
 				}
 			}
 		} else if strings.HasSuffix(currentProperty.Value, "Z") {
+			continue
+		} else if wall != "" {
+			replacementProperty.Value = wall
+			replacementProperty.ICalParameters = cloneParameters(currentProperty.ICalParameters)
 			continue
 		}
 		instant, err := propertyTime(replacementProperty, nil)

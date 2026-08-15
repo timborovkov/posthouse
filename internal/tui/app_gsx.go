@@ -62,6 +62,7 @@ type posthouseApp struct {
 	modalText              *tui.State[string]
 	pendingToken           *tui.State[string]
 	executingToken         *tui.State[string]
+	lastOperation          *tui.State[model.OperationResult]
 	editor                 *tui.State[bool]
 	editorKind             *tui.State[string]
 	editorStep             *tui.State[int]
@@ -94,6 +95,7 @@ func New(application *service.Service) *posthouseApp {
 		searching: tui.NewState(false), query: tui.NewState(""), modal: tui.NewState(false),
 		modalText: tui.NewState(""), pendingToken: tui.NewState(""),
 		executingToken: tui.NewState(""),
+		lastOperation:  tui.NewState(model.OperationResult{}),
 		editor:         tui.NewState(false), editorKind: tui.NewState(""), editorStep: tui.NewState(0), editorValues: tui.NewState([]string{}),
 		updates: make(chan snapshot, 4), operationUpdates: make(chan operationSnapshot, 1), providerReadUpdates: make(chan providerReadSnapshot, 1),
 		executeOperation: application.ExecuteOperation, doctorConnection: application.DoctorConnection, getMessage: application.GetMessageContext, getAttachment: application.GetAttachment,
@@ -215,6 +217,7 @@ func (p *posthouseApp) refresh() {
 			messages, mailErr := p.service.SearchMessagesContext(ctx, model.Selector{}, mail.SearchOptions{Query: query}, 100, "")
 			if mailErr == nil {
 				next.messages = messages.Messages
+				next.err = appendSourceErrors(next.err, messages.Errors)
 			} else {
 				next.err = appendError(next.err, mailErr)
 			}
@@ -223,6 +226,7 @@ func (p *posthouseApp) refresh() {
 			events, calendarErr := p.service.ListEvents(ctx, model.Selector{}, time.Now().Add(-24*time.Hour), time.Now().Add(90*24*time.Hour), query, 500, "")
 			if calendarErr == nil {
 				next.events = events.Events
+				next.err = appendSourceErrors(next.err, events.Errors)
 			} else {
 				next.err = appendError(next.err, calendarErr)
 			}
@@ -722,14 +726,19 @@ func (p *posthouseApp) applyOperation(next operationSnapshot) {
 	}
 	p.operationCancel = nil
 	p.executingToken.Set("")
+	if next.result.Token == "" {
+		next.result.Token = next.token
+	}
+	p.lastOperation.Set(next.result)
+	summary := formatOperationResult(next.result, next.err)
 	canReplaceModal := p.modal.Get() && p.pendingToken.Get() == ""
 	if next.err != nil {
-		p.errorText.Set("Execution failed: " + next.err.Error())
+		p.errorText.Set(summary)
 		if canReplaceModal {
-			p.modalText.Set("Execution failed\n\n" + next.err.Error())
+			p.modalText.Set(summary)
 		}
 	} else if canReplaceModal {
-		p.modalText.Set(fmt.Sprintf("Operation %s\n\nStatus: %s", next.result.Token, next.result.Status))
+		p.modalText.Set(summary)
 	}
 	p.refresh()
 }
@@ -739,6 +748,33 @@ func appendError(current string, err error) string {
 		return err.Error()
 	}
 	return current + " · " + err.Error()
+}
+
+func appendSourceErrors(current string, sourceErrors []model.SourceError) string {
+	for _, sourceError := range sourceErrors {
+		source := sourceError.ConnectionID
+		if sourceError.CollectionID != "" {
+			source += "/" + sourceError.CollectionID
+		}
+		message := sourceError.Message
+		if message == "" {
+			message = sourceError.Code
+		}
+		if current == "" {
+			current = source + ": " + message
+		} else {
+			current += " · " + source + ": " + message
+		}
+	}
+	return current
+}
+
+func formatOperationResult(result model.OperationResult, err error) string {
+	summary := fmt.Sprintf("Operation %s\n\nStatus: %s\nResult: %v", result.Token, result.Status, result.Result)
+	if err != nil {
+		summary += "\n\nError: " + err.Error()
+	}
+	return summary
 }
 
 func formatDoctor(result model.DoctorResult) string {
@@ -966,70 +1002,81 @@ func (p *posthouseApp) Render(app *tui.App) *tui.Element {
 			tui.WithHeight(1),
 		)
 		__tui_9.AddChild(__tui_35)
-		__tui_36 := tui.New(
+		if p.lastOperation.Get().Token != "" {
+			__tui_36 := tui.New(
+				tui.WithText(formatOperationResult(p.lastOperation.Get(), nil)),
+			)
+			__tui_9.AddChild(__tui_36)
+			__tui_37 := tui.New(
+				tui.WithWidth(0),
+				tui.WithHeight(1),
+			)
+			__tui_9.AddChild(__tui_37)
+		}
+		__tui_38 := tui.New(
 			tui.WithText("All writes are prepared, previewed, and idempotently executed."),
 			tui.WithTextStyle(tui.NewStyle().Dim()),
 		)
-		__tui_9.AddChild(__tui_36)
+		__tui_9.AddChild(__tui_38)
 	}
 	__tui_6.AddChild(__tui_9)
 	__tui_0.AddChild(__tui_6)
 	if p.errorText.Get() != "" {
-		__tui_37 := tui.New(
+		__tui_39 := tui.New(
 			tui.WithBorder(tui.BorderRounded),
 			tui.WithBorderStyle(tui.NewStyle().Foreground(tui.Red)),
 			tui.WithFlexShrink(0),
 			tui.WithPaddingTRBL(0, 1, 0, 1),
 		)
-		__tui_38 := tui.New(
+		__tui_40 := tui.New(
 			tui.WithText(p.errorText.Get()),
 			tui.WithTextStyle(tui.NewStyle().Foreground(tui.Red)),
 		)
-		__tui_37.AddChild(__tui_38)
-		__tui_0.AddChild(__tui_37)
+		__tui_39.AddChild(__tui_40)
+		__tui_0.AddChild(__tui_39)
 	}
-	__tui_39 := tui.New(
+	__tui_41 := tui.New(
 		tui.WithDisplay(tui.DisplayFlex), tui.WithDirection(tui.Row),
 		tui.WithFlexShrink(0),
 		tui.WithJustify(tui.JustifySpaceBetween),
 		tui.WithPaddingTRBL(0, 1, 0, 1),
 	)
-	__tui_40 := tui.New(
+	__tui_42 := tui.New(
 		tui.WithText("Tab areas · j/k move · / search · r refresh · c create · a actions"),
 		tui.WithTextStyle(tui.NewStyle().Dim()),
 	)
-	__tui_39.AddChild(__tui_40)
-	__tui_41 := tui.New(
+	__tui_41.AddChild(__tui_42)
+	__tui_43 := tui.New(
 		tui.WithText("? help · q quit"),
 		tui.WithTextStyle(tui.NewStyle().Dim()),
 	)
-	__tui_39.AddChild(__tui_41)
-	__tui_0.AddChild(__tui_39)
+	__tui_41.AddChild(__tui_43)
+	__tui_0.AddChild(__tui_41)
 	if p.searching.Get() {
-		__tui_42 := tui.New(
+		__tui_44 := tui.New(
 			tui.WithBorder(tui.BorderRounded),
 			tui.WithFlexShrink(0),
 			tui.WithPaddingTRBL(0, 1, 0, 1),
 		)
-		__tui_43 := tui.New(
+		__tui_45 := tui.New(
 			tui.WithText("Search:"),
 			tui.WithTextStyle(tui.NewStyle().Foreground(tui.Cyan).Bold()),
 		)
-		__tui_42.AddChild(__tui_43)
-		__tui_44 := tui.New(
+		__tui_44.AddChild(__tui_45)
+		__tui_46 := tui.New(
 			tui.WithText(p.query.Get() + "_"),
 		)
-		__tui_42.AddChild(__tui_44)
-		__tui_0.AddChild(__tui_42)
+		__tui_44.AddChild(__tui_46)
+		__tui_0.AddChild(__tui_44)
 	}
-	__tui_45 := app.MountPersistent(p, 0, func() tui.Component {
+	__tui_47 := app.MountPersistent(p, 0, func() tui.Component {
 		return tui.NewModal(
 			tui.WithModalOpen(p.modal),
 			tui.WithModalBackdrop("dim"),
 			tui.WithModalElementOptions(tui.WithJustify(tui.JustifyCenter), tui.WithAlign(tui.AlignCenter)),
 		)
 	})
-	__tui_46 := tui.New(
+	__tui_48 := tui.New(
 		tui.WithWidth(70),
 		tui.WithBorder(tui.BorderRounded),
 		tui.WithPadding(2),
@@ -1037,42 +1084,42 @@ func (p *posthouseApp) Render(app *tui.App) *tui.Element {
 		tui.WithGap(1),
 	)
 	if p.editor.Get() {
-		__tui_47 := tui.New(
+		__tui_49 := tui.New(
 			tui.WithText(p.editorTitle()),
 			tui.WithTextStyle(tui.NewStyle().Bold()),
 		)
-		__tui_46.AddChild(__tui_47)
-		__tui_48 := tui.New(
+		__tui_48.AddChild(__tui_49)
+		__tui_50 := tui.New(
 			tui.WithText("Tab fields · Enter advances/prepares · Esc cancels"),
 			tui.WithTextStyle(tui.NewStyle().Dim()),
 		)
-		__tui_46.AddChild(__tui_48)
-		__tui_49 := tui.New(
+		__tui_48.AddChild(__tui_50)
+		__tui_51 := tui.New(
 			tui.WithHR(),
 		)
-		__tui_46.AddChild(__tui_49)
+		__tui_48.AddChild(__tui_51)
 		for index, label := range p.editorLabels() {
 			_ = index
-			__tui_50 := tui.New(
+			__tui_52 := tui.New(
 				tui.WithText(fmt.Sprintf("%-16s %s", label, p.editorValues.Get()[index])),
 			)
-			__tui_46.AddChild(__tui_50)
+			__tui_48.AddChild(__tui_52)
 		}
 		if p.errorText.Get() != "" {
-			__tui_51 := tui.New(
+			__tui_53 := tui.New(
 				tui.WithText(p.errorText.Get()),
 				tui.WithTextStyle(tui.NewStyle().Foreground(tui.Red)),
 			)
-			__tui_46.AddChild(__tui_51)
+			__tui_48.AddChild(__tui_53)
 		}
 	} else {
-		__tui_52 := tui.New(
+		__tui_54 := tui.New(
 			tui.WithText(p.modalText.Get()),
 		)
-		__tui_46.AddChild(__tui_52)
+		__tui_48.AddChild(__tui_54)
 	}
-	__tui_45.AddChild(__tui_46)
-	__tui_0.AddChild(__tui_45)
+	__tui_47.AddChild(__tui_48)
+	__tui_0.AddChild(__tui_47)
 
 	return __tui_0
 }
@@ -1150,6 +1197,9 @@ func (p *posthouseApp) bindAppFields(app *tui.App) {
 	}
 	if p.executingToken != nil {
 		p.executingToken.BindApp(app)
+	}
+	if p.lastOperation != nil {
+		p.lastOperation.BindApp(app)
 	}
 	if p.editor != nil {
 		p.editor.BindApp(app)

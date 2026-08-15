@@ -354,7 +354,14 @@ func (s *Server) registerTools() {
 			if input.Limit < 1 || input.Limit > 1<<20 {
 				return nil, attachmentChunkOutput{}, fmt.Errorf("limit must be between 1 and 1048576")
 			}
-			attachment, data, err := s.service.GetAttachmentMode(ctx, input.Connection, input.Folder, input.UID, input.AttachmentID, input.Mode)
+			readMode := input.Mode
+			if input.Offset > 0 && readMode == "" {
+				readMode = "cache"
+			}
+			attachment, data, err := s.service.GetAttachmentMode(ctx, input.Connection, input.Folder, input.UID, input.AttachmentID, readMode)
+			if err != nil && readMode == "cache" {
+				attachment, data, err = s.service.GetAttachmentMode(ctx, input.Connection, input.Folder, input.UID, input.AttachmentID, "")
+			}
 			if err != nil {
 				return nil, attachmentChunkOutput{}, err
 			}
