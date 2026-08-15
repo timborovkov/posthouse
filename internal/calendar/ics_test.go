@@ -430,10 +430,49 @@ END:VCALENDAR`, test.overrideStart)
 	}
 }
 
+func TestThisAndFutureIgnoresOverrideOutsideRequestedRange(t *testing.T) {
+	data := `BEGIN:VCALENDAR
+VERSION:2.0
+BEGIN:VEVENT
+UID:dense-future-override
+DTSTART:20200101T000000Z
+DTEND:20200101T000030Z
+RRULE:FREQ=MINUTELY
+SUMMARY:Original
+END:VEVENT
+BEGIN:VEVENT
+UID:dense-future-override
+RECURRENCE-ID;RANGE=THISANDFUTURE:20300101T000000Z
+DTSTART:20400101T000000Z
+DTEND:20400101T000030Z
+SUMMARY:Far future
+END:VEVENT
+END:VCALENDAR`
+	start := time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)
+	events, err := ParseRange([]byte(data), start, start.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 60 || !events[0].Start.Equal(start) || !events[59].Start.Equal(start.Add(59*time.Minute)) {
+		t.Fatalf("irrelevant future override returned %#v", events)
+	}
+}
+
 func TestGenerateRejectsInvalidRecurrenceRange(t *testing.T) {
 	event := model.Event{ID: "range", Title: "Range", Start: time.Date(2026, 8, 15, 9, 0, 0, 0, time.UTC), End: time.Date(2026, 8, 15, 10, 0, 0, 0, time.UTC), RecurrenceID: "2026-08-15T09:00:00Z", RecurrenceRange: "THISANDFUTURE\r\nATTENDEE:mailto:attacker@example.test"}
 	if _, _, err := Generate(event); err == nil || !strings.Contains(err.Error(), "recurrence range") {
 		t.Fatalf("Generate accepted invalid recurrence range: %v", err)
+	}
+}
+
+func TestGenerateRejectsInvalidRecurrenceRule(t *testing.T) {
+	base := model.Event{ID: "rule", Title: "Rule", Start: time.Date(2026, 8, 15, 9, 0, 0, 0, time.UTC), End: time.Date(2026, 8, 15, 10, 0, 0, 0, time.UTC)}
+	for _, rule := range []string{"FREQ=DAILY\r\nATTENDEE:mailto:attacker@example.test", "NOT-A-RRULE"} {
+		event := base
+		event.RecurrenceRule = rule
+		if _, _, err := Generate(event); err == nil || !strings.Contains(err.Error(), "recurrence rule") {
+			t.Fatalf("Generate accepted recurrence rule %q: %v", rule, err)
+		}
 	}
 }
 
@@ -585,6 +624,53 @@ END:VCALENDAR`
 		if event.Start.Hour() != 9 || event.Start.Location().String() != "Custom/Tallinn" {
 			t.Fatalf("embedded timezone occurrence = %v", event.Start)
 		}
+	}
+}
+
+func TestParseRangePrefersEmbeddedRulesForKnownTimezoneID(t *testing.T) {
+	data := `BEGIN:VCALENDAR
+VERSION:2.0
+BEGIN:VTIMEZONE
+TZID:America/New_York
+BEGIN:STANDARD
+DTSTART:19700101T000000
+TZOFFSETFROM:-0500
+TZOFFSETTO:-0500
+TZNAME:FIXED
+END:STANDARD
+END:VTIMEZONE
+BEGIN:VEVENT
+UID:embedded-known-zone
+DTSTART;TZID=America/New_York:20260701T090000
+DTEND;TZID=America/New_York:20260701T100000
+SUMMARY:Embedded rules win
+END:VEVENT
+END:VCALENDAR`
+	events, err := ParseRange([]byte(data), time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC), time.Date(2026, 7, 2, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := time.Date(2026, 7, 1, 14, 0, 0, 0, time.UTC)
+	if len(events) != 1 || !events[0].Start.Equal(want) || events[0].Start.Location().String() != "America/New_York" {
+		t.Fatalf("embedded known timezone event = %#v, want %v", events, want)
+	}
+}
+
+func TestWeakETagNormalization(t *testing.T) {
+	if got := quoteETag(`W/"abc"`); got != `W/"abc"` {
+		t.Fatalf("quoteETag preserved weak tag as %q", got)
+	}
+	if got := quoteETag(`W/"abc`); got != `W/"abc"` {
+		t.Fatalf("quoteETag repaired legacy weak tag as %q", got)
+	}
+	client := &basicAuthClient{origin: &url.URL{Scheme: "https", Host: "calendar.example.test"}, client: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		response := response(http.StatusOK, "calendar")
+		response.Header.Set("ETag", `W/"abc"`)
+		return response, nil
+	})}}
+	_, etag, err := getCalendarObject(context.Background(), client, "https://calendar.example.test/", "/event.ics")
+	if err != nil || etag != `W/"abc"` {
+		t.Fatalf("getCalendarObject ETag = %q, %v", etag, err)
 	}
 }
 

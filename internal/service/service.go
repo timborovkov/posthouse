@@ -2103,7 +2103,8 @@ func (s *Service) cacheMailboxUIDValidity(ledger *state.Store, connectionID, fol
 	if err != nil {
 		return err
 	}
-	return ledger.Put(context.Background(), state.CacheEntry{Namespace: "mailbox_uidvalidity", Key: mailboxCacheKey(connectionID, folder), ConnectionID: connectionID, Kind: "sync_state", ProviderID: folder, ExpiresAt: s.now().Add(s.messageMetadataTTL()), Value: data})
+	ttl := max(s.messageMetadataTTL(), s.messageBodyTTL())
+	return ledger.Put(context.Background(), state.CacheEntry{Namespace: "mailbox_uidvalidity", Key: mailboxCacheKey(connectionID, folder), ConnectionID: connectionID, Kind: "sync_state", ProviderID: folder, ExpiresAt: s.now().Add(ttl), Value: data})
 }
 
 func (s *Service) cachedMailboxUIDValidity(ledger *state.Store, connectionID, folder string) (uint32, bool) {

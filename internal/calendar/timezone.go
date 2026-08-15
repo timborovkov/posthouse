@@ -22,10 +22,6 @@ func embeddedTimezones(calendar *ics.Calendar) (map[string]*time.Location, error
 			return nil, fmt.Errorf("VTIMEZONE is missing TZID")
 		}
 		id := strings.TrimSpace(property.Value)
-		if location, err := time.LoadLocation(id); err == nil {
-			locations[id] = location
-			continue
-		}
 		location, err := locationFromVTimezone(id, timezone)
 		if err != nil {
 			return nil, fmt.Errorf("parse embedded timezone %s: %w", id, err)

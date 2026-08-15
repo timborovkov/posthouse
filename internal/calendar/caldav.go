@@ -208,7 +208,7 @@ func PutCalDAVEvent(ctx context.Context, connection model.Connection, event mode
 	generated.ConnectionID = connection.ID
 	generated.CollectionID = collection.ID
 	generated.Href = href
-	generated.ETag = strings.Trim(response.Header.Get("ETag"), `"`)
+	generated.ETag = strings.TrimSpace(response.Header.Get("ETag"))
 	return generated, nil
 }
 
@@ -442,7 +442,7 @@ func getCalendarObject(ctx context.Context, client *basicAuthClient, endpoint, h
 	if len(data) > maxFeedBytes {
 		return nil, "", fmt.Errorf("CalDAV object exceeds 16 MiB")
 	}
-	return data, strings.Trim(response.Header.Get("ETag"), `"`), nil
+	return data, strings.TrimSpace(response.Header.Get("ETag")), nil
 }
 
 func resolveCalendarURL(connection model.Connection) (string, error) {
@@ -550,10 +550,17 @@ func safeTransportError(operation string, err error) error {
 
 func quoteETag(value string) string {
 	value = strings.TrimSpace(value)
-	if strings.HasPrefix(value, `"`) || strings.HasPrefix(value, "W/") {
-		return value
+	weak := strings.HasPrefix(value, "W/")
+	if weak {
+		value = strings.TrimSpace(strings.TrimPrefix(value, "W/"))
 	}
-	return `"` + value + `"`
+	if !strings.HasPrefix(value, `"`) || !strings.HasSuffix(value, `"`) {
+		value = `"` + strings.Trim(value, `"`) + `"`
+	}
+	if weak {
+		return "W/" + value
+	}
+	return value
 }
 
 func responseError(operation string, response *http.Response) error {

@@ -624,6 +624,36 @@ func TestOfflineMessageAndAttachmentReads(t *testing.T) {
 	}
 }
 
+func TestMailboxUIDValidityLivesAsLongAsBodyCache(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	application := serviceWithConnections(t, mailConnection("work"))
+	cfg, err := application.store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Cache.MessageMetadataDays = 1
+	cfg.Cache.MessageBodyDays = 30
+	if err := application.store.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)
+	application.now = func() time.Time { return now }
+	ledger, err := application.ensureState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := application.cacheMailboxUIDValidity(ledger, "work", "INBOX", 11); err != nil {
+		t.Fatal(err)
+	}
+	entry, ok, err := ledger.Get(context.Background(), "mailbox_uidvalidity", mailboxCacheKey("work", "INBOX"), true)
+	if err != nil || !ok {
+		t.Fatalf("UIDVALIDITY cache entry = %#v, %v", entry, err)
+	}
+	if want := now.Add(30 * 24 * time.Hour); !entry.ExpiresAt.Equal(want) {
+		t.Fatalf("UIDVALIDITY expires at %v, want %v", entry.ExpiresAt, want)
+	}
+}
+
 func TestLiveAttachmentCacheValidatesUIDValidityAndPreservesMetadata(t *testing.T) {
 	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
 	application := serviceWithConnections(t, mailConnection("work"))

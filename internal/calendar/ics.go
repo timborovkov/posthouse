@@ -278,15 +278,31 @@ func recurrenceCandidateBounds(master model.Event, overrides []futureOverride, r
 		lookback = rangeStart.AddDate(0, 0, -calendarDaySpan(master.Start, master.End))
 	}
 	candidateEnd := rangeEnd
-	for _, override := range overrides {
+	for index, override := range overrides {
 		delta := override.event.Start.Sub(override.original)
 		candidateStart := rangeStart.Add(-override.event.End.Sub(override.event.Start)).Add(-delta)
-		if candidateStart.Before(lookback) {
-			lookback = candidateStart
-		}
 		shiftedEnd := rangeEnd.Add(-delta)
-		if shiftedEnd.After(candidateEnd) {
-			candidateEnd = shiftedEnd
+		applicabilityStart := override.original
+		var applicabilityEnd time.Time
+		if index+1 < len(overrides) {
+			applicabilityEnd = overrides[index+1].original
+		}
+		if shiftedEnd.Before(applicabilityStart) || shiftedEnd.Equal(applicabilityStart) || (!applicabilityEnd.IsZero() && !candidateStart.Before(applicabilityEnd)) {
+			continue
+		}
+		if candidateStart.Before(applicabilityStart) {
+			candidateStart = applicabilityStart
+		}
+		if !applicabilityEnd.IsZero() && shiftedEnd.After(applicabilityEnd) {
+			shiftedEnd = applicabilityEnd
+		}
+		if candidateStart.Before(shiftedEnd) {
+			if candidateStart.Before(lookback) {
+				lookback = candidateStart
+			}
+			if shiftedEnd.After(candidateEnd) {
+				candidateEnd = shiftedEnd
+			}
 		}
 	}
 	return lookback, candidateEnd
@@ -550,6 +566,15 @@ func Generate(event model.Event) (model.Event, string, error) {
 			return model.Event{}, "", fmt.Errorf("recurrence range must be THISANDFUTURE on a recurrence override")
 		}
 		event.RecurrenceRange = "THISANDFUTURE"
+	}
+	if event.RecurrenceRule != "" {
+		event.RecurrenceRule = strings.TrimSpace(event.RecurrenceRule)
+		if strings.ContainsAny(event.RecurrenceRule, "\r\n") {
+			return model.Event{}, "", fmt.Errorf("recurrence rule must be a single content-line value")
+		}
+		if _, err := rrule.StrToRRule("RRULE:" + event.RecurrenceRule); err != nil {
+			return model.Event{}, "", fmt.Errorf("invalid recurrence rule: %w", err)
+		}
 	}
 	if event.ID == "" {
 		event.ID = "posthouse-" + rand.Text()
