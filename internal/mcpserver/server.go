@@ -42,8 +42,8 @@ func (s *Server) RunHTTP(ctx context.Context, address string, token string, logg
 	if err != nil {
 		return fmt.Errorf("invalid HTTP address %q: %w", address, err)
 	}
-	if !isLoopback(host) && token == "" {
-		return fmt.Errorf("POSTHOUSE_MCP_TOKEN is required when listening outside localhost")
+	if !isLoopback(host) {
+		return fmt.Errorf("direct MCP HTTP must listen on loopback; use a TLS-terminating reverse proxy for remote access")
 	}
 	handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return s.mcp }, &mcp.StreamableHTTPOptions{
 		Stateless: true, JSONResponse: true, Logger: logger, SessionTimeout: 5 * time.Minute,

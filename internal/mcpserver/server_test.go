@@ -3,6 +3,7 @@ package mcpserver
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -139,5 +140,13 @@ func TestAuthenticate(t *testing.T) {
 	handler.ServeHTTP(authorized, request)
 	if authorized.Code != http.StatusNoContent {
 		t.Fatalf("authorized status is %d", authorized.Code)
+	}
+}
+
+func TestRunHTTPRejectsNonLoopbackEvenWithToken(t *testing.T) {
+	server := New(nil)
+	err := server.RunHTTP(context.Background(), "0.0.0.0:8791", "secret", slog.Default())
+	if err == nil || !strings.Contains(err.Error(), "must listen on loopback") {
+		t.Fatalf("RunHTTP non-loopback error = %v", err)
 	}
 }
