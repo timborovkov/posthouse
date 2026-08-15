@@ -125,6 +125,24 @@ func TestLRUEvictsAttachmentsBeforeBodies(t *testing.T) {
 	}
 }
 
+func TestEvictionBoundsSyncStateEntries(t *testing.T) {
+	store, err := state.OpenWithKey(filepath.Join(t.TempDir(), "state.db"), 10, bytesOf(6, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	for _, key := range []string{"one", "two"} {
+		if err := store.Put(ctx, state.CacheEntry{Namespace: "sync", Key: key, Kind: "sync_state", Value: []byte("12345678")}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stats, err := store.Stats(ctx)
+	if err != nil || stats.Bytes > stats.MaxBytes || stats.Entries > 1 {
+		t.Fatalf("sync-state cache exceeded limit: %#v, %v", stats, err)
+	}
+}
+
 func TestUpdatingEntryDoesNotReplaceAnotherEntriesChunks(t *testing.T) {
 	store, err := state.OpenWithKey(filepath.Join(t.TempDir(), "state.db"), 2<<20, bytesOf(8, 32))
 	if err != nil {

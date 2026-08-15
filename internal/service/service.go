@@ -43,6 +43,7 @@ type Service struct {
 	mailAppendRawContext   func(context.Context, model.Connection, string, []byte, []imap.Flag) (uint32, error)
 	mailMarkDeleted        func(model.Connection, string, uint32, postmail.MessagePrecondition) error
 	mailMarkDeletedContext func(context.Context, model.Connection, string, uint32, postmail.MessagePrecondition) error
+	mailGetMessage         func(context.Context, model.Connection, string, uint32) (postmail.FetchedMessage, error)
 	mailGetAttachment      func(context.Context, model.Connection, string, uint32, string) (model.Attachment, []byte, uint32, error)
 	mailboxUIDValidity     func(context.Context, model.Connection, string) (uint32, error)
 	stateMu                sync.Mutex
@@ -56,7 +57,7 @@ func New(store *config.Store) *Service {
 		store: store, calendar: calendar.NewClient(nil), mailSearchContext: postmail.SearchContext,
 		mailSnapshotContext: postmail.SnapshotMessageContext,
 		mailAppendContext:   postmail.AppendContext, mailMarkDeletedContext: postmail.MarkDeletedContext,
-		mailGetAttachment: postmail.GetAttachmentContext, mailboxUIDValidity: postmail.MailboxUIDValidityContext,
+		mailGetMessage: postmail.GetContext, mailGetAttachment: postmail.GetAttachmentContext, mailboxUIDValidity: postmail.MailboxUIDValidityContext,
 		mailBuild: postmail.BuildMessage, mailSendRawContext: postmail.SendSerializedContext, mailAppendRawContext: postmail.AppendSerializedContext,
 		now: func() time.Time { return time.Now().UTC() },
 	}
@@ -642,7 +643,7 @@ func (s *Service) PrepareSend(ctx context.Context, message model.SendMessage) (m
 }
 
 func (s *Service) PrepareReply(ctx context.Context, connectionID, folder string, uid uint32, text string) (model.PreparedOperation, error) {
-	original, err := s.GetMessage(connectionID, folder, uid)
+	original, err := s.GetMessageContext(ctx, connectionID, folder, uid)
 	if err != nil {
 		return model.PreparedOperation{}, err
 	}
@@ -661,7 +662,7 @@ func (s *Service) PrepareForward(ctx context.Context, connectionID, folder strin
 	if len(recipients) == 0 {
 		return model.PreparedOperation{}, fmt.Errorf("forward requires at least one recipient")
 	}
-	original, err := s.GetMessage(connectionID, folder, uid)
+	original, err := s.GetMessageContext(ctx, connectionID, folder, uid)
 	if err != nil {
 		return model.PreparedOperation{}, err
 	}
@@ -1143,10 +1144,18 @@ func (s *Service) snapshotMessage(ctx context.Context, connection model.Connecti
 }
 
 func (s *Service) GetMessage(connectionID, folder string, uid uint32) (model.MessageDetail, error) {
-	return s.GetMessageMode(connectionID, folder, uid, "")
+	return s.GetMessageModeContext(context.Background(), connectionID, folder, uid, "")
 }
 
 func (s *Service) GetMessageMode(connectionID, folder string, uid uint32, mode string) (model.MessageDetail, error) {
+	return s.GetMessageModeContext(context.Background(), connectionID, folder, uid, mode)
+}
+
+func (s *Service) GetMessageContext(ctx context.Context, connectionID, folder string, uid uint32) (model.MessageDetail, error) {
+	return s.GetMessageModeContext(ctx, connectionID, folder, uid, "")
+}
+
+func (s *Service) GetMessageModeContext(ctx context.Context, connectionID, folder string, uid uint32, mode string) (model.MessageDetail, error) {
 	connection, err := s.exactConnection(connectionID, "mail.read")
 	if err != nil {
 		return model.MessageDetail{}, err
@@ -1157,8 +1166,27 @@ func (s *Service) GetMessageMode(connectionID, folder string, uid uint32, mode s
 			folder = "INBOX"
 		}
 	}
+	confirmedUIDMismatch := false
+	if mode == "" {
+		if cached, ok := s.cachedMessage(connection.ID, folder, uid); ok {
+			ledger, stateErr := s.ensureState()
+			cachedUIDValidity, validityOK := uint32(0), false
+			if stateErr == nil {
+				cachedUIDValidity, validityOK = s.cachedMailboxUIDValidity(ledger, connection.ID, folder)
+			}
+			liveUIDValidity, validityErr := s.mailboxUIDValidity(ctx, connection, folder)
+			if validityErr != nil {
+				cached.Stale = true
+				return cached, nil
+			}
+			confirmedUIDMismatch = validityOK && liveUIDValidity != cachedUIDValidity
+			if confirmedUIDMismatch && stateErr == nil {
+				_ = s.cacheMailboxUIDValidity(ledger, connection.ID, folder, liveUIDValidity)
+			}
+		}
+	}
 	if mode != "offline" {
-		fetched, fetchErr := postmail.Get(connection, folder, uid)
+		fetched, fetchErr := s.mailGetMessage(ctx, connection, folder, uid)
 		if fetchErr == nil {
 			if ledger, stateErr := s.ensureState(); stateErr == nil {
 				data, _ := json.Marshal(fetched.Detail)
@@ -1172,9 +1200,11 @@ func (s *Service) GetMessageMode(connectionID, folder string, uid uint32, mode s
 		}
 		err = fetchErr
 	}
-	if cached, ok := s.cachedMessage(connection.ID, folder, uid); ok {
-		cached.Stale = true
-		return cached, nil
+	if !confirmedUIDMismatch {
+		if cached, ok := s.cachedMessage(connection.ID, folder, uid); ok {
+			cached.Stale = true
+			return cached, nil
+		}
 	}
 	if err != nil {
 		return model.MessageDetail{}, err
@@ -2053,11 +2083,19 @@ func scopedCacheKey(connectionID string, scope any) string {
 }
 
 func messageCacheKey(connectionID, folder string, uidValidity, uid uint32) string {
-	return fmt.Sprintf("%s/%s/%d/%d", connectionID, folder, uidValidity, uid)
+	return framedCacheKey(connectionID, folder, fmt.Sprint(uidValidity), fmt.Sprint(uid))
 }
 
 func mailboxCacheKey(connectionID, folder string) string {
-	return connectionID + "/" + folder
+	return framedCacheKey(connectionID, folder)
+}
+
+func framedCacheKey(parts ...string) string {
+	var result strings.Builder
+	for _, part := range parts {
+		_, _ = fmt.Fprintf(&result, "%d:%s", len(part), part)
+	}
+	return result.String()
 }
 
 func (s *Service) cacheMailboxUIDValidity(ledger *state.Store, connectionID, folder string, uidValidity uint32) error {

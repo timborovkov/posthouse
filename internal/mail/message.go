@@ -209,6 +209,7 @@ func parseMessage(raw []byte) (FetchedMessage, error) {
 	result.Detail.From = headerAddresses(reader.Header, "From")
 	result.Detail.To = headerAddresses(reader.Header, "To")
 	result.Detail.CC = headerAddresses(reader.Header, "Cc")
+	result.Detail.BCC = headerAddresses(reader.Header, "Bcc")
 	result.Detail.ReplyTo = headerAddresses(reader.Header, "Reply-To")
 	result.Detail.InReplyTo = strings.TrimSpace(reader.Header.Get("In-Reply-To"))
 	result.Detail.References = strings.Fields(reader.Header.Get("References"))
@@ -533,7 +534,7 @@ func Append(connection model.Connection, folder string, message model.SendMessag
 }
 
 func AppendContext(ctx context.Context, connection model.Connection, folder string, message model.SendMessage, flags []imap.Flag) (uint32, error) {
-	data, err := BuildMessage(connection, message)
+	data, err := BuildDraftMessage(connection, message)
 	if err != nil {
 		return 0, fmt.Errorf("build IMAP message: %w", err)
 	}

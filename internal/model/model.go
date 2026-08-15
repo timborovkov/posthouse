@@ -175,6 +175,7 @@ type Attachment struct {
 type MessageDetail struct {
 	Message
 	CC          []Address    `json:"cc,omitempty"`
+	BCC         []Address    `json:"bcc,omitempty"`
 	ReplyTo     []Address    `json:"reply_to,omitempty"`
 	Text        string       `json:"text,omitempty"`
 	HTML        string       `json:"html,omitempty"`
@@ -204,6 +205,7 @@ type Event struct {
 	ETag              string             `json:"etag,omitempty"`
 	Href              string             `json:"href,omitempty"`
 	RecurrenceID      string             `json:"recurrence_id,omitempty"`
+	RecurrenceRange   string             `json:"recurrence_range,omitempty"`
 	RecurrenceRule    string             `json:"recurrence_rule,omitempty"`
 	RecurrenceDates   []time.Time        `json:"recurrence_dates,omitempty"`
 	RecurrencePeriods []RecurrencePeriod `json:"recurrence_periods,omitempty"`

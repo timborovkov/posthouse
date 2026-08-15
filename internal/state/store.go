@@ -770,6 +770,20 @@ func (s *Store) evict(ctx context.Context) error {
 			}
 		}
 	}
+	for stats.Bytes > s.maxBytes {
+		result, err := s.db.ExecContext(ctx, `DELETE FROM cache_entries WHERE id=(SELECT id FROM cache_entries ORDER BY accessed_at LIMIT 1)`)
+		if err != nil {
+			return fmt.Errorf("evict cache state: %w", err)
+		}
+		count, _ := result.RowsAffected()
+		if count == 0 {
+			break
+		}
+		stats, err = s.Stats(ctx)
+		if err != nil {
+			return err
+		}
+	}
 	if stats.Bytes > s.maxBytes {
 		return fmt.Errorf("encrypted state exceeds configured %d-byte limit", s.maxBytes)
 	}

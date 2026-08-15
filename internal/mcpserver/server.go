@@ -312,11 +312,11 @@ func (s *Server) registerTools() {
 		})
 
 	mcp.AddTool(s.mcp, &mcp.Tool{Name: "messages_get", Title: "Get message", Description: "Fetch and decode one complete MIME message from an exact connection and UID, including safe HTML, text, threading headers, and attachment metadata.", Annotations: readOnly},
-		func(_ context.Context, _ *mcp.CallToolRequest, input messageGetInput) (*mcp.CallToolResult, model.MessageDetail, error) {
+		func(ctx context.Context, _ *mcp.CallToolRequest, input messageGetInput) (*mcp.CallToolResult, model.MessageDetail, error) {
 			if err := validateReadMode(input.Mode); err != nil {
 				return nil, model.MessageDetail{}, err
 			}
-			detail, err := s.service.GetMessageMode(input.Connection, input.Folder, input.UID, input.Mode)
+			detail, err := s.service.GetMessageModeContext(ctx, input.Connection, input.Folder, input.UID, input.Mode)
 			return nil, detail, err
 		})
 

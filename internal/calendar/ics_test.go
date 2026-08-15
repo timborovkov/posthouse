@@ -340,7 +340,7 @@ BEGIN:VEVENT
 UID:finite-dense
 DTSTART:20260801T000000Z
 DTEND:20260801T000030Z
-RRULE:FREQ=MINUTELY;COUNT=20000
+RRULE:FREQ=MINUTELY;COUNT=20000;BYSECOND=0
 SUMMARY:Finite dense series
 END:VEVENT
 END:VCALENDAR`
@@ -352,6 +352,41 @@ END:VCALENDAR`
 	}
 	if len(events) != 60 || !events[0].Start.Equal(start) || !events[59].Start.Equal(start.Add(59*time.Minute)) {
 		t.Fatalf("finite fast-forward returned %#v", events)
+	}
+}
+
+func TestParseRangeAppliesThisAndFutureOverride(t *testing.T) {
+	data := `BEGIN:VCALENDAR
+VERSION:2.0
+BEGIN:VEVENT
+UID:ranged
+DTSTART:20260815T090000Z
+DTEND:20260815T100000Z
+RRULE:FREQ=DAILY;COUNT=4
+SUMMARY:Original
+END:VEVENT
+BEGIN:VEVENT
+UID:ranged
+RECURRENCE-ID;RANGE=THISANDFUTURE:20260816T090000Z
+DTSTART:20260816T110000Z
+DTEND:20260816T130000Z
+SUMMARY:Rescheduled
+END:VEVENT
+END:VCALENDAR`
+	events, err := ParseRange([]byte(data), time.Date(2026, 8, 15, 0, 0, 0, 0, time.UTC), time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 4 || events[0].Start.Hour() != 9 {
+		t.Fatalf("THISANDFUTURE events = %#v", events)
+	}
+	for _, event := range events[1:] {
+		if event.Start.Hour() != 11 || event.End.Sub(event.Start) != 2*time.Hour || event.Title != "Rescheduled" {
+			t.Fatalf("rescheduled occurrence = %#v", event)
+		}
+	}
+	if events[1].RecurrenceRange != "THISANDFUTURE" || events[2].RecurrenceRange != "" {
+		t.Fatalf("recurrence range metadata = %#v", events)
 	}
 }
 

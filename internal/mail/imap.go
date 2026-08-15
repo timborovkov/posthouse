@@ -150,10 +150,14 @@ func SearchContext(ctx context.Context, connection model.Connection, options Sea
 	}
 	if providerOrdered {
 		windowLimit := options.Limit + 1
+		cursorMissing := missingSortCursor(uids, options.CursorUID)
 		if needsUnboundedSortWindow(options) {
 			windowLimit = 0
 		}
 		uids = orderedUIDWindow(uids, options.CursorUID, windowLimit)
+		if cursorMissing {
+			providerOrdered = false
+		}
 	}
 	candidates, err := fetchSearchCandidates(client, connection.ID, options, uids, providerOrdered)
 	if err != nil {
@@ -196,6 +200,10 @@ func SearchContext(ctx context.Context, connection model.Connection, options Sea
 		}
 	}
 	return SearchResult{Messages: messages, UIDValidity: selected.UIDValidity, UIDNext: uint32(selected.UIDNext), HasMore: hasMore}, nil
+}
+
+func missingSortCursor(uids []imap.UID, cursorUID uint32) bool {
+	return cursorUID != 0 && !slices.Contains(uids, imap.UID(cursorUID))
 }
 
 func needsUnboundedSortWindow(options SearchOptions) bool {

@@ -59,6 +59,25 @@ func TestBuildMessageDoesNotExposeBCCAndNormalizesHeaders(t *testing.T) {
 	}
 }
 
+func TestBuildDraftMessagePreservesBCC(t *testing.T) {
+	connection := model.Connection{Identity: model.Identity{Email: "sender@example.com"}}
+	message := model.SendMessage{To: []string{"one@example.com"}, BCC: []string{"hidden@example.com"}, Subject: "Draft", Text: "body"}
+	draft, err := BuildDraftMessage(connection, message)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sent, err := BuildMessage(connection, message)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(draft), "Bcc: <hidden@example.com>") {
+		t.Fatalf("draft omitted Bcc header: %q", draft)
+	}
+	if strings.Contains(string(sent), "Bcc:") {
+		t.Fatalf("SMTP message exposed Bcc header: %q", sent)
+	}
+}
+
 func TestSMTPHost(t *testing.T) {
 	got, err := smtpHost("smtp.example.com:465")
 	if err != nil || got != "smtp.example.com" {

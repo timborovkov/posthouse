@@ -291,7 +291,7 @@ func (p *posthouseApp) openSelected(ke tui.KeyEvent) {
 			return
 		}
 		item := items[p.selected.Get()]
-		detail, err := p.service.GetMessage(item.ConnectionID, item.Folder, item.UID)
+		detail, err := p.service.GetMessageContext(p.ctx, item.ConnectionID, item.Folder, item.UID)
 		if err != nil {
 			p.errorText.Set(err.Error())
 			return

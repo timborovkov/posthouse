@@ -50,6 +50,13 @@ func TestOrderedUIDWindowBoundsContinuationFetch(t *testing.T) {
 	}
 }
 
+func TestMissingSortCursorRequiresFullCandidateScan(t *testing.T) {
+	uids := []imap.UID{5, 4, 2, 1}
+	if !missingSortCursor(uids, 3) || missingSortCursor(uids, 4) || missingSortCursor(uids, 0) {
+		t.Fatal("missing SORT cursor detection did not distinguish deleted and present cursors")
+	}
+}
+
 func TestIMAPSearchUsesDaySupersetForExactTimestampBounds(t *testing.T) {
 	since := time.Date(2026, 8, 15, 12, 30, 0, 0, time.UTC)
 	before := time.Date(2026, 8, 16, 8, 15, 0, 0, time.UTC)

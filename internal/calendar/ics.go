@@ -125,14 +125,25 @@ func ParseRange(data []byte, rangeStart, rangeEnd time.Time) ([]model.Event, err
 		rangeEnd = time.Now().Add(365 * 24 * time.Hour)
 	}
 	overrides := make(map[string]model.Event)
+	futureOverrides := make(map[string][]futureOverride)
 	consumedOverrides := make(map[string]bool)
 	cancelledMasters := make(map[string]bool)
 	for _, event := range parsed {
 		if event.RecurrenceID != "" {
 			overrides[event.ID+"\x00"+event.RecurrenceID] = event
+			if strings.EqualFold(event.RecurrenceRange, "THISANDFUTURE") {
+				original, err := time.Parse(time.RFC3339, event.RecurrenceID)
+				if err != nil {
+					return nil, fmt.Errorf("parse recurrence range for event %s: %w", event.ID, err)
+				}
+				futureOverrides[event.ID] = append(futureOverrides[event.ID], futureOverride{original: original, event: event})
+			}
 		} else if strings.EqualFold(event.Status, "CANCELLED") {
 			cancelledMasters[event.ID] = true
 		}
+	}
+	for id := range futureOverrides {
+		slices.SortFunc(futureOverrides[id], func(a, b futureOverride) int { return a.original.Compare(b.original) })
 	}
 	const maxOccurrences = 10000
 	result := make([]model.Event, 0, len(parsed))
@@ -203,6 +214,21 @@ func ParseRange(data []byte, rangeStart, rangeEnd time.Time) ([]model.Event, err
 				}
 				continue
 			}
+			if ranged, originalStart, ok := applicableFutureOverride(futureOverrides[event.ID], occurrenceStart); ok {
+				if !strings.EqualFold(ranged.Status, "CANCELLED") {
+					occurrence := ranged
+					occurrence.ID = stableOccurrenceID(event.ID, occurrenceStart)
+					occurrence.RecurrenceID = recurrenceID
+					occurrence.RecurrenceRange = ""
+					occurrence.Start = occurrenceStart.Add(ranged.Start.Sub(originalStart))
+					occurrence.End = occurrence.Start.Add(ranged.End.Sub(ranged.Start))
+					clearRecurrenceSet(&occurrence)
+					if overlaps(occurrence, rangeStart, rangeEnd) {
+						result = append(result, occurrence)
+					}
+				}
+				continue
+			}
 			occurrence := event
 			occurrence.RecurrenceID = recurrenceID
 			occurrence.ID = stableOccurrenceID(event.ID, occurrenceStart)
@@ -249,6 +275,25 @@ func ParseRange(data []byte, rangeStart, rangeEnd time.Time) ([]model.Event, err
 	return result, nil
 }
 
+type futureOverride struct {
+	original time.Time
+	event    model.Event
+}
+
+func applicableFutureOverride(overrides []futureOverride, occurrenceStart time.Time) (model.Event, time.Time, bool) {
+	index := -1
+	for candidate := range overrides {
+		if overrides[candidate].original.After(occurrenceStart) {
+			break
+		}
+		index = candidate
+	}
+	if index < 0 {
+		return model.Event{}, time.Time{}, false
+	}
+	return overrides[index].event, overrides[index].original, true
+}
+
 func fastForwardRule(rule *rrule.RRule, lookback time.Time) (*rrule.RRule, bool, error) {
 	options := rule.OrigOptions
 	if !options.Dtstart.Before(lookback) {
@@ -278,7 +323,7 @@ func fastForwardRule(rule *rrule.RRule, lookback time.Time) (*rrule.RRule, bool,
 	}
 	if options.Count != 0 {
 		if hasRecurrenceSelectors(options) {
-			return rule, false, nil
+			return fastForwardCountedRule(rule, lookback)
 		}
 		if steps >= int64(options.Count) {
 			return nil, true, nil
@@ -288,6 +333,29 @@ func fastForwardRule(rule *rrule.RRule, lookback time.Time) (*rrule.RRule, bool,
 	options.Dtstart = options.Dtstart.Add(time.Duration(steps*int64(interval)) * unit)
 	shifted, err := rrule.NewRRule(options)
 	return shifted, false, err
+}
+
+func fastForwardCountedRule(rule *rrule.RRule, lookback time.Time) (*rrule.RRule, bool, error) {
+	const maxFastForwardWork = 1000000
+	options := rule.OrigOptions
+	next := rule.Iterator()
+	skipped := 0
+	for {
+		occurrence, ok := next()
+		if !ok {
+			return nil, true, nil
+		}
+		if !occurrence.Before(lookback) {
+			options.Dtstart = occurrence
+			options.Count -= skipped
+			shifted, err := rrule.NewRRule(options)
+			return shifted, false, err
+		}
+		skipped++
+		if skipped > maxFastForwardWork {
+			return nil, false, fmt.Errorf("recurrence fast-forward exceeds %d occurrences", maxFastForwardWork)
+		}
+	}
 }
 
 func hasRecurrenceSelectors(options rrule.ROption) bool {
@@ -388,6 +456,9 @@ func typedEvent(component *ics.VEvent, locations map[string]*time.Location) (mod
 			return model.Event{}, fmt.Errorf("parse RECURRENCE-ID for event %s: %w", event.ID, err)
 		}
 		event.RecurrenceID = parsed.UTC().Format(time.RFC3339)
+		if values := recurrenceID.ICalParameters["RANGE"]; len(values) > 0 {
+			event.RecurrenceRange = strings.ToUpper(values[0])
+		}
 	}
 	if sequence := component.GetProperty(ics.ComponentPropertySequence); sequence != nil {
 		event.Sequence, _ = strconv.Atoi(sequence.Value)
@@ -474,6 +545,9 @@ func Generate(event model.Event) (model.Event, string, error) {
 	if event.RecurrenceID != "" {
 		if recurrenceTime, err := time.Parse(time.RFC3339, event.RecurrenceID); err == nil {
 			key, value := formatRecurrenceTime("RECURRENCE-ID", recurrenceTime, event.AllDay)
+			if event.RecurrenceRange != "" {
+				key += ";RANGE=" + strings.ToUpper(event.RecurrenceRange)
+			}
 			lines = append(lines, key+":"+value)
 		}
 	}

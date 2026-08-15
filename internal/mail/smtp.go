@@ -45,6 +45,14 @@ func BuildMessage(connection model.Connection, message model.SendMessage) ([]byt
 	return buildMessage(connection.Identity, from, message)
 }
 
+func BuildDraftMessage(connection model.Connection, message model.SendMessage) ([]byte, error) {
+	from := connection.Identity.Email
+	if from == "" && connection.Mail != nil {
+		from = connection.Mail.Username
+	}
+	return buildMessageWithBCC(connection.Identity, from, message, true)
+}
+
 func ValidateMessage(message model.SendMessage) error { return validateMessage(message) }
 
 func SendSerialized(connection model.Connection, message model.SendMessage, data []byte) error {
@@ -192,11 +200,15 @@ func dialSMTPContext(ctx context.Context, settings model.SMTPConfig, host string
 }
 
 func buildMessage(identity model.Identity, from string, message model.SendMessage) ([]byte, error) {
+	return buildMessageWithBCC(identity, from, message, false)
+}
+
+func buildMessageWithBCC(identity model.Identity, from string, message model.SendMessage, includeBCC bool) ([]byte, error) {
 	if err := validateMessage(message); err != nil {
 		return nil, err
 	}
 	var buffer bytes.Buffer
-	if err := writeMessage(&buffer, identity, from, message); err != nil {
+	if err := writeMessage(&buffer, identity, from, message, includeBCC); err != nil {
 		return nil, err
 	}
 	return buffer.Bytes(), nil
@@ -235,7 +247,7 @@ func validateMessage(message model.SendMessage) error {
 	return nil
 }
 
-func writeMessage(writer io.Writer, identity model.Identity, from string, message model.SendMessage) error {
+func writeMessage(writer io.Writer, identity model.Identity, from string, message model.SendMessage, includeBCC bool) error {
 	var header gomail.Header
 	header.SetDate(time.Now())
 	header.SetAddressList("From", []*gomail.Address{{Name: identity.Name, Address: from}})
@@ -244,6 +256,11 @@ func writeMessage(writer io.Writer, identity model.Identity, from string, messag
 	}
 	if err := setAddresses(&header, "Cc", message.CC); err != nil {
 		return err
+	}
+	if includeBCC {
+		if err := setAddresses(&header, "Bcc", message.BCC); err != nil {
+			return err
+		}
 	}
 	if message.ReplyTo != "" {
 		if err := setAddresses(&header, "Reply-To", []string{message.ReplyTo}); err != nil {

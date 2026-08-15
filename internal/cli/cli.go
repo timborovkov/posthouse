@@ -237,7 +237,7 @@ func (c *CLI) mail(ctx context.Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		detail, err := c.service.GetMessageMode(*connection, *folder, messageUID, mode)
+		detail, err := c.service.GetMessageModeContext(ctx, *connection, *folder, messageUID, mode)
 		if err != nil {
 			return err
 		}

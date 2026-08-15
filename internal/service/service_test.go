@@ -671,6 +671,47 @@ func TestAttachmentFetchReceivesRequestContext(t *testing.T) {
 	}
 }
 
+func TestMessageFetchReceivesContextAndRejectsOldMailboxCache(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	application := serviceWithConnections(t, mailConnection("work"))
+	ledger, err := application.ensureState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := application.cacheMailboxUIDValidity(ledger, "work", "INBOX", 11); err != nil {
+		t.Fatal(err)
+	}
+	cached := model.MessageDetail{Message: model.Message{ConnectionID: "work", Folder: "INBOX", UID: 7, Subject: "old mailbox"}}
+	data, _ := json.Marshal(cached)
+	if err := ledger.Put(context.Background(), state.CacheEntry{Namespace: "message_body", Key: messageCacheKey("work", "INBOX", 11, 7), Kind: "message_body", ExpiresAt: time.Now().Add(time.Hour), Value: data}); err != nil {
+		t.Fatal(err)
+	}
+	application.mailboxUIDValidity = func(context.Context, model.Connection, string) (uint32, error) { return 12, nil }
+	application.mailGetMessage = func(ctx context.Context, _ model.Connection, _ string, _ uint32) (postmail.FetchedMessage, error) {
+		if err := ctx.Err(); err != nil {
+			return postmail.FetchedMessage{}, err
+		}
+		return postmail.FetchedMessage{}, errors.New("new mailbox message missing")
+	}
+	if detail, err := application.GetMessageModeContext(context.Background(), "work", "INBOX", 7, ""); err == nil || detail.Subject == "old mailbox" {
+		t.Fatalf("UIDVALIDITY mismatch returned old body %#v: %v", detail, err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := application.GetMessageModeContext(ctx, "work", "INBOX", 7, "refresh"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled message fetch returned %v", err)
+	}
+}
+
+func TestCacheKeysFrameConnectionAndFolder(t *testing.T) {
+	if mailboxCacheKey("a", "b/c") == mailboxCacheKey("a/b", "c") {
+		t.Fatal("mailbox cache key aliases connection and folder boundaries")
+	}
+	if messageCacheKey("a", "b/c", 1, 2) == messageCacheKey("a/b", "c", 1, 2) {
+		t.Fatal("message cache key aliases connection and folder boundaries")
+	}
+}
+
 func TestPrepareMailActionResolvesDefaultFolderInPayloadAndPreview(t *testing.T) {
 	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
 	connection := mailConnection("work")
