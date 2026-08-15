@@ -559,6 +559,9 @@ func AppendSerializedContext(ctx context.Context, connection model.Connection, f
 	defer stop()
 	defer client.Close()
 	defer client.Logout()
+	if !supportsAddressableAppend(client.Caps()) {
+		return 0, fmt.Errorf("IMAP server must advertise UIDPLUS or IMAP4rev2 for addressable draft append")
+	}
 	command := client.Append(folder, int64(len(data)), &imap.AppendOptions{Flags: flags, Time: time.Now()})
 	if _, err := command.Write(data); err != nil {
 		_ = command.Close()
@@ -570,6 +573,15 @@ func AppendSerializedContext(ctx context.Context, connection model.Connection, f
 	result, err := command.Wait()
 	if err != nil {
 		return 0, classifyAppendWaitError(err)
+	}
+	return addressableAppendUID(result)
+}
+
+func supportsAddressableAppend(caps imap.CapSet) bool { return caps.Has(imap.CapUIDPlus) }
+
+func addressableAppendUID(result *imap.AppendData) (uint32, error) {
+	if result == nil || result.UID == 0 {
+		return 0, &UncertainAppendError{Err: fmt.Errorf("IMAP APPEND succeeded without an addressable UID")}
 	}
 	return uint32(result.UID), nil
 }

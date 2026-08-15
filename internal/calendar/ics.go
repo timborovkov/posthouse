@@ -160,84 +160,92 @@ func ParseRange(data []byte, rangeStart, rangeEnd time.Time) ([]model.Event, err
 			}
 			continue
 		}
-		lookback, candidateEnd := recurrenceCandidateBounds(event, futureOverrides[event.ID], rangeStart, rangeEnd)
-		set := &rrule.Set{}
-		if event.RecurrenceRule != "" {
-			rule, err := rrule.StrToRRule("RRULE:" + event.RecurrenceRule)
-			if err != nil {
-				return nil, fmt.Errorf("parse RRULE for event %s: %w", event.ID, err)
-			}
-			rule.DTStart(event.Start)
-			rule, exhausted, err := fastForwardRule(rule, lookback)
-			if err != nil {
-				return nil, fmt.Errorf("fast-forward RRULE for event %s: %w", event.ID, err)
-			}
-			if !exhausted {
-				set.RRule(rule)
-			}
-		} else {
-			set.DTStart(event.Start)
-		}
+		intervals := recurrenceCandidateIntervals(event, futureOverrides[event.ID], rangeStart, rangeEnd)
 		rdates := append([]time.Time{event.Start}, event.RecurrenceDates...)
 		periodEnds := make(map[string]time.Time, len(event.RecurrencePeriods))
 		for _, period := range event.RecurrencePeriods {
 			rdates = append(rdates, period.Start)
 			periodEnds[period.Start.UTC().Format(time.RFC3339Nano)] = period.End
 		}
-		set.SetRDates(rdates)
-		set.SetExDates(event.ExceptionDates)
-		next := set.Iterator()
 		generated := 0
-		for {
-			occurrenceStart, ok := next()
-			if !ok || occurrenceStart.After(candidateEnd) {
-				break
-			}
-			generated++
-			if generated > maxOccurrences || len(result) >= maxOccurrences {
-				return nil, fmt.Errorf("calendar recurrence expansion exceeds %d occurrences", maxOccurrences)
-			}
-			if occurrenceStart.Before(lookback) {
-				continue
-			}
-			recurrenceID := occurrenceStart.UTC().Format(time.RFC3339)
-			overrideKey := event.ID + "\x00" + recurrenceID
-			if override, ok := overrides[overrideKey]; ok {
-				consumedOverrides[overrideKey] = true
-				if !strings.EqualFold(override.Status, "CANCELLED") && overlaps(override, rangeStart, rangeEnd) {
-					override.ID = stableOccurrenceID(event.ID, occurrenceStart)
-					clearRecurrenceSet(&override)
-					result = append(result, override)
+		processedStarts := make(map[string]bool)
+		for _, interval := range intervals {
+			set := &rrule.Set{}
+			if event.RecurrenceRule != "" {
+				rule, err := rrule.StrToRRule("RRULE:" + event.RecurrenceRule)
+				if err != nil {
+					return nil, fmt.Errorf("parse RRULE for event %s: %w", event.ID, err)
 				}
-				continue
-			}
-			if ranged, originalStart, ok := applicableFutureOverride(futureOverrides[event.ID], occurrenceStart); ok {
-				if !strings.EqualFold(ranged.Status, "CANCELLED") {
-					occurrence := ranged
-					occurrence.ID = stableOccurrenceID(event.ID, occurrenceStart)
-					occurrence.RecurrenceID = recurrenceID
-					occurrence.RecurrenceRange = ""
-					occurrence.Start = occurrenceStart.Add(ranged.Start.Sub(originalStart))
-					occurrence.End = occurrence.Start.Add(ranged.End.Sub(ranged.Start))
-					clearRecurrenceSet(&occurrence)
-					if overlaps(occurrence, rangeStart, rangeEnd) {
-						result = append(result, occurrence)
-					}
+				rule.DTStart(event.Start)
+				rule, exhausted, err := fastForwardRule(rule, interval.start)
+				if err != nil {
+					return nil, fmt.Errorf("fast-forward RRULE for event %s: %w", event.ID, err)
 				}
-				continue
-			}
-			occurrence := event
-			occurrence.RecurrenceID = recurrenceID
-			occurrence.ID = stableOccurrenceID(event.ID, occurrenceStart)
-			clearRecurrenceSet(&occurrence)
-			if periodEnd, ok := periodEnds[occurrenceStart.UTC().Format(time.RFC3339Nano)]; ok {
-				occurrence.End = occurrenceStart.Add(periodEnd.Sub(occurrenceStart))
+				if !exhausted {
+					set.RRule(rule)
+				}
 			} else {
-				occurrence.End = recurringEnd(event, occurrenceStart)
+				set.DTStart(event.Start)
 			}
-			occurrence.Start = occurrenceStart
-			if overlaps(occurrence, rangeStart, rangeEnd) {
-				result = append(result, occurrence)
+			set.SetRDates(rdates)
+			set.SetExDates(event.ExceptionDates)
+			next := set.Iterator()
+			for {
+				occurrenceStart, ok := next()
+				if !ok || occurrenceStart.After(interval.end) {
+					break
+				}
+				if occurrenceStart.Before(interval.start) {
+					continue
+				}
+				startKey := occurrenceStart.UTC().Format(time.RFC3339Nano)
+				if processedStarts[startKey] {
+					continue
+				}
+				processedStarts[startKey] = true
+				generated++
+				if generated > maxOccurrences || len(result) >= maxOccurrences {
+					return nil, fmt.Errorf("calendar recurrence expansion exceeds %d occurrences", maxOccurrences)
+				}
+				recurrenceID := occurrenceStart.UTC().Format(time.RFC3339)
+				overrideKey := event.ID + "\x00" + recurrenceID
+				if override, ok := overrides[overrideKey]; ok {
+					consumedOverrides[overrideKey] = true
+					if !strings.EqualFold(override.Status, "CANCELLED") && overlaps(override, rangeStart, rangeEnd) {
+						override.ID = stableOccurrenceID(event.ID, occurrenceStart)
+						clearRecurrenceSet(&override)
+						result = append(result, override)
+					}
+					continue
+				}
+				if ranged, originalStart, ok := applicableFutureOverride(futureOverrides[event.ID], occurrenceStart); ok {
+					if !strings.EqualFold(ranged.Status, "CANCELLED") {
+						occurrence := ranged
+						occurrence.ID = stableOccurrenceID(event.ID, occurrenceStart)
+						occurrence.RecurrenceID = recurrenceID
+						occurrence.RecurrenceRange = ""
+						occurrence.Start = occurrenceStart.Add(ranged.Start.Sub(originalStart))
+						occurrence.End = occurrence.Start.Add(ranged.End.Sub(ranged.Start))
+						clearRecurrenceSet(&occurrence)
+						if overlaps(occurrence, rangeStart, rangeEnd) {
+							result = append(result, occurrence)
+						}
+					}
+					continue
+				}
+				occurrence := event
+				occurrence.RecurrenceID = recurrenceID
+				occurrence.ID = stableOccurrenceID(event.ID, occurrenceStart)
+				clearRecurrenceSet(&occurrence)
+				if periodEnd, ok := periodEnds[occurrenceStart.UTC().Format(time.RFC3339Nano)]; ok {
+					occurrence.End = occurrenceStart.Add(periodEnd.Sub(occurrenceStart))
+				} else {
+					occurrence.End = recurringEnd(event, occurrenceStart)
+				}
+				occurrence.Start = occurrenceStart
+				if overlaps(occurrence, rangeStart, rangeEnd) {
+					result = append(result, occurrence)
+				}
 			}
 		}
 	}
@@ -272,12 +280,17 @@ func ParseRange(data []byte, rangeStart, rangeEnd time.Time) ([]model.Event, err
 	return result, nil
 }
 
-func recurrenceCandidateBounds(master model.Event, overrides []futureOverride, rangeStart, rangeEnd time.Time) (time.Time, time.Time) {
+type recurrenceInterval struct {
+	start time.Time
+	end   time.Time
+}
+
+func recurrenceCandidateIntervals(master model.Event, overrides []futureOverride, rangeStart, rangeEnd time.Time) []recurrenceInterval {
 	lookback := rangeStart.Add(-master.End.Sub(master.Start))
 	if master.AllDay {
 		lookback = rangeStart.AddDate(0, 0, -calendarDaySpan(master.Start, master.End))
 	}
-	candidateEnd := rangeEnd
+	intervals := []recurrenceInterval{{start: lookback, end: rangeEnd}}
 	for index, override := range overrides {
 		delta := override.event.Start.Sub(override.original)
 		candidateStart := rangeStart.Add(-override.event.End.Sub(override.event.Start)).Add(-delta)
@@ -297,15 +310,21 @@ func recurrenceCandidateBounds(master model.Event, overrides []futureOverride, r
 			shiftedEnd = applicabilityEnd
 		}
 		if candidateStart.Before(shiftedEnd) {
-			if candidateStart.Before(lookback) {
-				lookback = candidateStart
-			}
-			if shiftedEnd.After(candidateEnd) {
-				candidateEnd = shiftedEnd
-			}
+			intervals = append(intervals, recurrenceInterval{start: candidateStart, end: shiftedEnd})
 		}
 	}
-	return lookback, candidateEnd
+	slices.SortFunc(intervals, func(a, b recurrenceInterval) int { return a.start.Compare(b.start) })
+	merged := intervals[:0]
+	for _, interval := range intervals {
+		if len(merged) == 0 || interval.start.After(merged[len(merged)-1].end) {
+			merged = append(merged, interval)
+			continue
+		}
+		if interval.end.After(merged[len(merged)-1].end) {
+			merged[len(merged)-1].end = interval.end
+		}
+	}
+	return merged
 }
 
 type futureOverride struct {

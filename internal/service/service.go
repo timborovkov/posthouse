@@ -799,6 +799,11 @@ func (s *Service) PrepareCalendarWrite(ctx context.Context, connectionID, kind s
 	if kind == "calendar.update" && event.ETag == "" {
 		return model.PreparedOperation{}, fmt.Errorf("calendar update requires the current ETag")
 	}
+	if kind == "calendar.update" {
+		if err := calendar.ValidateCalDAVETag(event.ETag); err != nil {
+			return model.PreparedOperation{}, err
+		}
+	}
 	if kind == "calendar.update" && event.Href == "" {
 		return model.PreparedOperation{}, fmt.Errorf("calendar update requires the provider href from calendar list")
 	}
@@ -832,6 +837,9 @@ func (s *Service) PrepareCalendarDelete(ctx context.Context, connectionID, colle
 	}
 	if etag == "" {
 		return model.PreparedOperation{}, fmt.Errorf("calendar delete requires the current ETag")
+	}
+	if err := calendar.ValidateCalDAVETag(etag); err != nil {
+		return model.PreparedOperation{}, err
 	}
 	connection, err := s.exactConnection(connectionID, "calendar.write")
 	if err != nil {

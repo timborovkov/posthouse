@@ -278,6 +278,10 @@ func Validate(cfg model.Config) error {
 				if err := validateTransport(prefix+".mail.imap", connection.Mail.IMAP.Address, connection.Mail.IMAP.TLS, connection.Mail.IMAP.StartTLS, connection.Mail.IMAP.Insecure); err != nil {
 					return err
 				}
+				host, _, _ := net.SplitHostPort(connection.Mail.IMAP.Address)
+				if !connection.Mail.IMAP.TLS && !connection.Mail.IMAP.StartTLS && host != "localhost" && host != "127.0.0.1" && host != "::1" {
+					return fmt.Errorf("%s.mail.imap cannot authenticate over remote cleartext IMAP; enable tls or starttls", prefix)
+				}
 			}
 			if connection.Mail.SMTP.Address != "" {
 				if err := validateTransport(prefix+".mail.smtp", connection.Mail.SMTP.Address, connection.Mail.SMTP.TLS, connection.Mail.SMTP.StartTLS, connection.Mail.SMTP.Insecure); err != nil {

@@ -340,8 +340,8 @@ func dialIMAPContext(ctx context.Context, settings model.IMAPConfig) (*imapclien
 	if splitErr != nil {
 		return nil, fmt.Errorf("IMAP address must use host:port: %w", splitErr)
 	}
-	if !settings.TLS && !settings.StartTLS && !settings.Insecure && host != "localhost" && host != "127.0.0.1" && host != "::1" {
-		return nil, fmt.Errorf("refusing cleartext IMAP connection without insecure=true")
+	if !settings.TLS && !settings.StartTLS && host != "localhost" && host != "127.0.0.1" && host != "::1" {
+		return nil, fmt.Errorf("refusing remote cleartext IMAP connection; enable tls or starttls")
 	}
 	dialer := &net.Dialer{Timeout: 30 * time.Second}
 	connection, err := dialer.DialContext(ctx, "tcp", settings.Address)

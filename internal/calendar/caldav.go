@@ -181,6 +181,11 @@ func PutCalDAVEvent(ctx context.Context, connection model.Connection, event mode
 			return model.Event{}, err
 		}
 	}
+	if !create {
+		if err := ValidateCalDAVETag(event.ETag); err != nil {
+			return model.Event{}, err
+		}
+	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPut, target, strings.NewReader(data))
 	if err != nil {
 		return model.Event{}, err
@@ -219,6 +224,9 @@ func DeleteCalDAVEvent(ctx context.Context, connection model.Connection, collect
 	}
 	if href == "" || etag == "" {
 		return fmt.Errorf("event href and ETag are required for delete")
+	}
+	if err := ValidateCalDAVETag(etag); err != nil {
+		return err
 	}
 	collection, err := exactCollection(connection, collectionID)
 	if err != nil {
@@ -278,6 +286,13 @@ func ValidateCalDAVHref(connection model.Connection, collectionID, href string) 
 	}
 	_, err = resolveCollectionObject(endpoint, collection.Path, href)
 	return err
+}
+
+func ValidateCalDAVETag(value string) error {
+	if strings.HasPrefix(strings.ToUpper(strings.TrimSpace(value)), "W/") {
+		return fmt.Errorf("CalDAV write requires a strong ETag; refresh after the provider supplies one")
+	}
+	return nil
 }
 
 func GenerateInvitation(event model.Event, cancel bool) (model.Event, string, error) {

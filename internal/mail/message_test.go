@@ -98,6 +98,28 @@ func TestAppendWaitErrorDistinguishesTaggedRejection(t *testing.T) {
 	}
 }
 
+func TestAddressableAppendRequiresUIDPlusAndNonzeroUID(t *testing.T) {
+	if supportsAddressableAppend(imap.CapSet{}) {
+		t.Fatal("plain IMAP4rev1 unexpectedly supports addressable APPEND")
+	}
+	if !supportsAddressableAppend(imap.CapSet{imap.CapUIDPlus: {}}) || !supportsAddressableAppend(imap.CapSet{imap.CapIMAP4rev2: {}}) {
+		t.Fatal("UIDPLUS or IMAP4rev2 did not enable addressable APPEND")
+	}
+	for _, result := range []*imap.AppendData{nil, {}} {
+		if uid, err := addressableAppendUID(result); uid != 0 || err == nil {
+			t.Fatalf("addressableAppendUID(%#v) = %d, %v", result, uid, err)
+		} else {
+			var uncertain *UncertainAppendError
+			if !errors.As(err, &uncertain) {
+				t.Fatalf("missing UID error type = %T", err)
+			}
+		}
+	}
+	if uid, err := addressableAppendUID(&imap.AppendData{UID: 42}); err != nil || uid != 42 {
+		t.Fatalf("addressableAppendUID returned %d, %v", uid, err)
+	}
+}
+
 func TestMutationErrorDistinguishesTaggedRejection(t *testing.T) {
 	rejected := classifyMutationError("move", &imap.Error{Type: imap.StatusResponseTypeNo, Text: "rejected"})
 	var uncertain *UncertainMutationError

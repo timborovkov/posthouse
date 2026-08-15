@@ -519,6 +519,18 @@ func TestPrepareCalendarDeleteRequiresETag(t *testing.T) {
 	}
 }
 
+func TestPrepareCalendarWritesRejectWeakETag(t *testing.T) {
+	connection := model.Connection{ID: "work", Name: "Work", Calendar: &model.CalendarConfig{Kind: "caldav", URL: "http://localhost:5232", Username: "work", Secret: model.SecretRef{Env: "CALENDAR_PASSWORD"}, Collections: []model.CalendarCollection{{ID: "team", Path: "/work/team/"}}}}
+	application := serviceWithConnections(t, connection)
+	event := model.Event{ID: "event", Title: "Planning", CollectionID: "team", Href: "/work/team/event.ics", ETag: `W/"weak"`, Start: instant(9), End: instant(10)}
+	if _, err := application.PrepareCalendarWrite(context.Background(), "work", "calendar.update", event); err == nil || !strings.Contains(err.Error(), "strong ETag") {
+		t.Fatalf("PrepareCalendarWrite accepted weak ETag: %v", err)
+	}
+	if _, err := application.PrepareCalendarDelete(context.Background(), "work", "team", event.Href, event.ETag, ""); err == nil || !strings.Contains(err.Error(), "strong ETag") {
+		t.Fatalf("PrepareCalendarDelete accepted weak ETag: %v", err)
+	}
+}
+
 func TestDraftPreconditionRefreshPropagatesCancellation(t *testing.T) {
 	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
 	connection := mailConnection("work")

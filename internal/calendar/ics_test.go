@@ -458,6 +458,41 @@ END:VCALENDAR`
 	}
 }
 
+func TestThisAndFutureUsesDisjointCandidateIntervals(t *testing.T) {
+	data := `BEGIN:VCALENDAR
+VERSION:2.0
+BEGIN:VEVENT
+UID:disjoint-overrides
+DTSTART:20200101T000000Z
+DTEND:20200101T000030Z
+RRULE:FREQ=MINUTELY
+SUMMARY:Original
+END:VEVENT
+BEGIN:VEVENT
+UID:disjoint-overrides
+RECURRENCE-ID;RANGE=THISANDFUTURE:20200101T000000Z
+DTSTART:20260101T000000Z
+DTEND:20260101T000030Z
+SUMMARY:First shift
+END:VEVENT
+BEGIN:VEVENT
+UID:disjoint-overrides
+RECURRENCE-ID;RANGE=THISANDFUTURE:20300101T000000Z
+DTSTART:20260101T000000Z
+DTEND:20260101T000030Z
+SUMMARY:Second shift
+END:VEVENT
+END:VCALENDAR`
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	events, err := ParseRange([]byte(data), start, start.Add(5*time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 10 {
+		t.Fatalf("disjoint override intervals returned %d events: %#v", len(events), events)
+	}
+}
+
 func TestGenerateRejectsInvalidRecurrenceRange(t *testing.T) {
 	event := model.Event{ID: "range", Title: "Range", Start: time.Date(2026, 8, 15, 9, 0, 0, 0, time.UTC), End: time.Date(2026, 8, 15, 10, 0, 0, 0, time.UTC), RecurrenceID: "2026-08-15T09:00:00Z", RecurrenceRange: "THISANDFUTURE\r\nATTENDEE:mailto:attacker@example.test"}
 	if _, _, err := Generate(event); err == nil || !strings.Contains(err.Error(), "recurrence range") {
@@ -671,6 +706,12 @@ func TestWeakETagNormalization(t *testing.T) {
 	_, etag, err := getCalendarObject(context.Background(), client, "https://calendar.example.test/", "/event.ics")
 	if err != nil || etag != `W/"abc"` {
 		t.Fatalf("getCalendarObject ETag = %q, %v", etag, err)
+	}
+	if err := ValidateCalDAVETag(etag); err == nil || !strings.Contains(err.Error(), "strong ETag") {
+		t.Fatalf("ValidateCalDAVETag accepted weak validator: %v", err)
+	}
+	if err := ValidateCalDAVETag(`"abc"`); err != nil {
+		t.Fatalf("ValidateCalDAVETag rejected strong validator: %v", err)
 	}
 }
 

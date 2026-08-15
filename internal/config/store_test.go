@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/timborovkov/posthouse/internal/model"
@@ -48,6 +49,17 @@ func TestValidateRejectsRemoteCleartextSMTPAuthentication(t *testing.T) {
 	cfg.Connections[0].Mail.SMTP.Address = "localhost:3025"
 	if err := Validate(cfg); err != nil {
 		t.Fatalf("Validate rejected loopback development SMTP: %v", err)
+	}
+}
+
+func TestValidateRejectsRemoteCleartextIMAPAuthentication(t *testing.T) {
+	cfg := model.Config{Version: 2, Connections: []model.Connection{{ID: "work", Name: "Work", Mail: &model.MailConfig{Username: "work@example.test", Secret: model.SecretRef{Env: "WORK_PASSWORD"}, IMAP: model.IMAPConfig{Address: "imap.example.test:143", Insecure: true}}}}}
+	if err := Validate(cfg); err == nil || !strings.Contains(err.Error(), "remote cleartext IMAP") {
+		t.Fatalf("Validate accepted remote cleartext IMAP authentication: %v", err)
+	}
+	cfg.Connections[0].Mail.IMAP.Address = "localhost:3143"
+	if err := Validate(cfg); err != nil {
+		t.Fatalf("Validate rejected loopback development IMAP: %v", err)
 	}
 }
 

@@ -2,6 +2,7 @@ package mail
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -100,6 +101,13 @@ func TestDialIMAPContextHonorsPreCanceledContext(t *testing.T) {
 	_, err := dialIMAPContext(ctx, model.IMAPConfig{Address: "203.0.113.1:993", TLS: true})
 	if err == nil || time.Since(started) > time.Second {
 		t.Fatalf("pre-canceled dial returned %v after %v", err, time.Since(started))
+	}
+}
+
+func TestDialIMAPRejectsRemoteCleartextEvenWhenInsecure(t *testing.T) {
+	_, err := dialIMAPContext(context.Background(), model.IMAPConfig{Address: "imap.example.test:143", Insecure: true})
+	if err == nil || !strings.Contains(err.Error(), "remote cleartext IMAP") {
+		t.Fatalf("remote cleartext dial returned %v", err)
 	}
 }
 
