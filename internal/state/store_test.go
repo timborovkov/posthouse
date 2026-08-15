@@ -293,6 +293,35 @@ func TestPreparedOperationCanOnlyBeClaimedOnceAcrossStores(t *testing.T) {
 	}
 }
 
+func TestClearConnectionRemovesOnlyMatchingCacheEntries(t *testing.T) {
+	store, err := state.OpenWithKey(filepath.Join(t.TempDir(), "state.db"), 2<<20, bytesOf(9, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	for _, entry := range []state.CacheEntry{
+		{Namespace: "message_body", Key: "work-message", ConnectionID: "work", Kind: "message_body", Value: []byte("work")},
+		{Namespace: "events", Key: "work-events", ConnectionID: "work", Kind: "event", Value: []byte("work calendar")},
+		{Namespace: "message_body", Key: "personal-message", ConnectionID: "personal", Kind: "message_body", Value: []byte("personal")},
+	} {
+		if err := store.Put(ctx, entry); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.ClearConnection(ctx, "work"); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []struct{ namespace, key string }{{"message_body", "work-message"}, {"events", "work-events"}} {
+		if _, found, err := store.Get(ctx, key.namespace, key.key, true); err != nil || found {
+			t.Fatalf("cleared entry %s/%s found=%v err=%v", key.namespace, key.key, found, err)
+		}
+	}
+	if _, found, err := store.Get(ctx, "message_body", "personal-message", true); err != nil || !found {
+		t.Fatalf("unrelated entry found=%v err=%v", found, err)
+	}
+}
+
 func TestConcurrentStoreOpenWaitsForMigration(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.db")
 	key := bytesOf(4, 32)

@@ -377,6 +377,29 @@ func (s *Store) Clear(ctx context.Context) error {
 	return nil
 }
 
+func (s *Store) ClearConnection(ctx context.Context, connectionID string) error {
+	if connectionID == "" {
+		return fmt.Errorf("connection ID is required")
+	}
+	s.keyMu.RLock()
+	defer s.keyMu.RUnlock()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin connection cache clear: %w", err)
+	}
+	defer tx.Rollback()
+	if err := s.lockAndVerifyKey(ctx, tx); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM cache_entries WHERE connection_id=?`, connectionID); err != nil {
+		return fmt.Errorf("clear connection cache: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit connection cache clear: %w", err)
+	}
+	return nil
+}
+
 func (s *Store) Delete(ctx context.Context, namespace, key string) error {
 	if _, err := s.db.ExecContext(ctx, `DELETE FROM cache_entries WHERE namespace=? AND key_hash=?`, namespace, cacheKeyHash(namespace, key)); err != nil {
 		return fmt.Errorf("delete cache entry: %w", err)

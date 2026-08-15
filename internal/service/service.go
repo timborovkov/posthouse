@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -187,6 +188,15 @@ func (s *Service) UpsertConnection(connection model.Connection, replace bool) er
 		if !replace {
 			return fmt.Errorf("connection %s already exists; pass --replace to update it", connection.ID)
 		}
+		if !reflect.DeepEqual(existing.Mail, connection.Mail) || !reflect.DeepEqual(existing.Calendar, connection.Calendar) {
+			ledger, err := s.ensureState()
+			if err != nil {
+				return fmt.Errorf("open cache before replacing connection %s: %w", connection.ID, err)
+			}
+			if err := ledger.ClearConnection(context.Background(), connection.ID); err != nil {
+				return fmt.Errorf("invalidate cache before replacing connection %s: %w", connection.ID, err)
+			}
+		}
 		cfg.Connections[index] = connection
 		return s.store.Save(cfg)
 	}
@@ -201,6 +211,13 @@ func (s *Service) RemoveConnection(id string) error {
 	}
 	for index, connection := range cfg.Connections {
 		if connection.ID == id {
+			ledger, err := s.ensureState()
+			if err != nil {
+				return fmt.Errorf("open cache before removing connection %s: %w", id, err)
+			}
+			if err := ledger.ClearConnection(context.Background(), id); err != nil {
+				return fmt.Errorf("invalidate cache before removing connection %s: %w", id, err)
+			}
 			cfg.Connections = append(cfg.Connections[:index], cfg.Connections[index+1:]...)
 			return s.store.Save(cfg)
 		}

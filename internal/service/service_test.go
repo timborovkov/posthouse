@@ -260,6 +260,51 @@ func TestPreparedOperationRejectsChangedConnection(t *testing.T) {
 	}
 }
 
+func TestReplacingProviderAndRemovingConnectionInvalidateCachedContent(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	work := mailConnection("work")
+	application := serviceWithConnections(t, work, mailConnection("personal"))
+	ledger, err := application.ensureState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	put := func(key, connectionID string) {
+		t.Helper()
+		if err := ledger.Put(context.Background(), state.CacheEntry{Namespace: "message_body", Key: key, ConnectionID: connectionID, Kind: "message_body", Value: []byte("private content")}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	put("work-old-provider", "work")
+	put("personal", "personal")
+
+	work.Name = "Renamed Work"
+	if err := application.UpsertConnection(work, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := ledger.Get(context.Background(), "message_body", "work-old-provider", true); err != nil || !found {
+		t.Fatalf("metadata-only update removed cache: found=%v err=%v", found, err)
+	}
+
+	work.Mail.IMAP.Address = "localhost:1143"
+	if err := application.UpsertConnection(work, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := ledger.Get(context.Background(), "message_body", "work-old-provider", true); err != nil || found {
+		t.Fatalf("provider replacement retained cache: found=%v err=%v", found, err)
+	}
+	if _, found, err := ledger.Get(context.Background(), "message_body", "personal", true); err != nil || !found {
+		t.Fatalf("provider replacement removed unrelated cache: found=%v err=%v", found, err)
+	}
+
+	put("work-before-remove", "work")
+	if err := application.RemoveConnection("work"); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := ledger.Get(context.Background(), "message_body", "work-before-remove", true); err != nil || found {
+		t.Fatalf("connection removal retained cache: found=%v err=%v", found, err)
+	}
+}
+
 func TestPreparedOperationRejectsRotatedProviderSecret(t *testing.T) {
 	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
 	connection := mailConnection("work")
