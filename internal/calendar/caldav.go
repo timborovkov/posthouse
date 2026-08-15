@@ -413,17 +413,22 @@ func preserveEventTimezone(current, replacement *ics.VEvent, locations map[strin
 	for _, property := range []ics.ComponentProperty{ics.ComponentPropertyDtStart, ics.ComponentPropertyDtEnd} {
 		currentProperty := current.GetProperty(property)
 		replacementProperty := replacement.GetProperty(property)
-		if currentProperty == nil || replacementProperty == nil || replacementProperty.GetValueType() == ics.ValueDataTypeDate || len(currentProperty.ICalParameters["TZID"]) == 0 {
+		if currentProperty == nil || replacementProperty == nil || replacementProperty.GetValueType() == ics.ValueDataTypeDate {
 			continue
 		}
-		timezone := strings.Trim(currentProperty.ICalParameters["TZID"][0], `"`)
-		location := locations[timezone]
-		if location == nil {
-			var err error
-			location, err = time.LoadLocation(timezone)
-			if err != nil {
-				return fmt.Errorf("load existing event %s TZID %s: %w", property, timezone, err)
+		location := time.Local
+		if len(currentProperty.ICalParameters["TZID"]) > 0 {
+			timezone := strings.Trim(currentProperty.ICalParameters["TZID"][0], `"`)
+			location = locations[timezone]
+			if location == nil {
+				var err error
+				location, err = time.LoadLocation(timezone)
+				if err != nil {
+					return fmt.Errorf("load existing event %s TZID %s: %w", property, timezone, err)
+				}
 			}
+		} else if strings.HasSuffix(currentProperty.Value, "Z") {
+			continue
 		}
 		instant, err := propertyTime(replacementProperty, nil)
 		if err != nil {

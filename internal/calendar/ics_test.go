@@ -419,6 +419,20 @@ func TestMergeUpdatedEventPreservesEachEndpointTimezone(t *testing.T) {
 	}
 }
 
+func TestMergeUpdatedEventPreservesFloatingTimes(t *testing.T) {
+	start := time.Date(2026, 3, 2, 9, 0, 0, 0, time.Local)
+	end := start.Add(time.Hour)
+	existing := []byte("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:floating\r\nDTSTART:20260302T090000\r\nDTEND:20260302T100000\r\nSUMMARY:Old\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n")
+	replacement := "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:floating\r\nDTSTART:" + start.UTC().Format("20060102T150405Z") + "\r\nDTEND:" + end.UTC().Format("20060102T150405Z") + "\r\nSUMMARY:New\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+	merged, err := mergeUpdatedEvent(existing, replacement, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(merged, "DTSTART:20260302T090000\r\n") || !strings.Contains(merged, "DTEND:20260302T100000\r\n") {
+		t.Fatalf("updated event lost floating times:\n%s", merged)
+	}
+}
+
 func TestGenerateCarriesTZIDOnRecurrenceSets(t *testing.T) {
 	newYork, err := time.LoadLocation("America/New_York")
 	if err != nil {
