@@ -54,6 +54,21 @@ func TestCalendarCancelRequiresStableID(t *testing.T) {
 	}
 }
 
+func TestCalendarCancelPreservesCurrentSequence(t *testing.T) {
+	application := testCLI(t, new(bytes.Buffer))
+	output := application.stdout.(*bytes.Buffer)
+	err := application.Run(context.Background(), []string{"calendar", "ics", "--method", "cancel", "--id", "planning", "--sequence", "4", "--title", "Planning", "--start", "2026-08-17T09:00:00Z", "--end", "2026-08-17T10:00:00Z"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "METHOD:CANCEL") || !strings.Contains(output.String(), "SEQUENCE:4") {
+		t.Fatalf("cancellation ICS did not preserve sequence:\n%s", output.String())
+	}
+	if err := application.Run(context.Background(), []string{"calendar", "ics", "--id", "planning", "--sequence", "-1", "--title", "Planning", "--start", "2026-08-17T09:00:00Z", "--end", "2026-08-17T10:00:00Z"}); err == nil || !strings.Contains(err.Error(), "non-negative") {
+		t.Fatalf("negative sequence returned %v", err)
+	}
+}
+
 func TestMailMarkRejectsContradictoryFlags(t *testing.T) {
 	application := testCLI(t, new(bytes.Buffer))
 	for _, flags := range [][]string{{"--read", "--unread"}, {"--flagged", "--unflagged"}} {

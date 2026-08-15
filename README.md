@@ -102,6 +102,7 @@ posthouse calendar delete --connection work --collection team --href /work/team/
 
 # Portable ICS generation and explicit cache operations
 posthouse calendar ics --title Planning --start 2026-08-17T09:00:00+03:00 --end 2026-08-17T10:00:00+03:00 --output planning.ics
+posthouse calendar ics --method cancel --id planning-uid --sequence 3 --title Planning --start 2026-08-17T09:00:00+03:00 --end 2026-08-17T10:00:00+03:00 --output planning-cancel.ics
 posthouse sync
 posthouse cache status
 posthouse cache rekey --key-env POSTHOUSE_CACHE_KEY_NEW

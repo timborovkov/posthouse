@@ -309,6 +309,9 @@ func Validate(cfg model.Config) error {
 			if hasURL == hasSecretURL {
 				return fmt.Errorf("%s.calendar requires exactly one of url or url_secret", prefix)
 			}
+			if cal.Insecure && hasSecretURL {
+				return fmt.Errorf("%s.calendar.insecure cannot be used with url_secret because loopback cannot be verified", prefix)
+			}
 			if cal.Insecure && hasURL {
 				parsed, err := url.Parse(cal.URL)
 				if err != nil || parsed.Host == "" {

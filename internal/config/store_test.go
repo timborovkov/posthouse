@@ -72,6 +72,11 @@ func TestValidateRejectsRemoteInsecureCalDAVTLS(t *testing.T) {
 	if err := Validate(cfg); err != nil {
 		t.Fatalf("Validate rejected loopback insecure CalDAV TLS: %v", err)
 	}
+	cfg.Connections[0].Calendar.URL = ""
+	cfg.Connections[0].Calendar.URLSecret = model.SecretRef{Env: "CALDAV_URL"}
+	if err := Validate(cfg); err == nil || !strings.Contains(err.Error(), "cannot be used with url_secret") {
+		t.Fatalf("Validate accepted unverifiable insecure CalDAV URL secret: %v", err)
+	}
 }
 
 func TestValidateRejectsNegativeCacheRetention(t *testing.T) {

@@ -469,6 +469,7 @@ func (c *CLI) calendar(ctx context.Context, args []string) error {
 		output := flags.String("output", "-", "output path, or - for stdout")
 		force := flags.Bool("force", false, "replace an existing output file")
 		method := flags.String("method", "", "optional invitation method: request or cancel")
+		sequence := flags.Int("sequence", 0, "current non-negative invitation revision")
 		var attendees stringList
 		flags.Var(&attendees, "attendee", "attendee email; repeat or comma-separate")
 		if err := flags.Parse(args[1:]); err != nil {
@@ -480,6 +481,9 @@ func (c *CLI) calendar(ctx context.Context, args []string) error {
 		if strings.EqualFold(*method, "cancel") && *id == "" {
 			return fmt.Errorf("calendar ics --method cancel requires --id")
 		}
+		if *sequence < 0 {
+			return fmt.Errorf("calendar ics --sequence must be non-negative")
+		}
 		startTime, err := time.Parse(time.RFC3339, *start)
 		if err != nil {
 			return fmt.Errorf("start: %w", err)
@@ -488,7 +492,7 @@ func (c *CLI) calendar(ctx context.Context, args []string) error {
 		if err != nil {
 			return fmt.Errorf("end: %w", err)
 		}
-		input := model.Event{ID: *id, Title: *title, Description: *description, Location: *location, Start: startTime, End: endTime, AllDay: *allDay, Attendees: attendees, Organizer: *organizer}
+		input := model.Event{ID: *id, Title: *title, Description: *description, Location: *location, Start: startTime, End: endTime, AllDay: *allDay, Attendees: attendees, Organizer: *organizer, Sequence: *sequence}
 		var event model.Event
 		var data string
 		if *method == "" {
