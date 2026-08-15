@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -307,6 +308,15 @@ func Validate(cfg model.Config) error {
 			hasSecretURL := validSecretRef(cal.URLSecret) || (cal.URLSecretEnv != "" && cal.URLSecret.Env == "" && cal.URLSecret.Keychain == "")
 			if hasURL == hasSecretURL {
 				return fmt.Errorf("%s.calendar requires exactly one of url or url_secret", prefix)
+			}
+			if cal.Insecure && hasURL {
+				parsed, err := url.Parse(cal.URL)
+				if err != nil || parsed.Host == "" {
+					return fmt.Errorf("%s.calendar.url is invalid", prefix)
+				}
+				if host := parsed.Hostname(); host != "localhost" && host != "127.0.0.1" && host != "::1" {
+					return fmt.Errorf("%s.calendar.insecure is allowed only for loopback development endpoints", prefix)
+				}
 			}
 			kind := cal.Kind
 			if kind == "" {

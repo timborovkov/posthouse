@@ -586,6 +586,12 @@ func Generate(event model.Event) (model.Event, string, error) {
 		}
 		event.RecurrenceRange = "THISANDFUTURE"
 	}
+	if event.Status != "" {
+		event.Status = strings.ToUpper(strings.TrimSpace(event.Status))
+		if strings.ContainsAny(event.Status, "\r\n") || (event.Status != "TENTATIVE" && event.Status != "CONFIRMED" && event.Status != "CANCELLED") {
+			return model.Event{}, "", fmt.Errorf("event status must be TENTATIVE, CONFIRMED, or CANCELLED")
+		}
+	}
 	if event.RecurrenceRule != "" {
 		event.RecurrenceRule = strings.TrimSpace(event.RecurrenceRule)
 		if strings.ContainsAny(event.RecurrenceRule, "\r\n") {

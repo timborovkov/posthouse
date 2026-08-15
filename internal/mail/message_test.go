@@ -1,11 +1,14 @@
 package mail
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/emersion/go-imap/v2"
+	"github.com/timborovkov/posthouse/internal/model"
 )
 
 func TestMessageBodyFetchIsBoundedAtProvider(t *testing.T) {
@@ -117,6 +120,21 @@ func TestAddressableAppendRequiresUIDPlusAndNonzeroUID(t *testing.T) {
 	}
 	if uid, err := addressableAppendUID(&imap.AppendData{UID: 42}); err != nil || uid != 42 {
 		t.Fatalf("addressableAppendUID returned %d, %v", uid, err)
+	}
+	if uid, err := appendResultUID(nil, false); err != nil || uid != 0 {
+		t.Fatalf("non-addressable sent-copy APPEND returned %d, %v", uid, err)
+	}
+}
+
+func TestDiscoverContextHonorsPreCanceledContext(t *testing.T) {
+	t.Setenv("IMAP_PASSWORD", "test-password")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	connection := model.Connection{ID: "work", Mail: &model.MailConfig{Username: "work", Secret: model.SecretRef{Env: "IMAP_PASSWORD"}, IMAP: model.IMAPConfig{Address: "203.0.113.1:993", TLS: true}}}
+	started := time.Now()
+	_, err := DiscoverContext(ctx, connection)
+	if !errors.Is(err, context.Canceled) || time.Since(started) > time.Second {
+		t.Fatalf("pre-canceled discovery returned %v after %v", err, time.Since(started))
 	}
 }
 

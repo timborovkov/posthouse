@@ -182,7 +182,7 @@ func SearchContext(ctx context.Context, connection model.Connection, options Sea
 	const previewFetchLimit = 64 << 10
 	previewUIDs := make([]imap.UID, 0, len(messages))
 	for _, message := range messages {
-		if size := sizes[imap.UID(message.UID)]; size >= 0 && size <= previewFetchLimit {
+		if size := sizes[imap.UID(message.UID)]; safePreviewSize(size, previewFetchLimit) {
 			previewUIDs = append(previewUIDs, imap.UID(message.UID))
 		}
 	}
@@ -201,6 +201,8 @@ func SearchContext(ctx context.Context, connection model.Connection, options Sea
 	}
 	return SearchResult{Messages: messages, UIDValidity: selected.UIDValidity, UIDNext: uint32(selected.UIDNext), HasMore: hasMore}, nil
 }
+
+func safePreviewSize(size, limit int64) bool { return size > 0 && size <= limit }
 
 func missingSortCursor(uids []imap.UID, cursorUID uint32) bool {
 	return cursorUID != 0 && !slices.Contains(uids, imap.UID(cursorUID))

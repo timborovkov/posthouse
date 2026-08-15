@@ -511,6 +511,29 @@ func TestGenerateRejectsInvalidRecurrenceRule(t *testing.T) {
 	}
 }
 
+func TestGenerateRejectsInvalidEventStatus(t *testing.T) {
+	base := model.Event{ID: "status", Title: "Status", Start: time.Date(2026, 8, 15, 9, 0, 0, 0, time.UTC), End: time.Date(2026, 8, 15, 10, 0, 0, 0, time.UTC)}
+	for _, status := range []string{"CONFIRMED\r\nATTENDEE:mailto:attacker@example.test", "UNKNOWN"} {
+		event := base
+		event.Status = status
+		if _, _, err := Generate(event); err == nil || !strings.Contains(err.Error(), "event status") {
+			t.Fatalf("Generate accepted event status %q: %v", status, err)
+		}
+	}
+	base.Status = "confirmed"
+	if generated, _, err := Generate(base); err != nil || generated.Status != "CONFIRMED" {
+		t.Fatalf("Generate normalized valid status as %q, %v", generated.Status, err)
+	}
+}
+
+func TestCalDAVRejectsRemoteInsecureTLS(t *testing.T) {
+	t.Setenv("CALENDAR_PASSWORD", "test-password")
+	connection := model.Connection{ID: "remote", Calendar: &model.CalendarConfig{Kind: "caldav", URL: "https://calendar.example.test/", Username: "user", Secret: model.SecretRef{Env: "CALENDAR_PASSWORD"}, Insecure: true}}
+	if _, _, _, err := calDAVClient(connection); err == nil || !strings.Contains(err.Error(), "outside loopback") {
+		t.Fatalf("calDAVClient accepted remote insecure TLS: %v", err)
+	}
+}
+
 func TestParseRejectsDenseTimezoneRecurrence(t *testing.T) {
 	data := `BEGIN:VCALENDAR
 VERSION:2.0

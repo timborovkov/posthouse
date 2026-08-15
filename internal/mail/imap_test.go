@@ -111,6 +111,15 @@ func TestDialIMAPRejectsRemoteCleartextEvenWhenInsecure(t *testing.T) {
 	}
 }
 
+func TestSafePreviewSizeRequiresPositiveBoundedProviderSize(t *testing.T) {
+	if safePreviewSize(0, 64<<10) || safePreviewSize(-1, 64<<10) || safePreviewSize((64<<10)+1, 64<<10) {
+		t.Fatal("unsafe or missing message size allowed preview fetch")
+	}
+	if !safePreviewSize(1, 64<<10) || !safePreviewSize(64<<10, 64<<10) {
+		t.Fatal("bounded positive message size rejected preview fetch")
+	}
+}
+
 func TestMessageOrderingMatchesSortTieBreaker(t *testing.T) {
 	when := time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)
 	if !messageBefore(model.Message{UID: 1, ReceivedAt: when}, model.Message{UID: 2, ReceivedAt: when}) {

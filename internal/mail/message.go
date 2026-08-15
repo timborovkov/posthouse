@@ -325,10 +325,15 @@ func htmlToText(value string) string {
 }
 
 func Discover(connection model.Connection) (Discovery, error) {
-	client, err := authenticatedIMAP(connection)
+	return DiscoverContext(context.Background(), connection)
+}
+
+func DiscoverContext(ctx context.Context, connection model.Connection) (Discovery, error) {
+	client, stop, err := authenticatedIMAPContext(ctx, connection)
 	if err != nil {
 		return Discovery{}, err
 	}
+	defer stop()
 	defer client.Close()
 	defer client.Logout()
 	caps := client.Caps()
@@ -343,6 +348,9 @@ func Discover(connection model.Connection) (Discovery, error) {
 	}
 	mailboxes, err := client.List("", "*", options).Collect()
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return Discovery{}, ctxErr
+		}
 		return Discovery{}, fmt.Errorf("list IMAP folders: %w", err)
 	}
 	for _, mailbox := range mailboxes {
@@ -546,6 +554,14 @@ func AppendSerialized(connection model.Connection, folder string, data []byte, f
 }
 
 func AppendSerializedContext(ctx context.Context, connection model.Connection, folder string, data []byte, flags []imap.Flag) (uint32, error) {
+	return appendSerializedContext(ctx, connection, folder, data, flags, true)
+}
+
+func AppendSerializedCopyContext(ctx context.Context, connection model.Connection, folder string, data []byte, flags []imap.Flag) (uint32, error) {
+	return appendSerializedContext(ctx, connection, folder, data, flags, false)
+}
+
+func appendSerializedContext(ctx context.Context, connection model.Connection, folder string, data []byte, flags []imap.Flag, requireUID bool) (uint32, error) {
 	if folder == "" {
 		return 0, fmt.Errorf("append folder is required")
 	}
@@ -559,7 +575,7 @@ func AppendSerializedContext(ctx context.Context, connection model.Connection, f
 	defer stop()
 	defer client.Close()
 	defer client.Logout()
-	if !supportsAddressableAppend(client.Caps()) {
+	if requireUID && !supportsAddressableAppend(client.Caps()) {
 		return 0, fmt.Errorf("IMAP server must advertise UIDPLUS or IMAP4rev2 for addressable draft append")
 	}
 	command := client.Append(folder, int64(len(data)), &imap.AppendOptions{Flags: flags, Time: time.Now()})
@@ -574,7 +590,7 @@ func AppendSerializedContext(ctx context.Context, connection model.Connection, f
 	if err != nil {
 		return 0, classifyAppendWaitError(err)
 	}
-	return addressableAppendUID(result)
+	return appendResultUID(result, requireUID)
 }
 
 func supportsAddressableAppend(caps imap.CapSet) bool { return caps.Has(imap.CapUIDPlus) }
@@ -582,6 +598,16 @@ func supportsAddressableAppend(caps imap.CapSet) bool { return caps.Has(imap.Cap
 func addressableAppendUID(result *imap.AppendData) (uint32, error) {
 	if result == nil || result.UID == 0 {
 		return 0, &UncertainAppendError{Err: fmt.Errorf("IMAP APPEND succeeded without an addressable UID")}
+	}
+	return uint32(result.UID), nil
+}
+
+func appendResultUID(result *imap.AppendData, requireUID bool) (uint32, error) {
+	if requireUID {
+		return addressableAppendUID(result)
+	}
+	if result == nil {
+		return 0, nil
 	}
 	return uint32(result.UID), nil
 }
@@ -672,15 +698,6 @@ func defaultFolder(connection model.Connection, folder string) string {
 		return "INBOX"
 	}
 	return folder
-}
-
-func authenticatedIMAP(connection model.Connection) (*imapclient.Client, error) {
-	client, stop, err := authenticatedIMAPContext(context.Background(), connection)
-	if err != nil {
-		return nil, err
-	}
-	stop()
-	return client, nil
 }
 
 func authenticatedIMAPContext(ctx context.Context, connection model.Connection) (*imapclient.Client, func(), error) {

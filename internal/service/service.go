@@ -58,7 +58,7 @@ func New(store *config.Store) *Service {
 		mailSnapshotContext: postmail.SnapshotMessageContext,
 		mailAppendContext:   postmail.AppendContext, mailMarkDeletedContext: postmail.MarkDeletedContext,
 		mailGetMessage: postmail.GetContext, mailGetAttachment: postmail.GetAttachmentContext, mailboxUIDValidity: postmail.MailboxUIDValidityContext,
-		mailBuild: postmail.BuildMessage, mailSendRawContext: postmail.SendSerializedContext, mailAppendRawContext: postmail.AppendSerializedContext,
+		mailBuild: postmail.BuildMessage, mailSendRawContext: postmail.SendSerializedContext, mailAppendRawContext: postmail.AppendSerializedCopyContext,
 		now: func() time.Time { return time.Now().UTC() },
 	}
 }
@@ -1056,7 +1056,11 @@ func (s *Service) execute(ctx context.Context, connection model.Connection, kind
 				result["sent_copy"] = "failed"
 				return result, &uncertainOperationError{message: fmt.Sprintf("message was sent but appending its sent copy failed: %v", err)}
 			}
-			result["sent_copy_uid"] = uid
+			if uid == 0 {
+				result["sent_copy"] = "appended"
+			} else {
+				result["sent_copy_uid"] = uid
+			}
 		}
 		return result, nil
 	case "mail.mark", "mail.move", "mail.archive", "mail.trash":
@@ -1528,7 +1532,7 @@ func (s *Service) DiscoverConnection(ctx context.Context, id string) (model.Conn
 		return model.Connection{}, err
 	}
 	if connection.Mail != nil && connection.Mail.IMAP.Address != "" {
-		discovery, err := postmail.Discover(connection)
+		discovery, err := postmail.DiscoverContext(ctx, connection)
 		if err != nil {
 			return model.Connection{}, err
 		}
@@ -1577,7 +1581,7 @@ func (s *Service) DoctorConnection(ctx context.Context, id string) (model.Doctor
 		_, secretErr := config.ResolveSecret(connection.Mail.Secret)
 		add("mail.secret", secretErr)
 		if secretErr == nil && connection.Mail.IMAP.Address != "" {
-			_, err := postmail.Discover(connection)
+			_, err := postmail.DiscoverContext(ctx, connection)
 			add("imap.discovery", err)
 		}
 		if secretErr == nil && connection.Mail.SMTP.Address != "" {

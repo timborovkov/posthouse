@@ -1244,6 +1244,27 @@ func TestSentCopyUsesDeliveredBytesAndAppendFailureIsUncertain(t *testing.T) {
 	}
 }
 
+func TestSentCopyWithoutReturnedUIDStillSucceeds(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	connection := mailConnection("work")
+	connection.Identity = model.Identity{Email: "work@example.test"}
+	connection.Mail.SMTP = model.SMTPConfig{Address: "localhost:3025", Insecure: true}
+	connection.Mail.SentCopy = "always"
+	connection.Mail.Folders.Sent = "Sent"
+	application := serviceWithConnections(t, connection)
+	application.mailBuild = func(model.Connection, model.SendMessage) ([]byte, error) { return []byte("message"), nil }
+	application.mailSendRaw = func(model.Connection, model.SendMessage, []byte) error { return nil }
+	application.mailAppendRaw = func(model.Connection, string, []byte, []imap.Flag) (uint32, error) { return 0, nil }
+	prepared, err := application.PrepareSend(context.Background(), model.SendMessage{ConnectionID: "work", To: []string{"person@example.test"}, Subject: "subject"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := application.ExecuteOperation(context.Background(), prepared.Token)
+	if err != nil || result.Status != "succeeded" || result.Result["sent_copy"] != "appended" {
+		t.Fatalf("ExecuteOperation result=%#v err=%v", result, err)
+	}
+}
+
 func TestSyncAcceptsGranularReadCapability(t *testing.T) {
 	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
 	application := serviceWithConnections(t, mailConnection("work"))

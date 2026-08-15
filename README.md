@@ -16,7 +16,7 @@ Posthouse is a local-first Go CLI, MCP server, and full-screen terminal app for 
 - Use live-first reads with stale encrypted-cache fallback, `--offline`, `--refresh`, explicit sync, LRU limits, clear, and rekey.
 - Run the same contracts through CLI JSON, MCP stdio, authenticated Streamable HTTP, and a keyboard-complete Go-TUI.
 
-Provider-side draft create/update requires IMAP `UIDPLUS` (or IMAP4rev2) so the appended draft always has an addressable UID. Cleartext authenticated IMAP/SMTP is accepted only on loopback development endpoints; remote connections must use TLS or STARTTLS.
+Provider-side draft create/update requires IMAP `UIDPLUS` (or IMAP4rev2) so the appended draft always has an addressable UID; sent-copy APPEND remains compatible without it. Cleartext authenticated IMAP/SMTP and disabled CalDAV certificate verification are accepted only on loopback development endpoints; remote connections must use verified TLS or STARTTLS.
 
 ## Safety model
 

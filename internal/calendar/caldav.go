@@ -410,8 +410,12 @@ func calDAVClient(connection model.Connection) (*caldav.Client, *basicAuthClient
 	if err != nil || parsed.Host == "" {
 		return nil, nil, "", fmt.Errorf("connection %s has an invalid CalDAV endpoint", connection.ID)
 	}
-	if parsed.Scheme != "https" && parsed.Hostname() != "localhost" && parsed.Hostname() != "127.0.0.1" {
+	loopback := parsed.Hostname() == "localhost" || parsed.Hostname() == "127.0.0.1" || parsed.Hostname() == "::1"
+	if parsed.Scheme != "https" && !loopback {
 		return nil, nil, "", fmt.Errorf("connection %s CalDAV endpoint must use HTTPS", connection.ID)
+	}
+	if connection.Calendar.Insecure && !loopback {
+		return nil, nil, "", fmt.Errorf("connection %s cannot disable CalDAV TLS verification outside loopback", connection.ID)
 	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	if connection.Calendar.Insecure {

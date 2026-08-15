@@ -63,6 +63,17 @@ func TestValidateRejectsRemoteCleartextIMAPAuthentication(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsRemoteInsecureCalDAVTLS(t *testing.T) {
+	cfg := model.Config{Version: 2, Connections: []model.Connection{{ID: "work", Name: "Work", Calendar: &model.CalendarConfig{Kind: "caldav", URL: "https://calendar.example.test/", Username: "work", Secret: model.SecretRef{Env: "CALENDAR_PASSWORD"}, Insecure: true}}}}
+	if err := Validate(cfg); err == nil || !strings.Contains(err.Error(), "loopback") {
+		t.Fatalf("Validate accepted remote insecure CalDAV TLS: %v", err)
+	}
+	cfg.Connections[0].Calendar.URL = "https://localhost:5232/"
+	if err := Validate(cfg); err != nil {
+		t.Fatalf("Validate rejected loopback insecure CalDAV TLS: %v", err)
+	}
+}
+
 func TestValidateRejectsNegativeCacheRetention(t *testing.T) {
 	for name, mutate := range map[string]func(*model.CacheConfig){
 		"metadata": func(cache *model.CacheConfig) { cache.MessageMetadataDays = -1 },
