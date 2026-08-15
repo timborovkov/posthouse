@@ -174,8 +174,8 @@ func TestUncertainOperationRemainsVisible(t *testing.T) {
 	app.modal.Set(true)
 	result := model.OperationResult{Token: "uncertain-token", Status: "uncertain", Result: map[string]any{"sent": true}}
 	app.applyOperation(operationSnapshot{token: "uncertain-token", result: result, err: errors.New("response lost")})
-	if app.lastOperation.Get().Status != "uncertain" || !strings.Contains(app.modalText.Get(), "uncertain-token") || !strings.Contains(app.modalText.Get(), "sent:true") || !strings.Contains(app.modalText.Get(), "response lost") {
-		t.Fatalf("uncertain result was not retained: last=%#v modal=%q", app.lastOperation.Get(), app.modalText.Get())
+	if app.lastOperation.Get().Status != "uncertain" || app.lastOperationError.Get() != "response lost" || !strings.Contains(app.modalText.Get(), "uncertain-token") || !strings.Contains(app.modalText.Get(), "sent:true") || !strings.Contains(app.modalText.Get(), "response lost") {
+		t.Fatalf("uncertain result was not retained: last=%#v error=%q modal=%q", app.lastOperation.Get(), app.lastOperationError.Get(), app.modalText.Get())
 	}
 }
 

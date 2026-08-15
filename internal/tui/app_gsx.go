@@ -63,6 +63,7 @@ type posthouseApp struct {
 	pendingToken           *tui.State[string]
 	executingToken         *tui.State[string]
 	lastOperation          *tui.State[model.OperationResult]
+	lastOperationError     *tui.State[string]
 	editor                 *tui.State[bool]
 	editorKind             *tui.State[string]
 	editorStep             *tui.State[int]
@@ -94,9 +95,10 @@ func New(application *service.Service) *posthouseApp {
 		events: tui.NewState([]model.Event{}), detail: tui.NewState(model.MessageDetail{}),
 		searching: tui.NewState(false), query: tui.NewState(""), modal: tui.NewState(false),
 		modalText: tui.NewState(""), pendingToken: tui.NewState(""),
-		executingToken: tui.NewState(""),
-		lastOperation:  tui.NewState(model.OperationResult{}),
-		editor:         tui.NewState(false), editorKind: tui.NewState(""), editorStep: tui.NewState(0), editorValues: tui.NewState([]string{}),
+		executingToken:     tui.NewState(""),
+		lastOperation:      tui.NewState(model.OperationResult{}),
+		lastOperationError: tui.NewState(""),
+		editor:             tui.NewState(false), editorKind: tui.NewState(""), editorStep: tui.NewState(0), editorValues: tui.NewState([]string{}),
 		updates: make(chan snapshot, 4), operationUpdates: make(chan operationSnapshot, 1), providerReadUpdates: make(chan providerReadSnapshot, 1),
 		executeOperation: application.ExecuteOperation, doctorConnection: application.DoctorConnection, getMessage: application.GetMessageContext, getAttachment: application.GetAttachment,
 		ctx: ctx, cancel: cancel,
@@ -730,7 +732,12 @@ func (p *posthouseApp) applyOperation(next operationSnapshot) {
 		next.result.Token = next.token
 	}
 	p.lastOperation.Set(next.result)
-	summary := formatOperationResult(next.result, next.err)
+	operationError := ""
+	if next.err != nil {
+		operationError = next.err.Error()
+	}
+	p.lastOperationError.Set(operationError)
+	summary := formatOperationResult(next.result, operationError)
 	canReplaceModal := p.modal.Get() && p.pendingToken.Get() == ""
 	if next.err != nil {
 		p.errorText.Set(summary)
@@ -769,10 +776,10 @@ func appendSourceErrors(current string, sourceErrors []model.SourceError) string
 	return current
 }
 
-func formatOperationResult(result model.OperationResult, err error) string {
+func formatOperationResult(result model.OperationResult, operationError string) string {
 	summary := fmt.Sprintf("Operation %s\n\nStatus: %s\nResult: %v", result.Token, result.Status, result.Result)
-	if err != nil {
-		summary += "\n\nError: " + err.Error()
+	if operationError != "" {
+		summary += "\n\nError: " + operationError
 	}
 	return summary
 }
@@ -1004,7 +1011,7 @@ func (p *posthouseApp) Render(app *tui.App) *tui.Element {
 		__tui_9.AddChild(__tui_35)
 		if p.lastOperation.Get().Token != "" {
 			__tui_36 := tui.New(
-				tui.WithText(formatOperationResult(p.lastOperation.Get(), nil)),
+				tui.WithText(formatOperationResult(p.lastOperation.Get(), p.lastOperationError.Get())),
 			)
 			__tui_9.AddChild(__tui_36)
 			__tui_37 := tui.New(
@@ -1200,6 +1207,9 @@ func (p *posthouseApp) bindAppFields(app *tui.App) {
 	}
 	if p.lastOperation != nil {
 		p.lastOperation.BindApp(app)
+	}
+	if p.lastOperationError != nil {
+		p.lastOperationError.BindApp(app)
 	}
 	if p.editor != nil {
 		p.editor.BindApp(app)

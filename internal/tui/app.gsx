@@ -61,6 +61,7 @@ type posthouseApp struct {
 	pendingToken *tui.State[string]
 	executingToken *tui.State[string]
 	lastOperation *tui.State[model.OperationResult]
+	lastOperationError *tui.State[string]
 	editor *tui.State[bool]
 	editorKind *tui.State[string]
 	editorStep *tui.State[int]
@@ -94,6 +95,7 @@ func New(application *service.Service) *posthouseApp {
 		modalText: tui.NewState(""), pendingToken: tui.NewState(""),
 		executingToken: tui.NewState(""),
 		lastOperation: tui.NewState(model.OperationResult{}),
+		lastOperationError: tui.NewState(""),
 		editor: tui.NewState(false), editorKind: tui.NewState(""), editorStep: tui.NewState(0), editorValues: tui.NewState([]string{}),
 		updates: make(chan snapshot, 4), operationUpdates: make(chan operationSnapshot, 1), providerReadUpdates: make(chan providerReadSnapshot, 1),
 		executeOperation: application.ExecuteOperation, doctorConnection: application.DoctorConnection, getMessage: application.GetMessageContext, getAttachment: application.GetAttachment,
@@ -329,11 +331,11 @@ func (p *posthouseApp) confirmModal(ke tui.KeyEvent) {
 }
 
 func (p *posthouseApp) cancelModal() { if p.operationCancel!=nil { p.operationCancel(); p.operationCancel=nil }; if p.providerReadCancel!=nil { p.providerReadCancel(); p.providerReadCancel=nil; p.providerReadGeneration.Add(1); p.loading.Set(false) }; p.modal.Set(false); p.pendingToken.Set("") }
-func (p *posthouseApp) applyOperation(next operationSnapshot) { if next.token!=p.executingToken.Get(){return}; p.operationCancel=nil; p.executingToken.Set(""); if next.result.Token=="" {next.result.Token=next.token}; p.lastOperation.Set(next.result); summary:=formatOperationResult(next.result,next.err); canReplaceModal:=p.modal.Get()&&p.pendingToken.Get()==""; if next.err!=nil { p.errorText.Set(summary); if canReplaceModal {p.modalText.Set(summary)} } else if canReplaceModal { p.modalText.Set(summary) }; p.refresh() }
+func (p *posthouseApp) applyOperation(next operationSnapshot) { if next.token!=p.executingToken.Get(){return}; p.operationCancel=nil; p.executingToken.Set(""); if next.result.Token=="" {next.result.Token=next.token}; p.lastOperation.Set(next.result); operationError:=""; if next.err!=nil {operationError=next.err.Error()}; p.lastOperationError.Set(operationError); summary:=formatOperationResult(next.result,operationError); canReplaceModal:=p.modal.Get()&&p.pendingToken.Get()==""; if next.err!=nil { p.errorText.Set(summary); if canReplaceModal {p.modalText.Set(summary)} } else if canReplaceModal { p.modalText.Set(summary) }; p.refresh() }
 
 func appendError(current string, err error) string { if current=="" { return err.Error() }; return current+" · "+err.Error() }
 func appendSourceErrors(current string, sourceErrors []model.SourceError) string { for _,sourceError:=range sourceErrors { source:=sourceError.ConnectionID; if sourceError.CollectionID!="" {source+="/"+sourceError.CollectionID}; message:=sourceError.Message; if message=="" {message=sourceError.Code}; if current=="" {current=source+": "+message} else {current+=" · "+source+": "+message} }; return current }
-func formatOperationResult(result model.OperationResult, err error) string { summary:=fmt.Sprintf("Operation %s\n\nStatus: %s\nResult: %v",result.Token,result.Status,result.Result); if err!=nil {summary+="\n\nError: "+err.Error()}; return summary }
+func formatOperationResult(result model.OperationResult, operationError string) string { summary:=fmt.Sprintf("Operation %s\n\nStatus: %s\nResult: %v",result.Token,result.Status,result.Result); if operationError!="" {summary+="\n\nError: "+operationError}; return summary }
 func formatDoctor(result model.DoctorResult) string { lines:=[]string{"Connection doctor: "+result.ConnectionID}; for _,check:=range result.Checks { lines=append(lines, fmt.Sprintf("%s  %-20s %s", strings.ToUpper(check.Status),check.Name,check.Message)) }; return strings.Join(lines,"\n") }
 func formatPreview(operation model.PreparedOperation) string { return fmt.Sprintf("Confirm prepared operation\n\nConnection: %s\nIdentity: %s <%s>\nKind: %s\nExpires: %s\n\n%v\n\nEnter executes · Esc cancels",operation.ConnectionID,operation.Identity.Name,operation.Identity.Email,operation.Kind,operation.ExpiresAt.Local().Format(time.Kitchen),operation.Preview) }
 func selectedClass(selected, index int) string { if selected==index { return "font-bold inverse" }; return "" }
@@ -369,7 +371,7 @@ templ (p *posthouseApp) Render() {
 					if len(p.events.Get())==0 { <span class="font-dim">No events in the next 90 days.</span> }
 				} else {
 					<span class="font-bold">Operations / encrypted cache</span><hr /><span>{p.status.Get()}</span><br />
-					if p.lastOperation.Get().Token!="" { <span>{formatOperationResult(p.lastOperation.Get(),nil)}</span><br /> }
+					if p.lastOperation.Get().Token!="" { <span>{formatOperationResult(p.lastOperation.Get(),p.lastOperationError.Get())}</span><br /> }
 					<span class="font-dim">All writes are prepared, previewed, and idempotently executed.</span>
 				}
 			</div>

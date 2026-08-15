@@ -53,9 +53,16 @@ type Service struct {
 }
 
 type calendarWritePayload struct {
-	Event     model.Event `json:"event"`
-	StartWall string      `json:"start_wall,omitempty"`
-	EndWall   string      `json:"end_wall,omitempty"`
+	Event          model.Event `json:"event"`
+	StartWall      string      `json:"start_wall,omitempty"`
+	EndWall        string      `json:"end_wall,omitempty"`
+	RecurrenceWall string      `json:"recurrence_wall,omitempty"`
+}
+
+type attachmentSnapshotPosition struct {
+	CacheID     string `json:"cache_id"`
+	UIDValidity uint32 `json:"uid_validity"`
+	Digest      string `json:"digest"`
 }
 
 const maxOutboundAttachmentBytes int64 = 25 << 20
@@ -918,9 +925,18 @@ func (s *Service) PrepareCalendarWrite(ctx context.Context, connectionID, kind s
 		return model.PreparedOperation{}, err
 	}
 	if event.RecurrenceID != "" {
-		if _, err := time.Parse(time.RFC3339, event.RecurrenceID); err != nil {
+		recurrenceID, err := time.Parse(time.RFC3339, event.RecurrenceID)
+		if err != nil {
 			return model.PreparedOperation{}, fmt.Errorf("validate recurrence ID: %w", err)
 		}
+		if event.RecurrenceWall != "" {
+			recurrenceWall, err := time.ParseInLocation("20060102T150405", event.RecurrenceWall, time.Local)
+			if err != nil || !recurrenceWall.Equal(recurrenceID) {
+				return model.PreparedOperation{}, fmt.Errorf("floating recurrence wall does not match recurrence ID; refresh the event")
+			}
+		}
+	} else if event.RecurrenceWall != "" {
+		return model.PreparedOperation{}, fmt.Errorf("floating recurrence wall requires a recurrence ID")
 	}
 	generated, _, err := calendar.Generate(event)
 	if err != nil {
@@ -933,6 +949,7 @@ func (s *Service) PrepareCalendarWrite(ctx context.Context, connectionID, kind s
 		payload.StartWall = event.Start.Format("20060102T150405")
 		payload.EndWall = event.End.Format("20060102T150405")
 	}
+	payload.RecurrenceWall = event.RecurrenceWall
 	return s.prepare(ctx, kind, connection, payload, map[string]any{
 		"acting_identity": connection.Identity, "calendar": event.CollectionID, "title": event.Title,
 		"start": event.Start, "end": event.End, "attendees": event.Attendees, "changed_fields": event,
@@ -1262,7 +1279,7 @@ func (s *Service) execute(ctx context.Context, connection model.Connection, kind
 				return nil, err
 			}
 		}
-		written, err := calendar.PutCalDAVEventWithWallTimes(ctx, connection, mutation.Event, kind == "calendar.create", mutation.StartWall, mutation.EndWall)
+		written, err := calendar.PutCalDAVEventWithWallTimes(ctx, connection, mutation.Event, kind == "calendar.create", mutation.StartWall, mutation.EndWall, mutation.RecurrenceWall)
 		if err != nil {
 			return nil, err
 		}
@@ -1407,7 +1424,7 @@ func (s *Service) GetAttachmentMode(ctx context.Context, connectionID, folder st
 			}
 		}
 	}
-	if mode != "offline" && mode != "cache" && err == nil {
+	if mode != "offline" && err == nil {
 		requestCacheID := mailCacheID(connection)
 		attachment, data, uidValidity, fetchErr := s.mailGetAttachment(ctx, connection, folder, uid, attachmentID)
 		if fetchErr == nil {
@@ -1431,7 +1448,7 @@ func (s *Service) GetAttachmentMode(ctx context.Context, connectionID, folder st
 	}
 	if !confirmedUIDMismatch {
 		if attachment, data, ok := s.cachedAttachmentFor(ctx, connection, folder, uid, attachmentID); ok {
-			attachment.Stale = mode != "cache"
+			attachment.Stale = true
 			return attachment, data, nil
 		}
 	}
@@ -1439,6 +1456,56 @@ func (s *Service) GetAttachmentMode(ctx context.Context, connectionID, folder st
 		return model.Attachment{}, nil, err
 	}
 	return model.Attachment{}, nil, fmt.Errorf("no cached attachment %q", attachmentID)
+}
+
+func (s *Service) GetAttachmentSnapshotMode(ctx context.Context, connectionID, folder string, uid uint32, attachmentID, mode, cursor string) (model.Attachment, []byte, string, error) {
+	connection, err := s.exactConnection(connectionID, "mail.read")
+	if err != nil {
+		return model.Attachment{}, nil, "", err
+	}
+	if folder == "" {
+		folder = mailFolder(connection, "")
+	}
+	scope := struct {
+		ConnectionID string `json:"connection_id"`
+		Folder       string `json:"folder"`
+		UID          uint32 `json:"uid"`
+		AttachmentID string `json:"attachment_id"`
+	}{connection.ID, folder, uid, attachmentID}
+	if cursor != "" {
+		var snapshot attachmentSnapshotPosition
+		if err := pagination.Decode(cursor, "attachment", scope, &snapshot); err != nil {
+			return model.Attachment{}, nil, "", err
+		}
+		if mailCacheID(connection) != snapshot.CacheID {
+			return model.Attachment{}, nil, "", fmt.Errorf("attachment continuation provider changed; restart the download")
+		}
+		attachment, data, ok := s.cachedAttachmentSnapshotFor(ctx, folder, uid, attachmentID, snapshot)
+		if !ok {
+			return model.Attachment{}, nil, "", fmt.Errorf("attachment continuation expired; restart the download")
+		}
+		return attachment, data, cursor, nil
+	}
+	attachment, data, err := s.GetAttachmentMode(ctx, connection.ID, folder, uid, attachmentID, mode)
+	if err != nil {
+		return model.Attachment{}, nil, "", err
+	}
+	ledger, err := s.ensureState()
+	if err != nil {
+		return model.Attachment{}, nil, "", err
+	}
+	uidValidity, ok := s.cachedMailboxUIDValidityFor(ledger, connection, folder)
+	cacheID := mailCacheID(connection)
+	if !ok || cacheID == "" {
+		return model.Attachment{}, nil, "", fmt.Errorf("attachment snapshot was not cached; retry the first chunk")
+	}
+	digest := sha256.Sum256(data)
+	snapshot := attachmentSnapshotPosition{CacheID: cacheID, UIDValidity: uidValidity, Digest: hex.EncodeToString(digest[:])}
+	cursor, err = pagination.Encode("attachment", scope, snapshot)
+	if err != nil {
+		return model.Attachment{}, nil, "", err
+	}
+	return attachment, data, cursor, nil
 }
 
 func (s *Service) CacheStatus(ctx context.Context) (state.Stats, error) {
@@ -2494,6 +2561,27 @@ func (s *Service) cachedAttachmentFor(ctx context.Context, connection model.Conn
 				break
 			}
 		}
+	}
+	return attachment, entry.Value, true
+}
+
+func (s *Service) cachedAttachmentSnapshotFor(ctx context.Context, folder string, uid uint32, attachmentID string, snapshot attachmentSnapshotPosition) (model.Attachment, []byte, bool) {
+	ledger, err := s.ensureState()
+	if err != nil {
+		return model.Attachment{}, nil, false
+	}
+	key := messageCacheKey(snapshot.CacheID, folder, snapshot.UIDValidity, uid) + "/" + attachmentID
+	entry, ok, err := ledger.Get(ctx, "attachment", key, false)
+	if err != nil || !ok {
+		return model.Attachment{}, nil, false
+	}
+	digest := sha256.Sum256(entry.Value)
+	if hex.EncodeToString(digest[:]) != snapshot.Digest {
+		return model.Attachment{}, nil, false
+	}
+	attachment := model.Attachment{ID: attachmentID, Size: int64(len(entry.Value)), CachedAt: entry.CachedAt}
+	if metadata, found, metadataErr := ledger.Get(ctx, "attachment_metadata", key, false); metadataErr == nil && found && json.Unmarshal(metadata.Value, &attachment) == nil {
+		attachment.CachedAt = entry.CachedAt
 	}
 	return attachment, entry.Value, true
 }

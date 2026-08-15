@@ -514,6 +514,9 @@ func typedEvent(component *ics.VEvent, locations map[string]*time.Location) (mod
 			return model.Event{}, fmt.Errorf("parse RECURRENCE-ID for event %s: %w", event.ID, err)
 		}
 		event.RecurrenceID = parsed.UTC().Format(time.RFC3339)
+		if recurrenceID.GetValueType() != ics.ValueDataTypeDate && len(recurrenceID.ICalParameters["TZID"]) == 0 && !strings.HasSuffix(recurrenceID.Value, "Z") {
+			event.RecurrenceWall = recurrenceID.Value
+		}
 		if values := recurrenceID.ICalParameters["RANGE"]; len(values) > 0 {
 			event.RecurrenceRange = strings.ToUpper(values[0])
 		}

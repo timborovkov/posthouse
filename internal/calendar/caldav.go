@@ -183,10 +183,10 @@ func resolveSelectedCollections(collections []model.CalendarCollection, selected
 }
 
 func PutCalDAVEvent(ctx context.Context, connection model.Connection, event model.Event, create bool) (model.Event, error) {
-	return PutCalDAVEventWithWallTimes(ctx, connection, event, create, "", "")
+	return PutCalDAVEventWithWallTimes(ctx, connection, event, create, "", "", "")
 }
 
-func PutCalDAVEventWithWallTimes(ctx context.Context, connection model.Connection, event model.Event, create bool, startWall, endWall string) (model.Event, error) {
+func PutCalDAVEventWithWallTimes(ctx context.Context, connection model.Connection, event model.Event, create bool, startWall, endWall, recurrenceWall string) (model.Event, error) {
 	_, httpClient, endpoint, err := calDAVClient(connection)
 	if err != nil {
 		return model.Event{}, err
@@ -212,7 +212,7 @@ func PutCalDAVEventWithWallTimes(ctx context.Context, connection model.Connectio
 		if err != nil {
 			return model.Event{}, err
 		}
-		data, err = mergeUpdatedEventWithWallTimes(existing, data, event.RecurrenceID, startWall, endWall)
+		data, err = mergeUpdatedEventWithWallTimes(existing, data, event.RecurrenceID, startWall, endWall, recurrenceWall)
 		if err != nil {
 			return model.Event{}, err
 		}
@@ -364,10 +364,10 @@ func mergeOccurrence(existing []byte, replacement, recurrenceID string) (string,
 }
 
 func mergeUpdatedEvent(existing []byte, replacement, recurrenceID string) (string, error) {
-	return mergeUpdatedEventWithWallTimes(existing, replacement, recurrenceID, "", "")
+	return mergeUpdatedEventWithWallTimes(existing, replacement, recurrenceID, "", "", "")
 }
 
-func mergeUpdatedEventWithWallTimes(existing []byte, replacement, recurrenceID, startWall, endWall string) (string, error) {
+func mergeUpdatedEventWithWallTimes(existing []byte, replacement, recurrenceID, startWall, endWall, recurrenceWall string) (string, error) {
 	parsedCalendar, err := ics.ParseCalendar(bytes.NewReader(existing))
 	if err != nil {
 		return "", fmt.Errorf("parse existing CalDAV object: %w", err)
@@ -393,6 +393,9 @@ func mergeUpdatedEventWithWallTimes(existing []byte, replacement, recurrenceID, 
 		}
 		targetRecurrence = recurrenceTime.UTC().Format(time.RFC3339)
 	}
+	if recurrenceWall != "" {
+		targetRecurrence = "floating:" + recurrenceWall
+	}
 	for _, current := range parsedCalendar.Events() {
 		if current.Id() != replacementEvent.Id() {
 			continue
@@ -401,10 +404,13 @@ func mergeUpdatedEventWithWallTimes(existing []byte, replacement, recurrenceID, 
 		if err != nil {
 			return "", err
 		}
+		if property := current.GetProperty(ics.ComponentPropertyRecurrenceId); recurrenceWall != "" && isFloatingDateTime(property) {
+			currentRecurrence = "floating:" + property.Value
+		}
 		if currentRecurrence != targetRecurrence {
 			continue
 		}
-		if err := preserveEventTimezone(current, replacementEvent, locations, startWall, endWall); err != nil {
+		if err := preserveEventTimezone(current, replacementEvent, locations, startWall, endWall, recurrenceWall); err != nil {
 			return "", err
 		}
 		mergeModeledEventProperties(current, replacementEvent)
@@ -417,18 +423,18 @@ func mergeUpdatedEventWithWallTimes(existing []byte, replacement, recurrenceID, 
 	return parsedCalendar.Serialize(ics.WithNewLine("\r\n")), nil
 }
 
-func preserveEventTimezone(current, replacement *ics.VEvent, locations map[string]*time.Location, startWall, endWall string) error {
-	for index, property := range []ics.ComponentProperty{ics.ComponentPropertyDtStart, ics.ComponentPropertyDtEnd} {
-		currentProperty := current.GetProperty(property)
-		replacementProperty := replacement.GetProperty(property)
+func preserveEventTimezone(current, replacement *ics.VEvent, locations map[string]*time.Location, startWall, endWall, recurrenceWall string) error {
+	properties := []struct {
+		name ics.ComponentProperty
+		wall string
+	}{{ics.ComponentPropertyDtStart, startWall}, {ics.ComponentPropertyDtEnd, endWall}, {ics.ComponentPropertyRecurrenceId, recurrenceWall}}
+	for _, property := range properties {
+		currentProperty := current.GetProperty(property.name)
+		replacementProperty := replacement.GetProperty(property.name)
 		if currentProperty == nil || replacementProperty == nil || replacementProperty.GetValueType() == ics.ValueDataTypeDate {
 			continue
 		}
 		location := time.Local
-		wall := startWall
-		if index == 1 {
-			wall = endWall
-		}
 		if len(currentProperty.ICalParameters["TZID"]) > 0 {
 			timezone := strings.Trim(currentProperty.ICalParameters["TZID"][0], `"`)
 			location = locations[timezone]
@@ -436,24 +442,28 @@ func preserveEventTimezone(current, replacement *ics.VEvent, locations map[strin
 				var err error
 				location, err = time.LoadLocation(timezone)
 				if err != nil {
-					return fmt.Errorf("load existing event %s TZID %s: %w", property, timezone, err)
+					return fmt.Errorf("load existing event %s TZID %s: %w", property.name, timezone, err)
 				}
 			}
 		} else if strings.HasSuffix(currentProperty.Value, "Z") {
 			continue
-		} else if wall != "" {
-			replacementProperty.Value = wall
+		} else if property.wall != "" {
+			replacementProperty.Value = property.wall
 			replacementProperty.ICalParameters = cloneParameters(currentProperty.ICalParameters)
 			continue
 		}
 		instant, err := propertyTime(replacementProperty, nil)
 		if err != nil {
-			return fmt.Errorf("parse replacement %s: %w", property, err)
+			return fmt.Errorf("parse replacement %s: %w", property.name, err)
 		}
 		replacementProperty.Value = instant.In(location).Format("20060102T150405")
 		replacementProperty.ICalParameters = cloneParameters(currentProperty.ICalParameters)
 	}
 	return nil
+}
+
+func isFloatingDateTime(property *ics.IANAProperty) bool {
+	return property != nil && property.GetValueType() != ics.ValueDataTypeDate && len(property.ICalParameters["TZID"]) == 0 && !strings.HasSuffix(property.Value, "Z")
 }
 
 func cloneParameters(parameters map[string][]string) map[string][]string {

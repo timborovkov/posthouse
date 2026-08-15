@@ -212,6 +212,7 @@ type Event struct {
 	ETag              string             `json:"etag,omitempty"`
 	Href              string             `json:"href,omitempty"`
 	RecurrenceID      string             `json:"recurrence_id,omitempty"`
+	RecurrenceWall    string             `json:"recurrence_wall,omitempty"`
 	RecurrenceRange   string             `json:"recurrence_range,omitempty"`
 	RecurrenceRule    string             `json:"recurrence_rule,omitempty"`
 	RecurrenceDates   []time.Time        `json:"recurrence_dates,omitempty"`

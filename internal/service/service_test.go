@@ -1254,10 +1254,6 @@ func TestLiveAttachmentRefetchesAndOnlyFallsBackAsStale(t *testing.T) {
 	if fetches != 2 {
 		t.Fatalf("same-UIDVALIDITY continuation fetched provider %d times", fetches)
 	}
-	cached, cachedData, err := application.GetAttachmentMode(ctx, "work", "INBOX", 7, "file", "cache")
-	if err != nil || cached.Stale || string(cachedData) != "content-11" || fetches != 2 {
-		t.Fatalf("cached continuation returned %#v %q after %d fetches: %v", cached, cachedData, fetches, err)
-	}
 	providerMissing = true
 	stale, staleData, err := application.GetAttachmentMode(ctx, "work", "INBOX", 7, "file", "")
 	if err != nil || !stale.Stale || string(staleData) != "content-11" || fetches != 3 {
@@ -1273,6 +1269,31 @@ func TestLiveAttachmentRefetchesAndOnlyFallsBackAsStale(t *testing.T) {
 	providerMissing = true
 	if _, staleData, err := application.GetAttachmentMode(ctx, "work", "INBOX", 7, "file", ""); err == nil || len(staleData) != 0 {
 		t.Fatalf("confirmed UIDVALIDITY mismatch returned old bytes %q: %v", staleData, err)
+	}
+}
+
+func TestAttachmentContinuationKeepsOriginalUIDValiditySnapshot(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	application := serviceWithConnections(t, mailConnection("work"))
+	uidValidity := uint32(11)
+	application.mailboxUIDValidity = func(context.Context, model.Connection, string) (uint32, error) { return uidValidity, nil }
+	fetches := 0
+	application.mailGetAttachment = func(context.Context, model.Connection, string, uint32, string) (model.Attachment, []byte, uint32, error) {
+		fetches++
+		return model.Attachment{ID: "file", Name: "report.pdf"}, []byte(fmt.Sprintf("content-%d", uidValidity)), uidValidity, nil
+	}
+	ctx := context.Background()
+	_, firstData, cursor, err := application.GetAttachmentSnapshotMode(ctx, "work", "INBOX", 7, "file", "", "")
+	if err != nil || cursor == "" || string(firstData) != "content-11" || fetches != 1 {
+		t.Fatalf("first snapshot chunk data=%q cursor=%q fetches=%d err=%v", firstData, cursor, fetches, err)
+	}
+	uidValidity = 12
+	if _, data, err := application.GetAttachmentMode(ctx, "work", "INBOX", 7, "file", "refresh"); err != nil || string(data) != "content-12" {
+		t.Fatalf("replacement mailbox fetch data=%q err=%v", data, err)
+	}
+	attachment, continuedData, continuedCursor, err := application.GetAttachmentSnapshotMode(ctx, "work", "INBOX", 7, "file", "", cursor)
+	if err != nil || attachment.Stale || string(continuedData) != "content-11" || continuedCursor != cursor || fetches != 2 {
+		t.Fatalf("continuation mixed snapshots: attachment=%#v data=%q cursor=%q fetches=%d err=%v", attachment, continuedData, continuedCursor, fetches, err)
 	}
 }
 
@@ -1398,6 +1419,34 @@ func TestPrepareCalendarCreatePersistsGeneratedID(t *testing.T) {
 	var payload calendarWritePayload
 	if err := json.Unmarshal(record.Payload, &payload); err != nil || payload.StartWall != "20260814T090000" || payload.EndWall != "20260814T100000" {
 		t.Fatalf("prepared calendar wall times = %#v, %v", payload, err)
+	}
+}
+
+func TestPrepareCalendarUpdatePersistsFloatingRecurrenceWall(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	connection := model.Connection{ID: "work", Name: "Work", Calendar: &model.CalendarConfig{Kind: "caldav", URL: "http://localhost:5232", Username: "work", Secret: model.SecretRef{Env: "CALENDAR_PASSWORD"}, Collections: []model.CalendarCollection{{ID: "team", Path: "/work/team/"}}}}
+	application := serviceWithConnections(t, connection)
+	recurrenceWall := time.Date(2026, 8, 14, 8, 0, 0, 0, time.Local)
+	event := model.Event{ID: "series", SeriesID: "series", CollectionID: "team", Href: "/work/team/series.ics", ETag: `"etag"`, Title: "Override", Start: recurrenceWall.Add(time.Hour), End: recurrenceWall.Add(2 * time.Hour), RecurrenceID: recurrenceWall.UTC().Format(time.RFC3339), RecurrenceWall: recurrenceWall.Format("20060102T150405")}
+	prepared, err := application.PrepareCalendarWrite(context.Background(), "work", "calendar.update", event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger, err := application.ensureState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := ledger.GetOperation(context.Background(), prepared.Token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload calendarWritePayload
+	if err := json.Unmarshal(record.Payload, &payload); err != nil || payload.RecurrenceWall != recurrenceWall.Format("20060102T150405") {
+		t.Fatalf("prepared floating recurrence wall = %#v, %v", payload, err)
+	}
+	event.RecurrenceWall = "20260814T070000"
+	if _, err := application.PrepareCalendarWrite(context.Background(), "work", "calendar.update", event); err == nil || !strings.Contains(err.Error(), "does not match") {
+		t.Fatalf("mismatched recurrence wall returned %v", err)
 	}
 }
 

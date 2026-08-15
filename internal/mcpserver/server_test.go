@@ -56,7 +56,7 @@ func TestServerListsAndCallsReadOnlyConnectionTool(t *testing.T) {
 		t.Fatalf("ListTools returned error: %v", err)
 	}
 	names := make([]string, 0, len(listed.Tools))
-	var executeTool, sendTool, draftTool *mcp.Tool
+	var executeTool, sendTool, draftTool, attachmentTool *mcp.Tool
 	for _, tool := range listed.Tools {
 		names = append(names, tool.Name)
 		if tool.Name == "operation_execute" {
@@ -68,8 +68,11 @@ func TestServerListsAndCallsReadOnlyConnectionTool(t *testing.T) {
 		if tool.Name == "messages_draft_prepare" {
 			draftTool = tool
 		}
+		if tool.Name == "messages_attachment_get" {
+			attachmentTool = tool
+		}
 	}
-	for _, want := range []string{"connections_list", "messages_search", "messages_get", "messages_send_prepare", "messages_reply_prepare", "messages_forward_prepare", "messages_draft_prepare", "messages_action_prepare", "events_list", "event_ics_generate", "event_create_prepare", "operation_execute", "connection_doctor", "sync", "cache_status"} {
+	for _, want := range []string{"connections_list", "messages_search", "messages_get", "messages_attachment_get", "messages_send_prepare", "messages_reply_prepare", "messages_forward_prepare", "messages_draft_prepare", "messages_action_prepare", "events_list", "event_ics_generate", "event_create_prepare", "operation_execute", "connection_doctor", "sync", "cache_status"} {
 		if !slices.Contains(names, want) {
 			t.Fatalf("tools %v do not contain %s", names, want)
 		}
@@ -85,6 +88,20 @@ func TestServerListsAndCallsReadOnlyConnectionTool(t *testing.T) {
 		if strings.Contains(string(schema), `"path"`) {
 			t.Fatalf("remote attachment schema exposes host filesystem paths: %s", schema)
 		}
+	}
+	attachmentSchema, _ := json.Marshal(attachmentTool.InputSchema)
+	if !strings.Contains(string(attachmentSchema), `"cursor"`) {
+		t.Fatalf("attachment schema lacks snapshot cursor: %s", attachmentSchema)
+	}
+	missingCursor, err := clientSession.CallTool(context.Background(), &mcp.CallToolParams{Name: "messages_attachment_get", Arguments: map[string]any{"connection": "work", "uid": 1, "attachment_id": "file", "offset": 1}})
+	errorText := ""
+	if missingCursor != nil && len(missingCursor.Content) > 0 {
+		if content, ok := missingCursor.Content[0].(*mcp.TextContent); ok {
+			errorText = content.Text
+		}
+	}
+	if err != nil || missingCursor == nil || !missingCursor.IsError || !strings.Contains(errorText, "cursor is required") {
+		t.Fatalf("attachment continuation without cursor returned %#v, %v", missingCursor, err)
 	}
 
 	result, err := clientSession.CallTool(context.Background(), &mcp.CallToolParams{Name: "connections_list", Arguments: map[string]any{"page_size": 1}})

@@ -213,12 +213,14 @@ type attachmentGetInput struct {
 	AttachmentID string `json:"attachment_id"`
 	Offset       int    `json:"offset,omitempty"`
 	Limit        int    `json:"limit,omitempty"`
+	Cursor       string `json:"cursor,omitempty" jsonschema:"opaque attachment snapshot cursor returned with next_offset"`
 }
 
 type attachmentChunkOutput struct {
 	Attachment model.Attachment `json:"attachment"`
 	Offset     int              `json:"offset"`
 	NextOffset int              `json:"next_offset,omitempty"`
+	NextCursor string           `json:"next_cursor,omitempty"`
 	DataBase64 string           `json:"data_base64"`
 }
 
@@ -340,7 +342,7 @@ func (s *Server) registerTools() {
 			return nil, detail, err
 		})
 
-	mcp.AddTool(s.mcp, &mcp.Tool{Name: "messages_attachment_get", Title: "Get attachment chunk", Description: "Read a bounded base64 chunk from one message attachment. The maximum chunk is 1 MiB; pass next_offset until omitted.", Annotations: readOnly},
+	mcp.AddTool(s.mcp, &mcp.Tool{Name: "messages_attachment_get", Title: "Get attachment chunk", Description: "Read a bounded base64 chunk from one immutable message-attachment snapshot. The maximum chunk is 1 MiB; pass both next_offset and next_cursor until omitted.", Annotations: readOnly},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input attachmentGetInput) (*mcp.CallToolResult, attachmentChunkOutput, error) {
 			if err := validateReadMode(input.Mode); err != nil {
 				return nil, attachmentChunkOutput{}, err
@@ -348,20 +350,16 @@ func (s *Server) registerTools() {
 			if input.Offset < 0 {
 				return nil, attachmentChunkOutput{}, fmt.Errorf("offset cannot be negative")
 			}
+			if input.Offset > 0 && input.Cursor == "" {
+				return nil, attachmentChunkOutput{}, fmt.Errorf("cursor is required when offset is greater than zero")
+			}
 			if input.Limit == 0 {
 				input.Limit = 256 << 10
 			}
 			if input.Limit < 1 || input.Limit > 1<<20 {
 				return nil, attachmentChunkOutput{}, fmt.Errorf("limit must be between 1 and 1048576")
 			}
-			readMode := input.Mode
-			if input.Offset > 0 && readMode == "" {
-				readMode = "cache"
-			}
-			attachment, data, err := s.service.GetAttachmentMode(ctx, input.Connection, input.Folder, input.UID, input.AttachmentID, readMode)
-			if err != nil && readMode == "cache" {
-				attachment, data, err = s.service.GetAttachmentMode(ctx, input.Connection, input.Folder, input.UID, input.AttachmentID, "")
-			}
+			attachment, data, snapshotCursor, err := s.service.GetAttachmentSnapshotMode(ctx, input.Connection, input.Folder, input.UID, input.AttachmentID, input.Mode, input.Cursor)
 			if err != nil {
 				return nil, attachmentChunkOutput{}, err
 			}
@@ -372,6 +370,7 @@ func (s *Server) registerTools() {
 			output := attachmentChunkOutput{Attachment: attachment, Offset: input.Offset, DataBase64: base64.StdEncoding.EncodeToString(data[input.Offset:end])}
 			if end < len(data) {
 				output.NextOffset = end
+				output.NextCursor = snapshotCursor
 			}
 			return nil, output, nil
 		})

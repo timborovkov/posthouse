@@ -436,12 +436,34 @@ func TestMergeUpdatedEventPreservesFloatingTimes(t *testing.T) {
 func TestMergeUpdatedEventUsesPreparedFloatingWallTimes(t *testing.T) {
 	existing := []byte("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:floating\r\nDTSTART:20260302T090000\r\nDTEND:20260302T100000\r\nSUMMARY:Old\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n")
 	replacement := "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:floating\r\nDTSTART:20260302T140000Z\r\nDTEND:20260302T150000Z\r\nSUMMARY:New\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
-	merged, err := mergeUpdatedEventWithWallTimes(existing, replacement, "", "20260302T090000", "20260302T100000")
+	merged, err := mergeUpdatedEventWithWallTimes(existing, replacement, "", "20260302T090000", "20260302T100000", "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(merged, "DTSTART:20260302T090000\r\n") || !strings.Contains(merged, "DTEND:20260302T100000\r\n") {
 		t.Fatalf("executor timezone changed prepared floating walls:\n%s", merged)
+	}
+}
+
+func TestMergeUpdatedOccurrenceUsesPreparedFloatingRecurrenceWall(t *testing.T) {
+	existing := []byte("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:series\r\nDTSTART:20260301T090000\r\nDTEND:20260301T100000\r\nRRULE:FREQ=DAILY;COUNT=3\r\nSUMMARY:Master\r\nEND:VEVENT\r\nBEGIN:VEVENT\r\nUID:series\r\nRECURRENCE-ID:20260302T090000\r\nDTSTART:20260302T110000\r\nDTEND:20260302T120000\r\nSUMMARY:Old override\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n")
+	replacement := "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:series\r\nRECURRENCE-ID:20260302T140000Z\r\nDTSTART:20260302T160000Z\r\nDTEND:20260302T170000Z\r\nSUMMARY:New override\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+	merged, err := mergeUpdatedEventWithWallTimes(existing, replacement, "2026-03-02T14:00:00Z", "20260302T110000", "20260302T120000", "20260302T090000")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(merged, "RECURRENCE-ID:") != 1 || !strings.Contains(merged, "RECURRENCE-ID:20260302T090000") || !strings.Contains(merged, "SUMMARY:New override") {
+		t.Fatalf("floating recurrence override was duplicated or shifted:\n%s", merged)
+	}
+}
+
+func TestParsePreservesFloatingRecurrenceWall(t *testing.T) {
+	events, err := Parse([]byte("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:series\r\nRECURRENCE-ID:20260302T090000\r\nDTSTART:20260302T110000\r\nDTEND:20260302T120000\r\nSUMMARY:Override\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].RecurrenceWall != "20260302T090000" {
+		t.Fatalf("floating recurrence wall = %#v", events)
 	}
 }
 
