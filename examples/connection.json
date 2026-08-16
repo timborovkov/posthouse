@@ -9,7 +9,7 @@
   },
   "mail": {
     "username": "you@acme.example",
-    "secret_env": "ACME_MAIL_PASSWORD",
+    "secret": {"env": "ACME_MAIL_PASSWORD"},
     "imap": {
       "address": "imap.acme.example:993",
       "tls": true
@@ -20,10 +20,18 @@
     },
     "folders": {
       "inbox": "INBOX",
-      "sent": "Sent"
-    }
+      "sent": "Sent",
+      "drafts": "Drafts",
+      "archive": "Archive",
+      "trash": "Trash"
+    },
+    "sent_copy": "provider-managed"
   },
   "calendar": {
-    "url_secret_env": "ACME_CALENDAR_ICS_URL"
+    "kind": "caldav",
+    "url": "https://calendar.acme.example/",
+    "username": "you@acme.example",
+    "secret": {"env": "ACME_CALENDAR_PASSWORD"},
+    "collections": []
   }
 }

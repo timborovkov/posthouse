@@ -2,18 +2,26 @@ package service
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/emersion/go-imap/v2"
 	"github.com/timborovkov/posthouse/internal/calendar"
 	"github.com/timborovkov/posthouse/internal/config"
 	postmail "github.com/timborovkov/posthouse/internal/mail"
 	"github.com/timborovkov/posthouse/internal/model"
+	"github.com/timborovkov/posthouse/internal/state"
 )
 
 func TestListConnectionsCursorPagination(t *testing.T) {
@@ -24,7 +32,7 @@ func TestListConnectionsCursorPagination(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first page returned error: %v", err)
 	}
-	if len(first.Connections) != 2 || first.Connections[0].ID != "a" || first.Connections[1].ID != "b" || first.NextCursor == "" {
+	if len(first.Connections) != 2 || first.Connections[0].ID != "a" || first.Connections[1].ID != "b" || first.NextCursor == "" || first.Connections[0].Calendar.URL != "" {
 		t.Fatalf("first page is %#v", first)
 	}
 	second, err := application.ListConnections(model.Selector{}, 2, first.NextCursor)
@@ -33,6 +41,18 @@ func TestListConnectionsCursorPagination(t *testing.T) {
 	}
 	if len(second.Connections) != 1 || second.Connections[0].ID != "c" || second.NextCursor != "" {
 		t.Fatalf("second page is %#v", second)
+	}
+}
+
+func TestConnectionsAppliesCollectionOnlySelector(t *testing.T) {
+	caldav := model.Connection{ID: "calendar", Name: "Calendar", Calendar: &model.CalendarConfig{
+		Kind: "caldav", URL: "http://localhost:5232", Username: "calendar", Secret: model.SecretRef{Env: "CALENDAR_PASSWORD"},
+		Collections: []model.CalendarCollection{{ID: "team", Name: "Team", Path: "/calendar/team/"}},
+	}}
+	application := serviceWithConnections(t, mailConnection("mail"), caldav)
+	connections, err := application.Connections(model.Selector{Collections: []string{"team"}})
+	if err != nil || len(connections) != 1 || connections[0].ID != "calendar" {
+		t.Fatalf("Connections returned %#v, %v", connections, err)
 	}
 }
 
@@ -51,12 +71,75 @@ func TestListEventsCursorPagination(t *testing.T) {
 	if err != nil || len(first.Events) != 2 || first.Events[0].ID != "one" || first.NextCursor == "" {
 		t.Fatalf("first page is %#v, %v", first, err)
 	}
-	second, err := application.ListEvents(context.Background(), model.Selector{}, start, end, "", 2, first.NextCursor)
+	second, err := application.ListEvents(context.Background(), model.Selector{}, time.Time{}, time.Time{}, "", 2, first.NextCursor)
 	if err != nil || len(second.Events) != 1 || second.Events[0].ID != "three" || second.NextCursor != "" {
 		t.Fatalf("second page is %#v, %v", second, err)
 	}
 	if _, err := application.ListEvents(context.Background(), model.Selector{}, start, end, "changed", 2, first.NextCursor); err == nil {
 		t.Fatal("ListEvents accepted a cursor with changed filters")
+	}
+}
+
+func TestGetEventContinuesPastFirstPage(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	application := serviceWithConnections(t, calendarConnection("calendar", "Calendar"))
+	var feed strings.Builder
+	feed.WriteString("BEGIN:VCALENDAR\r\nVERSION:2.0\r\n")
+	start := time.Date(2026, 8, 15, 0, 0, 0, 0, time.UTC)
+	for index := 0; index < 501; index++ {
+		id := fmt.Sprintf("event-%03d", index)
+		if index == 500 {
+			id = "target"
+		}
+		when := start.Add(time.Duration(index) * time.Minute)
+		fmt.Fprintf(&feed, "BEGIN:VEVENT\r\nUID:%s\r\nSUMMARY:%s\r\nDTSTART:%s\r\nDTEND:%s\r\nEND:VEVENT\r\n", id, id, when.Format("20060102T150405Z"), when.Add(time.Minute).Format("20060102T150405Z"))
+	}
+	feed.WriteString("END:VCALENDAR\r\n")
+	application.calendar = calendar.NewClient(&http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: make(http.Header), Body: io.NopCloser(strings.NewReader(feed.String()))}, nil
+	})})
+	event, err := application.GetEvent(context.Background(), model.Selector{}, start, start.Add(24*time.Hour), "target")
+	if err != nil || event.ID != "target" {
+		t.Fatalf("GetEvent = %#v, %v", event, err)
+	}
+}
+
+func TestListEventsDetectsSameKeyContentMutation(t *testing.T) {
+	application := serviceWithConnections(t, calendarConnection("calendar", "Calendar"))
+	title := "Original"
+	application.calendar = calendar.NewClient(&http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		feed := "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n" + eventFixture("one", "One", "20260814T090000Z") + eventFixture("two", title, "20260815T090000Z") + "END:VCALENDAR\r\n"
+		return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: make(http.Header), Body: io.NopCloser(strings.NewReader(feed))}, nil
+	})})
+	start, end := time.Date(2026, 8, 14, 0, 0, 0, 0, time.UTC), time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC)
+	first, err := application.ListEvents(context.Background(), model.Selector{}, start, end, "", 1, "")
+	if err != nil || first.NextCursor == "" {
+		t.Fatalf("first page = %#v, %v", first, err)
+	}
+	title = "Changed"
+	if _, err := application.ListEvents(context.Background(), model.Selector{}, start, end, "", 1, first.NextCursor); err == nil || !strings.Contains(err.Error(), "sources changed") {
+		t.Fatalf("changed source returned %v", err)
+	}
+}
+
+func TestListEventsUsesEmptyStaleCache(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	application := serviceWithConnections(t, calendarConnection("calendar", "Calendar"))
+	available := true
+	application.calendar = calendar.NewClient(&http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		if !available {
+			return nil, fmt.Errorf("offline")
+		}
+		return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: make(http.Header), Body: io.NopCloser(strings.NewReader("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nEND:VCALENDAR\r\n"))}, nil
+	})})
+	start, end := time.Date(2026, 8, 14, 0, 0, 0, 0, time.UTC), time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC)
+	if _, err := application.ListEvents(context.Background(), model.Selector{}, start, end, "", 10, ""); err != nil {
+		t.Fatal(err)
+	}
+	available = false
+	page, err := application.ListEvents(context.Background(), model.Selector{}, start, end, "", 10, "")
+	if err != nil || len(page.Events) != 0 || len(page.Errors) != 1 || !page.Errors[0].Stale {
+		t.Fatalf("stale empty page = %#v, %v", page, err)
 	}
 }
 
@@ -77,7 +160,7 @@ func TestSearchMessagesCompositeCursor(t *testing.T) {
 			if message.UID >= uidNext {
 				uidNext = message.UID + 1
 			}
-			if options.BeforeUID == 0 || message.UID < options.BeforeUID {
+			if (options.MaxUIDExclusive == 0 || message.UID < options.MaxUIDExclusive) && afterMailCursor(message, options) {
 				filtered = append(filtered, message)
 			}
 		}
@@ -111,8 +194,2263 @@ func TestSearchMessagesCompositeCursor(t *testing.T) {
 	}
 }
 
+func TestSearchMessagesOfflineCachePaginatesMergedLiveTraversal(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	application := serviceWithConnections(t, mailConnection("work"))
+	messages := []model.Message{
+		{ConnectionID: "work", Folder: "INBOX", UID: 3, ReceivedAt: instant(12)},
+		{ConnectionID: "work", Folder: "INBOX", UID: 2, ReceivedAt: instant(11)},
+		{ConnectionID: "work", Folder: "INBOX", UID: 1, ReceivedAt: instant(10)},
+	}
+	application.mailSearch = func(_ model.Connection, options postmail.SearchOptions) (postmail.SearchResult, error) {
+		var filtered []model.Message
+		for _, message := range messages {
+			if afterMailCursor(message, options) {
+				filtered = append(filtered, message)
+			}
+		}
+		hasMore := len(filtered) > options.Limit
+		if hasMore {
+			filtered = filtered[:options.Limit]
+		}
+		return postmail.SearchResult{Messages: filtered, UIDValidity: 7, UIDNext: 4, HasMore: hasMore}, nil
+	}
+
+	liveFirst, err := application.SearchMessages(model.Selector{}, postmail.SearchOptions{}, 1, "")
+	if err != nil || liveFirst.NextCursor == "" {
+		t.Fatalf("first live page = %#v, %v", liveFirst, err)
+	}
+	liveSecond, err := application.SearchMessages(model.Selector{}, postmail.SearchOptions{}, 1, liveFirst.NextCursor)
+	if err != nil || liveSecond.NextCursor == "" {
+		t.Fatalf("second live page = %#v, %v", liveSecond, err)
+	}
+	if _, err := application.SearchMessages(model.Selector{}, postmail.SearchOptions{}, 1, liveSecond.NextCursor); err != nil {
+		t.Fatal(err)
+	}
+
+	var cursor string
+	for wantUID := uint32(3); wantUID > 0; wantUID-- {
+		page, err := application.SearchMessages(model.Selector{}, postmail.SearchOptions{Mode: "offline"}, 1, cursor)
+		if err != nil || len(page.Messages) != 1 || page.Messages[0].UID != wantUID || !page.Messages[0].Stale {
+			t.Fatalf("offline UID %d page = %#v, %v", wantUID, page, err)
+		}
+		cursor = page.NextCursor
+	}
+	if cursor != "" {
+		t.Fatalf("offline traversal has unexpected cursor %q", cursor)
+	}
+}
+
+func TestPreparedOperationRejectsChangedConnection(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	connection := mailConnection("work")
+	connection.Identity = model.Identity{Email: "work@example.test"}
+	connection.Mail.SMTP = model.SMTPConfig{Address: "localhost:3025", Insecure: true}
+	application := serviceWithConnections(t, connection)
+	prepared, err := application.PrepareSend(context.Background(), model.SendMessage{ConnectionID: "work", To: []string{"person@example.test"}, Subject: "subject", Text: "body"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	connection.Mail.SMTP.Address = "localhost:4025"
+	if err := application.UpsertConnection(connection, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := application.ExecuteOperation(context.Background(), prepared.Token); err == nil || !strings.Contains(err.Error(), "preconditions changed") {
+		t.Fatalf("ExecuteOperation error = %v", err)
+	}
+}
+
+func TestReplacingProviderAndRemovingConnectionInvalidateCachedContent(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	work := mailConnection("work")
+	application := serviceWithConnections(t, work, mailConnection("personal"))
+	ledger, err := application.ensureState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	put := func(key, connectionID string) {
+		t.Helper()
+		if err := ledger.Put(context.Background(), state.CacheEntry{Namespace: "message_body", Key: key, ConnectionID: connectionID, Kind: "message_body", Value: []byte("private content")}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	put("work-old-provider", "work")
+	put("personal", "personal")
+
+	work.Name = "Renamed Work"
+	if err := application.UpsertConnection(work, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := ledger.Get(context.Background(), "message_body", "work-old-provider", true); err != nil || !found {
+		t.Fatalf("metadata-only update removed cache: found=%v err=%v", found, err)
+	}
+	invalid := work
+	mailCopy := *work.Mail
+	invalid.Mail = &mailCopy
+	invalid.Mail.SentCopy = "always"
+	if err := application.UpsertConnection(invalid, true); err == nil {
+		t.Fatal("invalid provider replacement succeeded")
+	}
+	if _, found, err := ledger.Get(context.Background(), "message_body", "work-old-provider", true); err != nil || !found {
+		t.Fatalf("invalid replacement removed cache: found=%v err=%v", found, err)
+	}
+
+	oldProvider, err := application.exactConnection("work", "mail.read")
+	if err != nil {
+		t.Fatal(err)
+	}
+	work.Mail.IMAP.Address = "localhost:1143"
+	if err := application.UpsertConnection(work, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := ledger.Get(context.Background(), "message_body", "work-old-provider", true); err != nil || found {
+		t.Fatalf("provider replacement retained cache: found=%v err=%v", found, err)
+	}
+	if _, found, err := ledger.Get(context.Background(), "message_body", "personal", true); err != nil || !found {
+		t.Fatalf("provider replacement removed unrelated cache: found=%v err=%v", found, err)
+	}
+	options := postmail.SearchOptions{}
+	if err := application.cacheMailResultFor(oldProvider, "INBOX", "old in-flight request", options, postmail.SearchResult{UIDValidity: 1, Messages: []model.Message{{ConnectionID: "work", UID: 1, Subject: "old provider"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if result, found, _ := application.cachedMailResult("work", "INBOX", "old in-flight request", options, mailCursorState{}, 10); found || len(result.Messages) != 0 {
+		t.Fatalf("replacement read old in-flight cache: found=%v result=%#v", found, result)
+	}
+
+	put("work-before-remove", "work")
+	if err := application.RemoveConnection("work"); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := ledger.Get(context.Background(), "message_body", "work-before-remove", true); err != nil || found {
+		t.Fatalf("connection removal retained cache: found=%v err=%v", found, err)
+	}
+}
+
+func TestCanonicalProviderDefaultsDoNotInvalidateCache(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	connection := calendarConnection("calendar", "Calendar")
+	application := serviceWithConnections(t, connection)
+	ledger, err := application.ensureState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ledger.Put(context.Background(), state.CacheEntry{Namespace: "events", Key: "calendar-cache", ConnectionID: "calendar", Kind: "event", Value: []byte("private event")}); err != nil {
+		t.Fatal(err)
+	}
+	connection.Calendar.Kind = "feed"
+	connection.Calendar.Collections = []model.CalendarCollection{}
+	if err := application.UpsertConnection(connection, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := ledger.Get(context.Background(), "events", "calendar-cache", true); err != nil || !found {
+		t.Fatalf("canonical defaults removed cache: found=%v err=%v", found, err)
+	}
+}
+
+func TestInFlightCalendarWriteCannotPopulateReplacementCache(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	connection := calendarConnection("calendar", "Calendar")
+	application := serviceWithConnections(t, connection)
+	oldProvider, err := application.exactConnection("calendar", "calendar.read")
+	if err != nil {
+		t.Fatal(err)
+	}
+	connection.Calendar.URL = "http://localhost/replacement.ics"
+	if err := application.UpsertConnection(connection, true); err != nil {
+		t.Fatal(err)
+	}
+	start, end := instant(8), instant(12)
+	events := []model.Event{{ConnectionID: "calendar", ID: "old", Title: "Old provider", Start: instant(9), End: instant(10)}}
+	if err := application.cacheEventsReplacingFor(oldProvider, "race", events, start, end, true, true, nil); err != nil {
+		t.Fatal(err)
+	}
+	current, err := application.exactConnection("calendar", "calendar.read")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cached, found, _ := application.cachedEvents(current, "race", nil, start, end, ""); found || len(cached) != 0 {
+		t.Fatalf("replacement read old in-flight events: found=%v events=%#v", found, cached)
+	}
+}
+
+func TestProviderCacheIdentityUsesResolvedSecretValues(t *testing.T) {
+	connection := model.Connection{ID: "calendar", Calendar: &model.CalendarConfig{Kind: "feed", URLSecret: model.SecretRef{Env: "SECRET_CALENDAR_URL"}}}
+	t.Setenv("SECRET_CALENDAR_URL", "https://calendar-one.example.test/feed.ics")
+	first := calendarCacheID(connection)
+	if first == "" {
+		t.Fatal("resolved calendar URL produced no cache identity")
+	}
+	t.Setenv("SECRET_CALENDAR_URL", "https://calendar-two.example.test/feed.ics")
+	if second := calendarCacheID(connection); second == "" || second == first {
+		t.Fatalf("rotated calendar URL cache identity = %q, first %q", second, first)
+	}
+	t.Setenv("SECRET_CALENDAR_URL", "")
+	if unresolved := calendarCacheID(connection); unresolved != "" {
+		t.Fatalf("unresolved calendar URL cache identity = %q", unresolved)
+	}
+	mail := mailConnection("mail")
+	mail.Mail.Secret = model.SecretRef{Env: "PASSWORD"}
+	mail.Mail.SecretEnv = ""
+	t.Setenv("PASSWORD", "first-account-password")
+	firstMail := mailCacheID(mail)
+	t.Setenv("PASSWORD", "second-account-password")
+	if secondMail := mailCacheID(mail); firstMail == "" || secondMail == "" || secondMail == firstMail {
+		t.Fatalf("rotated mail credential cache identities = %q and %q", firstMail, secondMail)
+	}
+}
+
+func TestCalendarFetchUsesOneResolvedProviderSnapshot(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	t.Setenv("SECRET_FEED_URL", "https://calendar-one.example.test/feed.ics")
+	connection := model.Connection{ID: "calendar", Name: "Calendar", Calendar: &model.CalendarConfig{Kind: "feed", URLSecret: model.SecretRef{Env: "SECRET_FEED_URL"}}}
+	application := serviceWithConnections(t, connection)
+	application.calendar = calendar.NewClient(&http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.URL.Host != "calendar-one.example.test" {
+			t.Fatalf("provider request URL = %s", request.URL)
+		}
+		t.Setenv("SECRET_FEED_URL", "https://calendar-two.example.test/feed.ics")
+		t.Setenv("SECRET_FEED_URL", "https://calendar-one.example.test/feed.ics")
+		feed := "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n" + eventFixture("old", "Old provider", "20260814T090000Z") + "END:VCALENDAR\r\n"
+		return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: make(http.Header), Body: io.NopCloser(strings.NewReader(feed))}, nil
+	})})
+	start, end := instant(8), instant(12)
+	page, err := application.ListEventsMode(context.Background(), model.Selector{}, start, end, "", 10, "", "refresh")
+	if err != nil || len(page.Events) != 1 || len(page.Errors) != 0 {
+		t.Fatalf("snapshot fetch page = %#v, %v", page, err)
+	}
+	offline, err := application.ListEventsMode(context.Background(), model.Selector{}, start, end, "", 10, "", "offline")
+	if err != nil || len(offline.Events) != 1 || offline.Events[0].Title != "Old provider" {
+		t.Fatalf("offline snapshot = %#v, %v", offline, err)
+	}
+}
+
+func TestMailFetchUsesOneResolvedProviderSnapshot(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	connection := mailConnection("work")
+	application := serviceWithConnections(t, connection)
+	application.mailSearch = func(connection model.Connection, _ postmail.SearchOptions) (postmail.SearchResult, error) {
+		if connection.Mail.ResolvedSecret != "test-password" {
+			t.Fatalf("provider secret snapshot = %q", connection.Mail.ResolvedSecret)
+		}
+		t.Setenv("PASSWORD", "briefly-rotated")
+		t.Setenv("PASSWORD", "test-password")
+		return postmail.SearchResult{Messages: []model.Message{{ConnectionID: "work", Folder: "INBOX", UID: 1, Subject: "snapshot", Date: instant(9)}}, UIDValidity: 7, UIDNext: 2}, nil
+	}
+	page, err := application.SearchMessages(model.Selector{}, postmail.SearchOptions{Mode: "refresh"}, 10, "")
+	if err != nil || len(page.Messages) != 1 || len(page.Errors) != 0 {
+		t.Fatalf("snapshot search = %#v, %v", page, err)
+	}
+	offline, err := application.SearchMessages(model.Selector{}, postmail.SearchOptions{Mode: "offline"}, 10, "")
+	if err != nil || len(offline.Messages) != 1 || offline.Messages[0].Subject != "snapshot" {
+		t.Fatalf("offline snapshot = %#v, %v", offline, err)
+	}
+}
+
+func TestMailResolutionFailureKeepsSourceIdentity(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	t.Setenv("MISSING_PASSWORD", "")
+	good := mailConnection("good")
+	bad := mailConnection("bad")
+	bad.Mail.SecretEnv = ""
+	bad.Mail.Secret = model.SecretRef{Env: "MISSING_PASSWORD"}
+	application := serviceWithConnections(t, good, bad)
+	application.mailSearch = func(connection model.Connection, _ postmail.SearchOptions) (postmail.SearchResult, error) {
+		return postmail.SearchResult{Messages: []model.Message{{ConnectionID: connection.ID, Folder: "INBOX", UID: 1, Date: instant(9)}}, UIDValidity: 7, UIDNext: 2}, nil
+	}
+	page, err := application.SearchMessages(model.Selector{}, postmail.SearchOptions{Mode: "refresh"}, 10, "")
+	if err != nil || len(page.Messages) != 1 || len(page.Errors) != 1 || page.Errors[0].ConnectionID != "bad" {
+		t.Fatalf("partial resolution page = %#v, %v", page, err)
+	}
+}
+
+func TestPreparedOperationRejectsRotatedProviderSecret(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	connection := mailConnection("work")
+	connection.Mail.SMTP = model.SMTPConfig{Address: "localhost:3025", Insecure: true}
+	application := serviceWithConnections(t, connection)
+	prepared, err := application.PrepareSend(context.Background(), model.SendMessage{ConnectionID: "work", To: []string{"person@example.test"}, Subject: "subject", Text: "body"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PASSWORD", "rotated-password")
+	if _, err := application.ExecuteOperation(context.Background(), prepared.Token); err == nil || !strings.Contains(err.Error(), "preconditions changed") {
+		t.Fatalf("ExecuteOperation error = %v", err)
+	}
+}
+
+func TestOperationExecutionUsesPrecheckedProviderSnapshot(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	connection := mailConnection("work")
+	connection.Mail.SMTP = model.SMTPConfig{Address: "localhost:3025", Insecure: true}
+	application := serviceWithConnections(t, connection)
+	prepared, err := application.PrepareSend(context.Background(), model.SendMessage{ConnectionID: "work", To: []string{"person@example.test"}, Subject: "subject", Text: "body"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	application.mailBuild = func(connection model.Connection, _ model.SendMessage) ([]byte, error) {
+		if connection.Mail.ResolvedSecret != "test-password" {
+			t.Fatalf("build provider secret snapshot = %q", connection.Mail.ResolvedSecret)
+		}
+		t.Setenv("PASSWORD", "rotated-after-precheck")
+		return []byte("message"), nil
+	}
+	application.mailSendRaw = func(connection model.Connection, _ model.SendMessage, _ []byte) error {
+		if connection.Mail.ResolvedSecret != "test-password" {
+			t.Fatalf("send provider secret snapshot = %q", connection.Mail.ResolvedSecret)
+		}
+		return nil
+	}
+	result, err := application.ExecuteOperation(context.Background(), prepared.Token)
+	if err != nil || result.Status != "succeeded" {
+		t.Fatalf("ExecuteOperation = %#v, %v", result, err)
+	}
+}
+
+func TestReplyPreparationUsesOneProviderSnapshotBeforeMessageRead(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	connection := mailConnection("work")
+	connection.Mail.SMTP = model.SMTPConfig{Address: "localhost:3025", Insecure: true}
+	application := serviceWithConnections(t, connection)
+	application.mailGetMessage = func(_ context.Context, connection model.Connection, _ string, _ uint32) (postmail.FetchedMessage, error) {
+		if connection.Mail.ResolvedSecret != "test-password" {
+			t.Fatalf("message read secret snapshot = %q", connection.Mail.ResolvedSecret)
+		}
+		t.Setenv("PASSWORD", "rotated-during-read")
+		return postmail.FetchedMessage{Detail: model.MessageDetail{Message: model.Message{MessageID: "original", From: []model.Address{{Email: "sender@example.test"}}, Subject: "subject"}, Text: "original"}, UIDValidity: 7}, nil
+	}
+	prepared, err := application.PrepareReply(context.Background(), "work", "INBOX", 1, "reply")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger, err := application.ensureState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := ledger.GetOperation(context.Background(), prepared.Token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err := application.exactConnection("work", "mail.send")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rotated, err := resolveMailConnection(current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rotatedDigest, _ := digestOperationConnection(rotated, "mail.send")
+	if record.Precondition == rotatedDigest {
+		t.Fatal("reply preparation rebound the operation to the rotated secret")
+	}
+	t.Setenv("PASSWORD", "test-password")
+	original, err := resolveMailConnection(current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalDigest, _ := digestOperationConnection(original, "mail.send")
+	if record.Precondition != originalDigest {
+		t.Fatalf("prepared precondition = %q, want original provider %q", record.Precondition, originalDigest)
+	}
+}
+
+func TestPreparedOperationResolvesOnlyRequiredProvider(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	t.Setenv("MISSING_PROVIDER_SECRET", "")
+	t.Run("mail ignores unavailable calendar", func(t *testing.T) {
+		connection := mailConnection("work")
+		connection.Mail.SMTP = model.SMTPConfig{Address: "localhost:3025", Insecure: true}
+		connection.Calendar = &model.CalendarConfig{Kind: "caldav", URL: "https://calendar.example.test/", Username: "work", Secret: model.SecretRef{Env: "MISSING_PROVIDER_SECRET"}, Collections: []model.CalendarCollection{{ID: "team", Path: "/team/"}}}
+		application := serviceWithConnections(t, connection)
+		application.mailBuild = func(model.Connection, model.SendMessage) ([]byte, error) { return []byte("message"), nil }
+		application.mailSendRaw = func(model.Connection, model.SendMessage, []byte) error { return nil }
+		prepared, err := application.PrepareSend(context.Background(), model.SendMessage{ConnectionID: "work", To: []string{"person@example.test"}, Subject: "subject", Text: "body"})
+		if err != nil {
+			t.Fatalf("PrepareSend returned %v", err)
+		}
+		if result, err := application.ExecuteOperation(context.Background(), prepared.Token); err != nil || result.Status != "succeeded" {
+			t.Fatalf("ExecuteOperation returned %#v, %v", result, err)
+		}
+	})
+	t.Run("calendar ignores unavailable mail", func(t *testing.T) {
+		connection := mailConnection("work")
+		connection.Mail.SecretEnv = ""
+		connection.Mail.Secret = model.SecretRef{Env: "MISSING_PROVIDER_SECRET"}
+		connection.Calendar = &model.CalendarConfig{Kind: "caldav", URL: "https://calendar.example.test/", Username: "work", Secret: model.SecretRef{Env: "CALENDAR_PASSWORD"}, Collections: []model.CalendarCollection{{ID: "team", Path: "/team/"}}}
+		application := serviceWithConnections(t, connection)
+		event := model.Event{ID: "event", CollectionID: "team", Title: "Title", Start: instant(9), End: instant(10)}
+		if _, err := application.PrepareCalendarWrite(context.Background(), "work", "calendar.create", event); err != nil {
+			t.Fatalf("PrepareCalendarWrite returned %v", err)
+		}
+	})
+}
+
+func TestPrepareSendUsesEffectiveSMTPIdentity(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	connection := mailConnection("work")
+	connection.Mail.Username = "work@example.test"
+	connection.Mail.SMTP = model.SMTPConfig{Address: "localhost:3025", Insecure: true}
+	application := serviceWithConnections(t, connection)
+	prepared, err := application.PrepareSend(context.Background(), model.SendMessage{ConnectionID: connection.ID, To: []string{"person@example.test"}, Subject: "subject", Text: "body"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prepared.Identity.Email != connection.Mail.Username {
+		t.Fatalf("prepared identity = %#v", prepared.Identity)
+	}
+	preview, ok := prepared.Preview["acting_identity"].(model.Identity)
+	if !ok || preview.Email != connection.Mail.Username {
+		t.Fatalf("preview identity = %#v", prepared.Preview["acting_identity"])
+	}
+}
+
+func TestSearchMessagesContextCancelsProviderSearch(t *testing.T) {
+	application := serviceWithConnections(t, mailConnection("work"))
+	application.mailSearchContext = func(ctx context.Context, _ model.Connection, _ postmail.SearchOptions) (postmail.SearchResult, error) {
+		<-ctx.Done()
+		return postmail.SearchResult{}, ctx.Err()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	started := time.Now()
+	if _, err := application.SearchMessagesContext(ctx, model.Selector{}, postmail.SearchOptions{Mode: "refresh"}, 10, ""); err == nil {
+		t.Fatal("cancelled search returned no error")
+	}
+	if time.Since(started) > time.Second {
+		t.Fatal("cancelled search did not return promptly")
+	}
+}
+
+func TestFilteredEventCacheDoesNotPruneOtherCollections(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	connection := model.Connection{ID: "work", Name: "Work", Calendar: &model.CalendarConfig{Kind: "caldav", URL: "http://localhost:5232", Username: "work", Secret: model.SecretRef{Env: "CALENDAR_PASSWORD"}, Collections: []model.CalendarCollection{{ID: "team-id", Name: "Team", Path: "/team/"}, {ID: "personal-id", Name: "Personal", Path: "/personal/"}}}}
+	application := serviceWithConnections(t, connection)
+	start, end := instant(8), instant(18)
+	all := []model.Event{{ID: "team", CollectionID: "team-id", Start: instant(9), End: instant(10)}, {ID: "personal", CollectionID: "personal-id", Start: instant(11), End: instant(12)}}
+	if err := application.cacheEvents(connection.ID, "all", all, start, end, true, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.cacheEvents(connection.ID, "team query", all[:1], start, end, true, false); err != nil {
+		t.Fatal(err)
+	}
+	events, ok, _ := application.cachedEvents(connection, "different scope", []string{"Personal"}, start, end, "")
+	if !ok || len(events) != 1 || events[0].ID != "personal" {
+		t.Fatalf("offline personal collection = %#v, %v", events, ok)
+	}
+}
+
+func TestFilteredEventCacheReplacesExactScopedResult(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	connection := calendarConnection("calendar", "Calendar")
+	application := serviceWithConnections(t, connection)
+	start, end := instant(8), instant(18)
+	old := []model.Event{{ID: "kept", Start: instant(9), End: instant(10)}, {ID: "deleted", Start: instant(11), End: instant(12)}}
+	if err := application.cacheEvents(connection.ID, "query", old, start, end, true, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.cacheEvents(connection.ID, "query", old[:1], start, end, true, false); err != nil {
+		t.Fatal(err)
+	}
+	events, ok, _ := application.cachedEvents(connection, "query", nil, start, end, "")
+	if !ok || len(events) != 1 || events[0].ID != "kept" {
+		t.Fatalf("exact filtered cache = %#v, %v", events, ok)
+	}
+}
+
+func TestEventIndexDoesNotRenewRetainedEventAge(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	connection := calendarConnection("calendar", "Calendar")
+	application := serviceWithConnections(t, connection)
+	cfg, err := application.store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Cache.EventPastDays = 1
+	cfg.Cache.EventFutureDays = 1
+	if err := application.store.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	base := time.Now().UTC().Truncate(time.Hour)
+	now := base
+	application.now = func() time.Time { return now }
+	rangeStart, rangeEnd := base, base.Add(24*time.Hour)
+	old := model.Event{ID: "old", Start: base.Add(9 * time.Hour), End: base.Add(10 * time.Hour)}
+	if err := application.cacheEvents(connection.ID, "old", []model.Event{old}, rangeStart, rangeEnd, true, false); err != nil {
+		t.Fatal(err)
+	}
+	now = base.Add(12 * time.Hour)
+	fresh := model.Event{ID: "fresh", Start: base.Add(11 * time.Hour), End: base.Add(12 * time.Hour)}
+	if err := application.cacheEvents(connection.ID, "fresh", []model.Event{fresh}, rangeStart, rangeEnd, true, false); err != nil {
+		t.Fatal(err)
+	}
+	now = base.Add(25 * time.Hour)
+	events, ok, _ := application.cachedEvents(connection, "missing", nil, rangeStart, rangeEnd, "")
+	if !ok || len(events) != 1 || events[0].ID != "fresh" {
+		t.Fatalf("aged event index = %#v, %v", events, ok)
+	}
+	if !events[0].CachedAt.Equal(base.Add(12 * time.Hour)) {
+		t.Fatalf("fresh event cached_at = %v", events[0].CachedAt)
+	}
+}
+
+func TestExpiredBroadIndexEventsAreCacheMiss(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	connection := calendarConnection("calendar", "Calendar")
+	application := serviceWithConnections(t, connection)
+	cfg, err := application.store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Cache.EventPastDays = 1
+	cfg.Cache.EventFutureDays = 1
+	if err := application.store.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	base := time.Now().UTC().Truncate(time.Hour)
+	now := base
+	application.now = func() time.Time { return now }
+	oldStart, oldEnd := base, base.Add(2*time.Hour)
+	old := model.Event{ID: "old", Start: base.Add(time.Hour), End: base.Add(2 * time.Hour)}
+	if err := application.cacheEvents(connection.ID, "old", []model.Event{old}, oldStart, oldEnd, true, false); err != nil {
+		t.Fatal(err)
+	}
+	now = base.Add(12 * time.Hour)
+	freshStart, freshEnd := now, now.Add(2*time.Hour)
+	fresh := model.Event{ID: "fresh", Start: now.Add(time.Hour), End: now.Add(2 * time.Hour)}
+	if err := application.cacheEvents(connection.ID, "fresh", []model.Event{fresh}, freshStart, freshEnd, true, false); err != nil {
+		t.Fatal(err)
+	}
+	now = base.Add(25 * time.Hour)
+	events, ok, _ := application.cachedEvents(connection, "missing", nil, oldStart, oldEnd, "")
+	if ok || len(events) != 0 {
+		t.Fatalf("expired broad-index scope = %#v, %v", events, ok)
+	}
+	events, ok, _ = application.cachedEvents(connection, "missing", nil, freshStart, freshEnd, "")
+	if !ok || len(events) != 1 || events[0].ID != "fresh" {
+		t.Fatalf("fresh broad-index scope = %#v, %v", events, ok)
+	}
+}
+
+func TestExpiredBroadIndexIsOfflineAndStaleMiss(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	connection := calendarConnection("calendar", "Calendar")
+	application := serviceWithConnections(t, connection)
+	cfg, err := application.store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Cache.EventPastDays = 1
+	cfg.Cache.EventFutureDays = 1
+	if err := application.store.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	base := time.Now().UTC().Truncate(time.Hour)
+	now := base
+	application.now = func() time.Time { return now }
+	oldStart, oldEnd := base, base.Add(2*time.Hour)
+	old := model.Event{ID: "old", Start: base.Add(time.Hour), End: base.Add(2 * time.Hour)}
+	if err := application.cacheEvents(connection.ID, "old", []model.Event{old}, oldStart, oldEnd, true, false); err != nil {
+		t.Fatal(err)
+	}
+	now = base.Add(12 * time.Hour)
+	freshStart, freshEnd := now, now.Add(2*time.Hour)
+	fresh := model.Event{ID: "fresh", Start: now.Add(time.Hour), End: now.Add(2 * time.Hour)}
+	if err := application.cacheEvents(connection.ID, "fresh", []model.Event{fresh}, freshStart, freshEnd, true, false); err != nil {
+		t.Fatal(err)
+	}
+	now = base.Add(25 * time.Hour)
+	offline, err := application.ListEventsMode(context.Background(), model.Selector{}, oldStart, oldEnd, "", 10, "", "offline")
+	if err == nil || len(offline.Events) != 0 {
+		t.Fatalf("offline expired index = %#v, %v", offline, err)
+	}
+	application.calendar = calendar.NewClient(&http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, fmt.Errorf("provider down")
+	})})
+	stale, err := application.ListEventsMode(context.Background(), model.Selector{}, oldStart, oldEnd, "", 10, "", "")
+	if err == nil || len(stale.Events) != 0 {
+		t.Fatalf("stale expired index = %#v, %v", stale, err)
+	}
+}
+
+func TestGetEventRejectsAmbiguousID(t *testing.T) {
+	application := serviceWithConnections(t, calendarConnection("work", "Work"), calendarConnection("personal", "Personal"))
+	feed := "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n" + eventFixture("shared", "Shared", "20260814T090000Z") + "END:VCALENDAR\r\n"
+	application.calendar = calendar.NewClient(&http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: make(http.Header), Body: io.NopCloser(strings.NewReader(feed))}, nil
+	})})
+	_, err := application.GetEvent(context.Background(), model.Selector{}, instant(8), instant(12), "shared")
+	if err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("GetEvent returned %v", err)
+	}
+}
+
+func TestPrepareCalendarWriteValidatesEventBeforeToken(t *testing.T) {
+	connection := model.Connection{ID: "work", Name: "Work", Calendar: &model.CalendarConfig{Kind: "caldav", URL: "http://localhost:5232", Username: "work", Secret: model.SecretRef{Env: "CALENDAR_PASSWORD"}, Collections: []model.CalendarCollection{{ID: "team", Path: "/work/team/"}}}}
+	application := serviceWithConnections(t, connection)
+	_, err := application.PrepareCalendarWrite(context.Background(), "work", "calendar.create", model.Event{CollectionID: "team", Start: instant(10), End: instant(9)})
+	if err == nil || !strings.Contains(err.Error(), "validate calendar event") {
+		t.Fatalf("PrepareCalendarWrite error = %v", err)
+	}
+}
+
+func TestPrepareCalendarWriteRejectsInvalidRecurrenceID(t *testing.T) {
+	connection := model.Connection{ID: "work", Name: "Work", Calendar: &model.CalendarConfig{Kind: "caldav", URL: "http://localhost:5232", Username: "work", Secret: model.SecretRef{Env: "CALENDAR_PASSWORD"}, Collections: []model.CalendarCollection{{ID: "team", Path: "/work/team/"}}}}
+	application := serviceWithConnections(t, connection)
+	_, err := application.PrepareCalendarWrite(context.Background(), "work", "calendar.create", model.Event{CollectionID: "team", Title: "Planning", Start: instant(9), End: instant(10), RecurrenceID: "not-rfc3339"})
+	if err == nil || !strings.Contains(err.Error(), "recurrence ID") {
+		t.Fatalf("PrepareCalendarWrite error = %v", err)
+	}
+}
+
+func TestMovedEventReplacesBroadCacheIdentity(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	connection := calendarConnection("calendar", "Calendar")
+	application := serviceWithConnections(t, connection)
+	start, end := instant(8), instant(18)
+	old := model.Event{ConnectionID: connection.ID, ID: "event", Href: "/event.ics", Start: instant(9), End: instant(10)}
+	moved := old
+	moved.Start, moved.End = instant(11), instant(12)
+	if err := application.cacheEvents(connection.ID, "old", []model.Event{old}, start, end, true, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.cacheEvents(connection.ID, "filtered", []model.Event{moved}, start, end, true, false); err != nil {
+		t.Fatal(err)
+	}
+	events, ok, _ := application.cachedEvents(connection, "other", nil, start, end, "")
+	if !ok || len(events) != 1 || !events[0].Start.Equal(moved.Start) {
+		t.Fatalf("moved event cache = %#v, %v", events, ok)
+	}
+}
+
+func TestConcurrentSharedCacheIndexMergesRetainEveryResult(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	t.Run("calendar", func(t *testing.T) {
+		connection := calendarConnection("calendar", "Calendar")
+		first := serviceWithConnections(t, connection)
+		defer first.Close()
+		second := New(first.store)
+		defer second.Close()
+		if _, err := first.ensureState(); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := second.ensureState(); err != nil {
+			t.Fatal(err)
+		}
+		start, end := instant(0), instant(23)
+		for index := range 20 {
+			ready := make(chan struct{})
+			errors := make(chan error, 2)
+			for offset, application := range []*Service{first, second} {
+				go func(offset int, application *Service) {
+					<-ready
+					id := fmt.Sprintf("event-%d-%d", index, offset)
+					errors <- application.cacheEvents(connection.ID, id, []model.Event{{ConnectionID: connection.ID, ID: id, Start: instant(9 + offset), End: instant(10 + offset)}}, start, end, true, false)
+				}(offset, application)
+			}
+			close(ready)
+			for range 2 {
+				if err := <-errors; err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		cached, ok, _ := first.cachedEvents(connection, "missing-scope", nil, start, end, "")
+		if !ok || len(cached) != 40 {
+			t.Fatalf("calendar index retained %d events, found=%v", len(cached), ok)
+		}
+		for index := range 20 {
+			ready := make(chan struct{})
+			errors := make(chan error, 2)
+			for offset, application := range []*Service{first, second} {
+				go func(offset int, application *Service) {
+					<-ready
+					collection := fmt.Sprintf("collection-%d-%d", index, offset)
+					event := model.Event{ConnectionID: connection.ID, CollectionID: collection, ID: collection, Start: instant(9 + offset), End: instant(10 + offset)}
+					errors <- application.cacheEventsReplacing(connection.ID, "shared-partial-scope", []model.Event{event}, start, end, false, false, []string{collection})
+				}(offset, application)
+			}
+			close(ready)
+			for range 2 {
+				if err := <-errors; err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		cached, ok, _ = first.cachedEvents(connection, "shared-partial-scope", nil, start, end, "")
+		if !ok || len(cached) != 40 {
+			t.Fatalf("calendar scoped cache retained %d events, found=%v", len(cached), ok)
+		}
+	})
+	t.Run("mail", func(t *testing.T) {
+		connection := mailConnection("work")
+		first := serviceWithConnections(t, connection)
+		defer first.Close()
+		second := New(first.store)
+		defer second.Close()
+		ledger, err := first.ensureState()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := second.ensureState(); err != nil {
+			t.Fatal(err)
+		}
+		resolved, err := first.exactConnection(connection.ID, "mail.read")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for index := range 20 {
+			ready := make(chan struct{})
+			errors := make(chan error, 2)
+			for offset, application := range []*Service{first, second} {
+				go func(offset int, application *Service) {
+					<-ready
+					uid := uint32(index*2 + offset + 1)
+					query := fmt.Sprintf("query-%d-%d", index, offset)
+					result := postmail.SearchResult{Messages: []model.Message{{ConnectionID: connection.ID, Folder: "INBOX", UID: uid, Subject: query, Date: instant(9)}}, UIDValidity: 7, UIDNext: uid + 1}
+					errors <- application.cacheMailResult(connection.ID, "INBOX", query, postmail.SearchOptions{Query: query}, result)
+				}(offset, application)
+			}
+			close(ready)
+			for range 2 {
+				if err := <-errors; err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		entry, ok, err := ledger.Get(context.Background(), "message_metadata_index", mailboxCacheKey(mailCacheID(resolved), "INBOX"), false)
+		if err != nil || !ok {
+			t.Fatalf("mail index Get = %#v, %v, %v", entry, ok, err)
+		}
+		var index postmail.SearchResult
+		if err := json.Unmarshal(entry.Value, &index); err != nil || len(index.Messages) != 40 {
+			t.Fatalf("mail index retained %d messages: %v", len(index.Messages), err)
+		}
+	})
+}
+
+func TestPartialCalDAVRefreshReplacesOnlySuccessfulCollections(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	connection := model.Connection{ID: "calendar", Name: "Calendar", Calendar: &model.CalendarConfig{Kind: "caldav", URL: "http://localhost:5232", Username: "calendar", Secret: model.SecretRef{Env: "CALENDAR_PASSWORD"}, Collections: []model.CalendarCollection{{ID: "team", Path: "/team/"}, {ID: "personal", Path: "/personal/"}}}}
+	application := serviceWithConnections(t, connection)
+	start, end := instant(8), instant(18)
+	old := []model.Event{
+		{ConnectionID: connection.ID, CollectionID: "team", ID: "deleted", Start: instant(9), End: instant(10)},
+		{ConnectionID: connection.ID, CollectionID: "personal", ID: "preserved", Start: instant(11), End: instant(12)},
+	}
+	if err := application.cacheEvents(connection.ID, "scope", old, start, end, true, true); err != nil {
+		t.Fatal(err)
+	}
+	fresh := []model.Event{{ConnectionID: connection.ID, CollectionID: "team", ID: "new", Start: instant(13), End: instant(14)}}
+	if err := application.cacheEventsReplacing(connection.ID, "scope", fresh, start, end, false, true, []string{"team"}); err != nil {
+		t.Fatal(err)
+	}
+	events, ok, _ := application.cachedEvents(connection, "scope", nil, start, end, "")
+	if !ok || len(events) != 2 || slices.ContainsFunc(events, func(event model.Event) bool { return event.ID == "deleted" }) || !slices.ContainsFunc(events, func(event model.Event) bool { return event.ID == "preserved" }) || !slices.ContainsFunc(events, func(event model.Event) bool { return event.ID == "new" }) {
+		t.Fatalf("partial collection cache = %#v, %v", events, ok)
+	}
+}
+
+func TestPartialCalendarScopePreservesOfflineSourceStatus(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	connection := model.Connection{ID: "calendar", Name: "Calendar", Calendar: &model.CalendarConfig{Kind: "caldav", URL: "http://localhost:5232", Username: "calendar", Secret: model.SecretRef{Env: "CALENDAR_PASSWORD"}, Collections: []model.CalendarCollection{{ID: "team", Path: "/team/"}, {ID: "personal", Path: "/personal/"}}}}
+	application := serviceWithConnections(t, connection)
+	resolved, err := application.exactConnection("calendar", "calendar.read")
+	if err != nil {
+		t.Fatal(err)
+	}
+	start, end := instant(8), instant(18)
+	old := []model.Event{
+		{ConnectionID: "calendar", CollectionID: "personal", ID: "old", Start: instant(9), End: instant(10)},
+		{ConnectionID: "calendar", CollectionID: "team", ID: "deleted", Start: instant(9), End: instant(10)},
+	}
+	if err := application.cacheEvents("calendar", "scope", old, start, end, true, true); err != nil {
+		t.Fatal(err)
+	}
+	partialErrors := []model.SourceError{{ConnectionID: "calendar", CollectionID: "personal", Code: "calendar_collection_unavailable", Message: "offline"}}
+	fresh := []model.Event{{ConnectionID: "calendar", CollectionID: "team", ID: "fresh", Start: instant(11), End: instant(12)}}
+	if err := application.cacheEventsReplacingWithID(resolved, calendarCacheID(resolved), "scope", fresh, start, end, false, true, []string{"team"}, partialErrors); err != nil {
+		t.Fatal(err)
+	}
+	events, found, cachedErrors := application.cachedEvents(resolved, "scope", nil, start, end, "")
+	if !found || len(events) != 2 || slices.ContainsFunc(events, func(event model.Event) bool { return event.ID == "deleted" }) || !slices.ContainsFunc(events, func(event model.Event) bool { return event.ID == "old" }) || !slices.ContainsFunc(events, func(event model.Event) bool { return event.ID == "fresh" }) || !events[0].Stale || len(cachedErrors) != 1 || !cachedErrors[0].Stale || cachedErrors[0].CollectionID != "personal" {
+		t.Fatalf("partial offline calendar = %#v, found=%v errors=%#v", events, found, cachedErrors)
+	}
+	if err := application.cacheEventsReplacingWithID(resolved, calendarCacheID(resolved), "scope", fresh, start, end, true, true, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	_, _, cachedErrors = application.cachedEvents(resolved, "scope", nil, start, end, "")
+	if len(cachedErrors) != 0 {
+		t.Fatalf("complete refresh retained partial status: %#v", cachedErrors)
+	}
+}
+
+func TestPartialCalDAVObjectFailuresKeepLiveEvents(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	connection := model.Connection{ID: "calendar", Name: "Calendar", Calendar: &model.CalendarConfig{Kind: "caldav", URL: "http://localhost:5232", Username: "calendar", Secret: model.SecretRef{Env: "CALENDAR_PASSWORD"}, Collections: []model.CalendarCollection{{ID: "team", Path: "/team/"}}}}
+	application := serviceWithConnections(t, connection)
+	live := model.Event{ConnectionID: "calendar", CollectionID: "team", ID: "live", Title: "Kept", Start: instant(9), End: instant(10)}
+	application.calendarListCalDAV = func(context.Context, model.Connection, []string, time.Time, time.Time, string) ([]model.Event, error) {
+		return []model.Event{live}, &calendar.PartialError{Errors: []model.SourceError{{ConnectionID: "calendar", CollectionID: "team", Code: "calendar_object_unavailable", Message: "object missing", Retryable: true}}}
+	}
+	page, err := application.ListEventsMode(context.Background(), model.Selector{}, instant(8), instant(18), "", 10, "", "refresh")
+	if err != nil || len(page.Events) != 1 || page.Events[0].ID != "live" || len(page.Errors) != 1 || page.Errors[0].Code != "calendar_object_unavailable" {
+		t.Fatalf("object-level partial page=%#v err=%v", page, err)
+	}
+}
+
+func TestOfflineCollectionNameSelectorIncludesEveryMatchingCollection(t *testing.T) {
+	connection := model.Connection{Calendar: &model.CalendarConfig{Collections: []model.CalendarCollection{{ID: "team-a", Name: "Team"}, {ID: "team-b", Name: "Team"}, {ID: "personal", Name: "Personal"}, {ID: "stable", Name: "team-a"}}}}
+	if got := selectedCollectionIDs(connection, []string{"Team"}); !slices.Equal(got, []string{"team-a", "team-b"}) {
+		t.Fatalf("duplicate collection-name selector = %#v", got)
+	}
+	if got := selectedCollectionIDs(connection, []string{"team-a"}); !slices.Equal(got, []string{"team-a"}) {
+		t.Fatalf("exact collection ID selector = %#v", got)
+	}
+}
+
+func TestCompleteMailRefreshRemovesAbsentUIDs(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	application := serviceWithConnections(t, mailConnection("work"))
+	application.now = func() time.Time { return instant(14) }
+	scope := "all mail"
+	options := postmail.SearchOptions{Since: instant(8)}
+	initial := postmail.SearchResult{UIDValidity: 1, UIDNext: 3, Messages: []model.Message{{ConnectionID: "work", Folder: "INBOX", UID: 2, ReceivedAt: instant(12)}, {ConnectionID: "work", Folder: "INBOX", UID: 1, ReceivedAt: instant(10)}}}
+	if err := application.cacheMailResult("work", "INBOX", scope, options, initial); err != nil {
+		t.Fatal(err)
+	}
+	refreshed := postmail.SearchResult{UIDValidity: 1, UIDNext: 3, Messages: initial.Messages[:1]}
+	if err := application.cacheMailResult("work", "INBOX", scope, options, refreshed); err != nil {
+		t.Fatal(err)
+	}
+	result, ok, _ := application.cachedMailResult("work", "INBOX", "different", options, mailCursorState{}, 10)
+	if !ok || messageUIDs(result.Messages) != "work:2" {
+		t.Fatalf("offline mail after complete refresh = %#v, %v", result, ok)
+	}
+}
+
+func TestOlderMailTraversalRetainsMessagesBeyondUIDSnapshot(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	application := serviceWithConnections(t, mailConnection("work"))
+	application.now = func() time.Time { return instant(14) }
+	options := postmail.SearchOptions{Since: instant(8), MaxUIDExclusive: 4}
+	newer := model.Message{ConnectionID: "work", Folder: "INBOX", UID: 4, ReceivedAt: instant(13)}
+	old := model.Message{ConnectionID: "work", Folder: "INBOX", UID: 2, ReceivedAt: instant(11)}
+	if err := application.cacheMailResult("work", "INBOX", "newer request", postmail.SearchOptions{Since: instant(8)}, postmail.SearchResult{UIDValidity: 1, UIDNext: 5, Messages: []model.Message{newer, old}}); err != nil {
+		t.Fatal(err)
+	}
+	refreshed := postmail.SearchResult{UIDValidity: 1, UIDNext: 4, Messages: []model.Message{{ConnectionID: "work", Folder: "INBOX", UID: 3, ReceivedAt: instant(12)}}}
+	if err := application.cacheMailResult("work", "INBOX", "older traversal", options, refreshed); err != nil {
+		t.Fatal(err)
+	}
+	result, ok, _ := application.cachedMailResult("work", "INBOX", "different scope", postmail.SearchOptions{Since: instant(8)}, mailCursorState{}, 10)
+	if !ok || messageUIDs(result.Messages) != "work:4,work:3" {
+		t.Fatalf("older traversal removed newer cached mail: %#v, %v", result, ok)
+	}
+}
+
+func TestDefaultFolderChangeDoesNotReuseOldScopedMailCache(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	connection := mailConnection("work")
+	connection.Mail.Folders.Inbox = "INBOX"
+	application := serviceWithConnections(t, connection)
+	application.mailSearch = func(connection model.Connection, options postmail.SearchOptions) (postmail.SearchResult, error) {
+		return postmail.SearchResult{UIDValidity: 1, UIDNext: 2, Messages: []model.Message{{ConnectionID: connection.ID, Folder: mailFolder(connection, options.Folder), UID: 1, Subject: "old inbox", Date: instant(9)}}}, nil
+	}
+	if page, err := application.SearchMessages(model.Selector{}, postmail.SearchOptions{}, 10, ""); err != nil || len(page.Messages) != 1 {
+		t.Fatalf("initial search = %#v, %v", page, err)
+	}
+	connection.Mail.Folders.Inbox = "Primary"
+	if err := application.UpsertConnection(connection, true); err != nil {
+		t.Fatal(err)
+	}
+	if page, err := application.SearchMessages(model.Selector{}, postmail.SearchOptions{Mode: "offline"}, 10, ""); err == nil || len(page.Messages) != 0 {
+		t.Fatalf("offline search reused old default-folder cache: %#v, %v", page, err)
+	}
+}
+
+func TestIncompleteMailRefreshPreservesLastCompleteScopedCache(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	application := serviceWithConnections(t, mailConnection("work"))
+	application.now = func() time.Time { return instant(14) }
+	scope := "query"
+	options := postmail.SearchOptions{Since: instant(8)}
+	complete := postmail.SearchResult{UIDValidity: 1, UIDNext: 4, Messages: []model.Message{{ConnectionID: "work", Folder: "INBOX", UID: 3, ReceivedAt: instant(13)}, {ConnectionID: "work", Folder: "INBOX", UID: 2, ReceivedAt: instant(12)}, {ConnectionID: "work", Folder: "INBOX", UID: 1, ReceivedAt: instant(11)}}}
+	if err := application.cacheMailResult("work", "INBOX", scope, options, complete); err != nil {
+		t.Fatal(err)
+	}
+	partial := postmail.SearchResult{UIDValidity: 1, UIDNext: 4, HasMore: true, Messages: complete.Messages[:1]}
+	if err := application.cacheMailResult("work", "INBOX", scope, options, partial); err != nil {
+		t.Fatal(err)
+	}
+	result, ok, _ := application.cachedMailResult("work", "INBOX", scope, options, mailCursorState{}, 10)
+	if !ok || messageUIDs(result.Messages) != "work:3,work:2,work:1" {
+		t.Fatalf("partial refresh replaced complete cache: %#v, %v", result, ok)
+	}
+	continuation := options
+	continuation.CursorTime, continuation.CursorUID = complete.Messages[0].ReceivedAt, complete.Messages[0].UID
+	final := postmail.SearchResult{UIDValidity: 1, UIDNext: 4, Messages: complete.Messages[1:2]}
+	if err := application.cacheMailResult("work", "INBOX", scope, continuation, final); err != nil {
+		t.Fatal(err)
+	}
+	result, ok, _ = application.cachedMailResult("work", "INBOX", scope, options, mailCursorState{}, 10)
+	if !ok || messageUIDs(result.Messages) != "work:3,work:2" {
+		t.Fatalf("completed refresh did not replace scoped cache: %#v, %v", result, ok)
+	}
+}
+
+func TestConcurrentMailContinuationsMergeAtomically(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	first := serviceWithConnections(t, mailConnection("work"))
+	defer first.Close()
+	second := New(first.store)
+	defer second.Close()
+	scope := "shared traversal"
+	initial := postmail.SearchResult{UIDValidity: 7, UIDNext: 100, HasMore: true, Messages: []model.Message{{ConnectionID: "work", Folder: "INBOX", UID: 99, ReceivedAt: instant(13)}}}
+	if err := first.cacheMailResult("work", "INBOX", scope, postmail.SearchOptions{}, initial); err != nil {
+		t.Fatal(err)
+	}
+	continuation := postmail.SearchOptions{CursorUID: 99}
+	ready := make(chan struct{})
+	errors := make(chan error, 20)
+	for index := range 20 {
+		application := first
+		if index%2 == 1 {
+			application = second
+		}
+		go func(index int, application *Service) {
+			<-ready
+			uid := uint32(index + 1)
+			errors <- application.cacheMailResult("work", "INBOX", scope, continuation, postmail.SearchResult{UIDValidity: 7, UIDNext: 100, HasMore: true, Messages: []model.Message{{ConnectionID: "work", Folder: "INBOX", UID: uid, ReceivedAt: instant(12)}}})
+		}(index, application)
+	}
+	close(ready)
+	for range 20 {
+		if err := <-errors; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := first.cacheMailResult("work", "INBOX", scope, continuation, postmail.SearchResult{UIDValidity: 7, UIDNext: 100, Messages: []model.Message{{ConnectionID: "work", Folder: "INBOX", UID: 98, ReceivedAt: instant(11)}}}); err != nil {
+		t.Fatal(err)
+	}
+	result, ok, complete := first.cachedMailResult("work", "INBOX", scope, postmail.SearchOptions{}, mailCursorState{}, 100)
+	if !ok || !complete || len(result.Messages) != 22 {
+		t.Fatalf("atomic scoped snapshot retained %d messages, found=%v complete=%v", len(result.Messages), ok, complete)
+	}
+}
+
+func TestMailContinuationCannotPromoteAnotherTraversalSnapshot(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	application := serviceWithConnections(t, mailConnection("work"))
+	scope := "overlapping traversal"
+	message := func(uid uint32) model.Message {
+		return model.Message{ConnectionID: "work", Folder: "INBOX", UID: uid, ReceivedAt: instant(8 + int(uid))}
+	}
+	if err := application.cacheMailResult("work", "INBOX", scope, postmail.SearchOptions{}, postmail.SearchResult{UIDValidity: 7, UIDNext: 5, HasMore: true, Messages: []model.Message{message(4), message(3)}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.cacheMailResult("work", "INBOX", scope, postmail.SearchOptions{}, postmail.SearchResult{UIDValidity: 7, UIDNext: 6, HasMore: true, Messages: []model.Message{message(5), message(4)}}); err != nil {
+		t.Fatal(err)
+	}
+	olderContinuation := postmail.SearchOptions{CursorUID: 3, MaxUIDExclusive: 5}
+	if err := application.cacheMailResult("work", "INBOX", scope, olderContinuation, postmail.SearchResult{UIDValidity: 7, UIDNext: 6, Messages: []model.Message{message(2), message(1)}}); err != nil {
+		t.Fatal(err)
+	}
+	connection, err := application.exactConnection("work", "mail.read")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger, err := application.ensureState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry, ok, err := ledger.Get(context.Background(), "message_metadata", scopedCacheKey(mailCacheID(connection), scope), false)
+	if err != nil || !ok {
+		t.Fatalf("scoped cache = %#v, %v, %v", entry, ok, err)
+	}
+	var pending postmail.SearchResult
+	if err := json.Unmarshal(entry.Value, &pending); err != nil || !pending.HasMore || pending.UIDNext != 6 || messageUIDs(pending.Messages) != "work:5,work:4" {
+		t.Fatalf("older traversal promoted mixed snapshot %#v: %v", pending, err)
+	}
+	broad, found, _ := application.cachedMailResult("work", "INBOX", "different scope", postmail.SearchOptions{}, mailCursorState{}, 10)
+	if !found || messageUIDs(broad.Messages) != "work:5,work:4,work:3" {
+		t.Fatalf("rejected continuation mutated broad index: %#v, %v", broad, found)
+	}
+	newerContinuation := postmail.SearchOptions{CursorUID: 4, MaxUIDExclusive: 6}
+	if err := application.cacheMailResult("work", "INBOX", scope, newerContinuation, postmail.SearchResult{UIDValidity: 7, UIDNext: 6, Messages: []model.Message{message(3), message(2), message(1)}}); err != nil {
+		t.Fatal(err)
+	}
+	result, found, complete := application.cachedMailResult("work", "INBOX", scope, postmail.SearchOptions{}, mailCursorState{}, 10)
+	if !found || !complete || messageUIDs(result.Messages) != "work:5,work:4,work:3,work:2,work:1" {
+		t.Fatalf("newer traversal did not complete atomically: %#v, %v, %v", result, found, complete)
+	}
+}
+
+func TestOfflineBodySearchReportsReducedSemantics(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	application := serviceWithConnections(t, mailConnection("work"))
+	message := model.Message{ConnectionID: "work", Folder: "INBOX", UID: 7, Subject: "Unrelated", ReceivedAt: instant(12)}
+	if err := application.cacheMailResult("work", "INBOX", "seed", postmail.SearchOptions{}, postmail.SearchResult{UIDValidity: 9, UIDNext: 8, Messages: []model.Message{message}}); err != nil {
+		t.Fatal(err)
+	}
+	connection, err := application.exactConnection("work", "mail.read")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger, err := application.ensureState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	detail, err := json.Marshal(model.MessageDetail{Message: message, Text: "body contains the needle"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ledger.Put(context.Background(), state.CacheEntry{Namespace: "message_body", Key: messageCacheKey(mailCacheID(connection), "INBOX", 9, 7), ConnectionID: "work", Kind: "message_body", ExpiresAt: time.Now().Add(time.Hour), Value: detail}); err != nil {
+		t.Fatal(err)
+	}
+	page, err := application.SearchMessages(model.Selector{}, postmail.SearchOptions{Mode: "offline", Query: "needle"}, 10, "")
+	if err != nil || len(page.Messages) != 1 || len(page.Errors) != 1 || page.Errors[0].Code != "offline_search_incomplete" {
+		t.Fatalf("offline body search = %#v, %v", page, err)
+	}
+}
+
+func TestScopedMailCacheTrustsProviderBodyQueryMatch(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	application := serviceWithConnections(t, mailConnection("work"))
+	scope := "body query"
+	options := postmail.SearchOptions{Query: "needle"}
+	providerMatch := model.Message{ConnectionID: "work", Folder: "INBOX", UID: 7, Subject: "unrelated metadata", Preview: "no match here", ReceivedAt: instant(12)}
+	if err := application.cacheMailResult("work", "INBOX", scope, options, postmail.SearchResult{UIDValidity: 1, UIDNext: 8, Messages: []model.Message{providerMatch}}); err != nil {
+		t.Fatal(err)
+	}
+	result, ok, _ := application.cachedMailResult("work", "INBOX", scope, options, mailCursorState{}, 10)
+	if !ok || len(result.Messages) != 1 || result.Messages[0].UID != 7 {
+		t.Fatalf("provider-confirmed scoped match = %#v, %v", result, ok)
+	}
+	result, ok, _ = application.cachedMailResult("work", "INBOX", "different scope", options, mailCursorState{}, 10)
+	if !ok || len(result.Messages) != 0 {
+		t.Fatalf("broad metadata fallback trusted an unconfirmed body match: %#v, %v", result, ok)
+	}
+}
+
+func TestPrepareSendValidatesSerializationBeforeToken(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	connection := mailConnection("work")
+	connection.Mail.SMTP = model.SMTPConfig{Address: "localhost:3025", Insecure: true}
+	application := serviceWithConnections(t, connection)
+	_, err := application.PrepareSend(context.Background(), model.SendMessage{ConnectionID: "work", To: []string{"not-an-address"}, Subject: "subject", Text: "body"})
+	if err == nil || !strings.Contains(err.Error(), "validate message") {
+		t.Fatalf("PrepareSend error = %v", err)
+	}
+}
+
+func TestExecuteMailSendPropagatesCancellationAndPersistsResult(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	connection := mailConnection("work")
+	connection.Mail.SMTP = model.SMTPConfig{Address: "localhost:3025", Insecure: true}
+	application := serviceWithConnections(t, connection)
+	started := make(chan struct{})
+	application.mailSendRawContext = func(ctx context.Context, _ model.Connection, _ model.SendMessage, _ []byte) error {
+		close(started)
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	prepared, err := application.PrepareSend(context.Background(), model.SendMessage{ConnectionID: "work", To: []string{"person@example.test"}, Subject: "subject", Text: "body"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { _, executeErr := application.ExecuteOperation(ctx, prepared.Token); done <- executeErr }()
+	<-started
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("ExecuteOperation error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("ExecuteOperation ignored cancellation")
+	}
+	shown, err := application.OperationShow(context.Background(), prepared.Token)
+	if err != nil || shown.Status == "executing" {
+		t.Fatalf("canceled operation remained executing: %#v, %v", shown, err)
+	}
+}
+
+func TestPrepareCalendarDeleteRequiresETag(t *testing.T) {
+	connection := model.Connection{ID: "work", Name: "Work", Calendar: &model.CalendarConfig{Kind: "caldav", URL: "http://localhost:5232", Username: "work", Secret: model.SecretRef{Env: "CALENDAR_PASSWORD"}, Collections: []model.CalendarCollection{{ID: "team", Path: "/work/team/"}}}}
+	application := serviceWithConnections(t, connection)
+	_, err := application.PrepareCalendarDelete(context.Background(), "work", "team", "/work/team/event.ics", "", "")
+	if err == nil || !strings.Contains(err.Error(), "ETag") {
+		t.Fatalf("PrepareCalendarDelete error = %v", err)
+	}
+}
+
+func TestPrepareCalendarWritesRejectWeakETag(t *testing.T) {
+	connection := model.Connection{ID: "work", Name: "Work", Calendar: &model.CalendarConfig{Kind: "caldav", URL: "http://localhost:5232", Username: "work", Secret: model.SecretRef{Env: "CALENDAR_PASSWORD"}, Collections: []model.CalendarCollection{{ID: "team", Path: "/work/team/"}}}}
+	application := serviceWithConnections(t, connection)
+	event := model.Event{ID: "event", Title: "Planning", CollectionID: "team", Href: "/work/team/event.ics", ETag: `W/"weak"`, Start: instant(9), End: instant(10)}
+	if _, err := application.PrepareCalendarWrite(context.Background(), "work", "calendar.update", event); err == nil || !strings.Contains(err.Error(), "strong ETag") {
+		t.Fatalf("PrepareCalendarWrite accepted weak ETag: %v", err)
+	}
+	if _, err := application.PrepareCalendarDelete(context.Background(), "work", "team", event.Href, event.ETag, ""); err == nil || !strings.Contains(err.Error(), "strong ETag") {
+		t.Fatalf("PrepareCalendarDelete accepted weak ETag: %v", err)
+	}
+}
+
+func TestDraftPreconditionRefreshPropagatesCancellation(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	connection := mailConnection("work")
+	connection.Mail.Folders.Drafts = "Drafts"
+	application := serviceWithConnections(t, connection)
+	precondition := postmail.MessagePrecondition{UIDValidity: 1, ModSeq: 2}
+	calls := 0
+	started := make(chan struct{})
+	application.mailSnapshotContext = func(ctx context.Context, _ model.Connection, _ string, _ uint32) (postmail.MessagePrecondition, error) {
+		calls++
+		if calls == 1 {
+			return precondition, nil
+		}
+		close(started)
+		<-ctx.Done()
+		return postmail.MessagePrecondition{}, ctx.Err()
+	}
+	prepared, err := application.PrepareDraft(context.Background(), "work", "mail.draft.update", "Drafts", 7, model.SendMessage{To: []string{"person@example.test"}, Subject: "draft", Text: "body"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { _, executeErr := application.ExecuteOperation(ctx, prepared.Token); done <- executeErr }()
+	<-started
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("draft precondition refresh ignored cancellation")
+	}
+}
+
+func TestIMAPMutationTransportLossPersistsUncertainStatus(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	connection := mailConnection("work")
+	connection.Mail.Folders.Drafts = "Drafts"
+	application := serviceWithConnections(t, connection)
+	precondition := postmail.MessagePrecondition{UIDValidity: 1, ModSeq: 2}
+	application.mailSnapshot = func(model.Connection, string, uint32) (postmail.MessagePrecondition, error) { return precondition, nil }
+	application.mailMarkDeleted = func(model.Connection, string, uint32, postmail.MessagePrecondition) error {
+		return &postmail.UncertainMutationError{Err: errors.New("connection closed")}
+	}
+	prepared, err := application.PrepareDraft(context.Background(), "work", "mail.draft.delete", "Drafts", 7, model.SendMessage{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := application.ExecuteOperation(context.Background(), prepared.Token)
+	if err == nil || result.Status != "uncertain" {
+		t.Fatalf("ExecuteOperation result=%#v error=%v", result, err)
+	}
+}
+
+func TestPreserveCollectionReadOnlyPolicy(t *testing.T) {
+	existing := []model.CalendarCollection{{ID: "team", Path: "/team/", ReadOnly: true}, {ID: "personal", Path: "/personal/"}}
+	discovered := []model.CalendarCollection{{ID: "team", Path: "/team/"}, {ID: "personal-new", Path: "/personal/"}}
+	merged := preserveCollectionPolicies(existing, discovered)
+	if !merged[0].ReadOnly || merged[1].ReadOnly {
+		t.Fatalf("preserved collections = %#v", merged)
+	}
+}
+
+func TestMergeDiscoveryUsesCanonicalIDAndLatestCollectionPolicies(t *testing.T) {
+	t.Setenv("CALENDAR_PASSWORD", "test-password")
+	original := model.Connection{
+		ID: "work", Name: "Original",
+		Calendar: &model.CalendarConfig{
+			Kind: "caldav", URL: "https://calendar.example.test/", Username: "work",
+			Secret:      model.SecretRef{Env: "CALENDAR_PASSWORD"},
+			Collections: []model.CalendarCollection{{ID: "team", Name: "Old", Path: "/team/"}},
+		},
+	}
+	latest := original
+	latest.Name = "Renamed while discovering"
+	latestCalendar := *original.Calendar
+	latestCalendar.Collections = []model.CalendarCollection{{ID: "team", Name: "Old", Path: "/team/", ReadOnly: true}}
+	latest.Calendar = &latestCalendar
+	discovered := original
+	discoveredCalendar := *original.Calendar
+	discoveredCalendar.Collections = []model.CalendarCollection{{ID: "team", Name: "Discovered", Path: "/team/"}}
+	discovered.Calendar = &discoveredCalendar
+	_, providerID, err := resolveDiscoveryConnection(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updatedConfig, updated, err := mergeDiscoveredConnection(model.Config{Connections: []model.Connection{latest}}, original.ID, providerID, discovered)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.ID != "work" || updated.Name != latest.Name || len(updated.Calendar.Collections) != 1 || !updated.Calendar.Collections[0].ReadOnly || updated.Calendar.Collections[0].Name != "Discovered" {
+		t.Fatalf("merged discovery = %#v", updated)
+	}
+	if updatedConfig.Connections[0].Name != updated.Name || !updatedConfig.Connections[0].Calendar.Collections[0].ReadOnly {
+		t.Fatalf("persisted discovery = %#v, returned %#v", updatedConfig.Connections[0], updated)
+	}
+}
+
+func TestMergeDiscoveryRejectsResolvedProviderSecretRotation(t *testing.T) {
+	connection := mailConnection("work")
+	connection.Mail.Secret = model.SecretRef{Env: "WORK_PASSWORD"}
+	connection.Mail.IMAP.Address = "localhost:3143"
+	t.Setenv("WORK_PASSWORD", "provider-a")
+	_, providerID, err := resolveDiscoveryConnection(connection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("WORK_PASSWORD", "provider-b")
+	if _, _, err := mergeDiscoveredConnection(model.Config{Connections: []model.Connection{connection}}, connection.ID, providerID, connection); err == nil || !strings.Contains(err.Error(), "changed during discovery") {
+		t.Fatalf("rotated provider secret returned %v", err)
+	}
+}
+
+func TestOfflineMessageAndAttachmentReads(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	application := serviceWithConnections(t, mailConnection("work"))
+	application.mailboxUIDValidity = func(context.Context, model.Connection, string) (uint32, error) { return 11, nil }
+	ledger, err := application.ensureState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	connection, err := application.exactConnection("work", "mail.read")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cacheID := mailCacheID(connection)
+	detail := model.MessageDetail{Message: model.Message{ConnectionID: "work", Folder: "INBOX", UID: 7, Subject: "cached"}, Text: "offline body", Attachments: []model.Attachment{{ID: "file", Name: "file.txt", ContentType: "text/plain", Size: 7}}}
+	data, _ := json.Marshal(detail)
+	ctx := context.Background()
+	if err := application.cacheMailboxUIDValidity(ledger, "work", "INBOX", 11); err != nil {
+		t.Fatal(err)
+	}
+	if err := ledger.Put(ctx, state.CacheEntry{Namespace: "message_body", Key: messageCacheKey(cacheID, "INBOX", 11, 7), Kind: "message_body", CachedAt: time.Now(), Value: data}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ledger.Put(ctx, state.CacheEntry{Namespace: "attachment", Key: messageCacheKey(cacheID, "INBOX", 11, 7) + "/file", Kind: "attachment", CachedAt: time.Now(), Value: []byte("content")}); err != nil {
+		t.Fatal(err)
+	}
+	cachedAttachment, cachedContent, err := application.GetAttachmentMode(ctx, "work", "INBOX", 7, "file", "")
+	if err != nil || !cachedAttachment.Stale || cachedAttachment.CachedAt.IsZero() || string(cachedContent) != "content" {
+		t.Fatalf("cache-first attachment = %#v %q, %v", cachedAttachment, cachedContent, err)
+	}
+	got, err := application.GetMessageMode("work", "INBOX", 7, "offline")
+	if err != nil || got.Text != "offline body" || !got.Stale || got.CachedAt.IsZero() {
+		t.Fatalf("offline message = %#v, %v", got, err)
+	}
+	attachment, content, err := application.GetAttachmentMode(ctx, "work", "INBOX", 7, "file", "offline")
+	if err != nil || attachment.Name != "file.txt" || !attachment.Stale || attachment.CachedAt.IsZero() || string(content) != "content" {
+		t.Fatalf("offline attachment = %#v %q, %v", attachment, content, err)
+	}
+	if err := application.cacheMailboxUIDValidity(ledger, "work", "INBOX", 12); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := application.GetMessageMode("work", "INBOX", 7, "offline"); err == nil {
+		t.Fatal("offline read reused a cached body after UIDVALIDITY changed")
+	}
+	if _, _, err := application.GetAttachmentMode(ctx, "work", "INBOX", 7, "file", "offline"); err == nil {
+		t.Fatal("offline read reused a cached attachment after UIDVALIDITY changed")
+	}
+}
+
+func TestMailboxUIDValidityLivesAsLongAsBodyCache(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	application := serviceWithConnections(t, mailConnection("work"))
+	cfg, err := application.store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Cache.MessageMetadataDays = 1
+	cfg.Cache.MessageBodyDays = 30
+	if err := application.store.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)
+	application.now = func() time.Time { return now }
+	ledger, err := application.ensureState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := application.cacheMailboxUIDValidity(ledger, "work", "INBOX", 11); err != nil {
+		t.Fatal(err)
+	}
+	connection, err := application.exactConnection("work", "mail.read")
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry, ok, err := ledger.Get(context.Background(), "mailbox_uidvalidity", mailboxCacheKey(mailCacheID(connection), "INBOX"), true)
+	if err != nil || !ok {
+		t.Fatalf("UIDVALIDITY cache entry = %#v, %v", entry, err)
+	}
+	if want := now.Add(30 * 24 * time.Hour); !entry.ExpiresAt.Equal(want) {
+		t.Fatalf("UIDVALIDITY expires at %v, want %v", entry.ExpiresAt, want)
+	}
+}
+
+func TestEventCacheTTLHoldsLongerPastHorizon(t *testing.T) {
+	application := serviceWithConnections(t, calendarConnection("calendar", "Calendar"))
+	cfg, err := application.store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Cache.EventPastDays = 90
+	cfg.Cache.EventFutureDays = 1
+	if err := application.store.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := application.eventTTL(), 90*24*time.Hour; got != want {
+		t.Fatalf("eventTTL = %v, want %v", got, want)
+	}
+}
+
+func TestLiveAttachmentRefetchesAndOnlyFallsBackAsStale(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	application := serviceWithConnections(t, mailConnection("work"))
+	uidValidity := uint32(11)
+	providerMissing := false
+	application.mailboxUIDValidity = func(context.Context, model.Connection, string) (uint32, error) { return uidValidity, nil }
+	fetches := 0
+	application.mailGetAttachment = func(context.Context, model.Connection, string, uint32, string) (model.Attachment, []byte, uint32, error) {
+		fetches++
+		if providerMissing {
+			return model.Attachment{}, nil, 0, errors.New("provider message missing")
+		}
+		attachment := model.Attachment{ID: "file", Name: "report.pdf", ContentType: "application/pdf", Inline: true, ContentID: "report"}
+		return attachment, []byte(fmt.Sprintf("content-%d", uidValidity)), uidValidity, nil
+	}
+	ctx := context.Background()
+	for request := 0; request < 2; request++ {
+		attachment, data, err := application.GetAttachmentMode(ctx, "work", "INBOX", 7, "file", "")
+		if err != nil || attachment.Name != "report.pdf" || attachment.ContentType != "application/pdf" || !attachment.Inline || attachment.ContentID != "report" || string(data) != "content-11" {
+			t.Fatalf("attachment request %d = %#v %q, %v", request, attachment, data, err)
+		}
+	}
+	if fetches != 2 {
+		t.Fatalf("same-UIDVALIDITY continuation fetched provider %d times", fetches)
+	}
+	providerMissing = true
+	stale, staleData, err := application.GetAttachmentMode(ctx, "work", "INBOX", 7, "file", "")
+	if err != nil || !stale.Stale || string(staleData) != "content-11" || fetches != 3 {
+		t.Fatalf("same-UIDVALIDITY provider removal returned %#v %q after %d fetches: %v", stale, staleData, fetches, err)
+	}
+	providerMissing = false
+	uidValidity = 12
+	_, data, err := application.GetAttachmentMode(ctx, "work", "INBOX", 7, "file", "")
+	if err != nil || string(data) != "content-12" || fetches != 4 {
+		t.Fatalf("changed UIDVALIDITY returned %q after %d fetches: %v", data, fetches, err)
+	}
+	uidValidity = 13
+	providerMissing = true
+	if _, staleData, err := application.GetAttachmentMode(ctx, "work", "INBOX", 7, "file", ""); err == nil || len(staleData) != 0 {
+		t.Fatalf("confirmed UIDVALIDITY mismatch returned old bytes %q: %v", staleData, err)
+	}
+}
+
+func TestAttachmentContinuationKeepsOriginalUIDValiditySnapshot(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	application := serviceWithConnections(t, mailConnection("work"))
+	uidValidity := uint32(11)
+	application.mailboxUIDValidity = func(context.Context, model.Connection, string) (uint32, error) { return uidValidity, nil }
+	fetches := 0
+	application.mailGetAttachment = func(context.Context, model.Connection, string, uint32, string) (model.Attachment, []byte, uint32, error) {
+		fetches++
+		return model.Attachment{ID: "file", Name: "report.pdf"}, []byte(fmt.Sprintf("content-%d", uidValidity)), uidValidity, nil
+	}
+	ctx := context.Background()
+	_, firstData, cursor, err := application.GetAttachmentSnapshotMode(ctx, "work", "INBOX", 7, "file", "", "")
+	if err != nil || cursor == "" || string(firstData) != "content-11" || fetches != 1 {
+		t.Fatalf("first snapshot chunk data=%q cursor=%q fetches=%d err=%v", firstData, cursor, fetches, err)
+	}
+	uidValidity = 12
+	if _, data, err := application.GetAttachmentMode(ctx, "work", "INBOX", 7, "file", "refresh"); err != nil || string(data) != "content-12" {
+		t.Fatalf("replacement mailbox fetch data=%q err=%v", data, err)
+	}
+	attachment, continuedData, continuedCursor, err := application.GetAttachmentSnapshotMode(ctx, "work", "INBOX", 7, "file", "", cursor)
+	if err != nil || attachment.Stale || string(continuedData) != "content-11" || continuedCursor != cursor || fetches != 2 {
+		t.Fatalf("continuation mixed snapshots: attachment=%#v data=%q cursor=%q fetches=%d err=%v", attachment, continuedData, continuedCursor, fetches, err)
+	}
+}
+
+func TestAttachmentSnapshotCarriesFetchedUIDValidity(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	application := serviceWithConnections(t, mailConnection("work"))
+	application.mailGetAttachment = func(context.Context, model.Connection, string, uint32, string) (model.Attachment, []byte, uint32, error) {
+		return model.Attachment{ID: "file"}, []byte("old bytes"), 11, nil
+	}
+	ctx := context.Background()
+	_, data, snapshot, err := application.getAttachmentModeSnapshot(ctx, "work", "INBOX", 7, "file", "refresh")
+	if err != nil || snapshot.UIDValidity != 11 || string(data) != "old bytes" {
+		t.Fatalf("fetched snapshot = %#v %q, %v", snapshot, data, err)
+	}
+	ledger, err := application.ensureState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	connection, err := application.exactConnection("work", "mail.read")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := application.cacheMailboxUIDValidityFor(ledger, connection, "INBOX", 12); err != nil {
+		t.Fatal(err)
+	}
+	if _, cached, ok := application.cachedAttachmentSnapshotFor(ctx, "INBOX", 7, "file", snapshot); !ok || string(cached) != "old bytes" {
+		t.Fatalf("fetched snapshot followed mutable mailbox state: %q, %v", cached, ok)
+	}
+}
+
+func TestAttachmentSnapshotReturnsCursorlessDataAfterCacheEviction(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	application := serviceWithConnections(t, mailConnection("work"))
+	if err := application.store.Update(func(cfg model.Config) (model.Config, error) {
+		cfg.Cache.MaxBytes = 1
+		return cfg, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	application.mailGetAttachment = func(context.Context, model.Connection, string, uint32, string) (model.Attachment, []byte, uint32, error) {
+		return model.Attachment{ID: "file"}, []byte("fetched bytes"), 11, nil
+	}
+	attachment, data, cursor, err := application.GetAttachmentSnapshotMode(context.Background(), "work", "INBOX", 7, "file", "refresh", "")
+	if err != nil || attachment.ID != "file" || string(data) != "fetched bytes" || cursor != "" {
+		t.Fatalf("cursorless fetched attachment = %#v %q %q, %v", attachment, data, cursor, err)
+	}
+}
+
+func TestMailboxUIDValidityCommitRejectsStaleReader(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	application := serviceWithConnections(t, mailConnection("work"))
+	ledger, err := application.ensureState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	connection, err := application.exactConnection("work", "mail.read")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cacheID := mailCacheID(connection)
+	if err := application.cacheMailboxUIDValidityWithID(ledger, connection, cacheID, "INBOX", 11); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.cacheMailResultDataWithID(connection, cacheID, "INBOX", "old scope", postmail.SearchOptions{}, postmail.SearchResult{UIDValidity: 11, UIDNext: 2, Messages: []model.Message{{ConnectionID: "work", Folder: "INBOX", UID: 1}}}, false); err != nil {
+		t.Fatal(err)
+	}
+	older := application.mailboxCacheSnapshotWithID(ledger, cacheID, "INBOX")
+	newer := application.mailboxCacheSnapshotWithID(ledger, cacheID, "INBOX")
+	if committed, err := application.commitMailboxUIDValidity(ledger, connection, cacheID, "INBOX", newer, 12); err != nil || !committed {
+		t.Fatalf("newer commit = %v, %v", committed, err)
+	}
+	if committed, err := application.commitMailboxUIDValidity(ledger, connection, cacheID, "INBOX", older, 11); err != nil || committed {
+		t.Fatalf("stale commit = %v, %v", committed, err)
+	}
+	current := application.mailboxCacheSnapshotWithID(ledger, cacheID, "INBOX")
+	if !current.Found || current.UIDValidity != 12 {
+		t.Fatalf("mailbox generation rolled back to %#v", current)
+	}
+	if cached, found, _ := application.cachedMailResult("work", "INBOX", "old scope", postmail.SearchOptions{}, mailCursorState{}, 10); found || len(cached.Messages) != 0 {
+		t.Fatalf("stale UIDVALIDITY cache remained readable: %#v, %v", cached, found)
+	}
+	if committed, err := application.commitMailboxUIDValidity(ledger, connection, cacheID, "INBOX", current, 1); err != nil || !committed {
+		t.Fatalf("legitimate lower UIDVALIDITY reset = %v, %v", committed, err)
+	}
+}
+
+func TestAttachmentProbeFailureStillAttemptsLiveFetch(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	application := serviceWithConnections(t, mailConnection("work"))
+	fetches := 0
+	application.mailGetAttachment = func(context.Context, model.Connection, string, uint32, string) (model.Attachment, []byte, uint32, error) {
+		fetches++
+		return model.Attachment{ID: "file", Name: "live.txt"}, []byte(fmt.Sprintf("live-%d", fetches)), 11, nil
+	}
+	ctx := context.Background()
+	if _, _, err := application.GetAttachmentMode(ctx, "work", "INBOX", 7, "file", "refresh"); err != nil {
+		t.Fatal(err)
+	}
+	application.mailboxUIDValidity = func(context.Context, model.Connection, string) (uint32, error) {
+		return 0, errors.New("probe unavailable")
+	}
+	attachment, data, err := application.GetAttachmentMode(ctx, "work", "INBOX", 7, "file", "")
+	if err != nil || attachment.Stale || string(data) != "live-2" || fetches != 2 {
+		t.Fatalf("probe failure returned %#v %q after %d fetches: %v", attachment, data, fetches, err)
+	}
+}
+
+func TestAttachmentFetchReceivesRequestContext(t *testing.T) {
+	application := serviceWithConnections(t, mailConnection("work"))
+	application.mailGetAttachment = func(ctx context.Context, _ model.Connection, _ string, _ uint32, _ string) (model.Attachment, []byte, uint32, error) {
+		return model.Attachment{}, nil, 0, ctx.Err()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, _, err := application.GetAttachmentMode(ctx, "work", "INBOX", 7, "file", "refresh"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled attachment fetch returned %v", err)
+	}
+}
+
+func TestMessageFetchReceivesContextAndRejectsOldMailboxCache(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	application := serviceWithConnections(t, mailConnection("work"))
+	ledger, err := application.ensureState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := application.cacheMailboxUIDValidity(ledger, "work", "INBOX", 11); err != nil {
+		t.Fatal(err)
+	}
+	connection, err := application.exactConnection("work", "mail.read")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cached := model.MessageDetail{Message: model.Message{ConnectionID: "work", Folder: "INBOX", UID: 7, Subject: "old mailbox"}}
+	data, _ := json.Marshal(cached)
+	if err := ledger.Put(context.Background(), state.CacheEntry{Namespace: "message_body", Key: messageCacheKey(mailCacheID(connection), "INBOX", 11, 7), Kind: "message_body", ExpiresAt: time.Now().Add(time.Hour), Value: data}); err != nil {
+		t.Fatal(err)
+	}
+	application.mailboxUIDValidity = func(context.Context, model.Connection, string) (uint32, error) { return 12, nil }
+	application.mailGetMessage = func(ctx context.Context, _ model.Connection, _ string, _ uint32) (postmail.FetchedMessage, error) {
+		if err := ctx.Err(); err != nil {
+			return postmail.FetchedMessage{}, err
+		}
+		return postmail.FetchedMessage{}, errors.New("new mailbox message missing")
+	}
+	if detail, err := application.GetMessageModeContext(context.Background(), "work", "INBOX", 7, ""); err == nil || detail.Subject == "old mailbox" {
+		t.Fatalf("UIDVALIDITY mismatch returned old body %#v: %v", detail, err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := application.GetMessageModeContext(ctx, "work", "INBOX", 7, "refresh"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled message fetch returned %v", err)
+	}
+}
+
+func TestCacheKeysFrameConnectionAndFolder(t *testing.T) {
+	if mailboxCacheKey("a", "b/c") == mailboxCacheKey("a/b", "c") {
+		t.Fatal("mailbox cache key aliases connection and folder boundaries")
+	}
+	if messageCacheKey("a", "b/c", 1, 2) == messageCacheKey("a/b", "c", 1, 2) {
+		t.Fatal("message cache key aliases connection and folder boundaries")
+	}
+}
+
+func TestPrepareMailActionResolvesDefaultFolderInPayloadAndPreview(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	connection := mailConnection("work")
+	connection.Mail.Folders.Inbox = "Primary"
+	application := serviceWithConnections(t, connection)
+	application.mailSnapshot = func(_ model.Connection, folder string, _ uint32) (postmail.MessagePrecondition, error) {
+		if folder != "Primary" {
+			t.Fatalf("snapshot folder = %q", folder)
+		}
+		return postmail.MessagePrecondition{UIDValidity: 1}, nil
+	}
+	seen := true
+	prepared, err := application.PrepareMailAction(context.Background(), "work", "mail.mark", MailAction{UID: 7, Seen: &seen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prepared.Preview["folder"] != "Primary" {
+		t.Fatalf("prepared preview folder = %#v", prepared.Preview["folder"])
+	}
+}
+
+func TestPrepareCalendarCreatePersistsGeneratedID(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	connection := model.Connection{ID: "work", Name: "Work", Calendar: &model.CalendarConfig{Kind: "caldav", URL: "http://localhost:5232", Username: "work", Secret: model.SecretRef{Env: "CALENDAR_PASSWORD"}, Collections: []model.CalendarCollection{{ID: "team", Path: "/work/team/"}}}}
+	application := serviceWithConnections(t, connection)
+	prepared, err := application.PrepareCalendarWrite(context.Background(), "work", "calendar.create", model.Event{CollectionID: "team", Title: "Planning", Start: instant(9), End: instant(10)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed, ok := prepared.Preview["changed_fields"].(model.Event)
+	if !ok || changed.ID == "" || !strings.HasPrefix(changed.ID, "posthouse-") {
+		t.Fatalf("prepared calendar identity = %#v", prepared.Preview["changed_fields"])
+	}
+	ledger, err := application.ensureState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := ledger.GetOperation(context.Background(), prepared.Token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload calendarWritePayload
+	if err := json.Unmarshal(record.Payload, &payload); err != nil || payload.StartWall != "20260814T090000" || payload.EndWall != "20260814T100000" {
+		t.Fatalf("prepared calendar wall times = %#v, %v", payload, err)
+	}
+}
+
+func TestPrepareCalendarUpdatePersistsFloatingRecurrenceWall(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	connection := model.Connection{ID: "work", Name: "Work", Calendar: &model.CalendarConfig{Kind: "caldav", URL: "http://localhost:5232", Username: "work", Secret: model.SecretRef{Env: "CALENDAR_PASSWORD"}, Collections: []model.CalendarCollection{{ID: "team", Path: "/work/team/"}}}}
+	application := serviceWithConnections(t, connection)
+	recurrenceWall := time.Date(2026, 8, 14, 8, 0, 0, 0, time.Local)
+	event := model.Event{ID: "series", SeriesID: "series", CollectionID: "team", Href: "/work/team/series.ics", ETag: `"etag"`, Title: "Override", Start: recurrenceWall.Add(time.Hour), End: recurrenceWall.Add(2 * time.Hour), RecurrenceID: recurrenceWall.UTC().Format(time.RFC3339), RecurrenceWall: recurrenceWall.Format("20060102T150405")}
+	prepared, err := application.PrepareCalendarWrite(context.Background(), "work", "calendar.update", event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger, err := application.ensureState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := ledger.GetOperation(context.Background(), prepared.Token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload calendarWritePayload
+	if err := json.Unmarshal(record.Payload, &payload); err != nil || payload.RecurrenceWall != recurrenceWall.Format("20060102T150405") {
+		t.Fatalf("prepared floating recurrence wall = %#v, %v", payload, err)
+	}
+	event.RecurrenceWall = "20260814T070000"
+	if _, err := application.PrepareCalendarWrite(context.Background(), "work", "calendar.update", event); err == nil || !strings.Contains(err.Error(), "does not match") {
+		t.Fatalf("mismatched recurrence wall returned %v", err)
+	}
+}
+
+func TestOperationDigestFramesAttachmentContent(t *testing.T) {
+	firstPath := filepath.Join(t.TempDir(), "first.txt")
+	secondPath := filepath.Join(t.TempDir(), "second.txt")
+	if err := os.WriteFile(firstPath, []byte("a"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(secondPath, []byte("bc"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	message := model.SendMessage{To: []string{"person@example.test"}, Attachments: []model.AttachmentInput{{Path: firstPath}, {Path: secondPath}}}
+	payload, err := json.Marshal(message)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := digestPayload("mail.send", payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(firstPath, []byte("ab"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(secondPath, []byte("c"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	after, err := digestPayload("mail.send", payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before == after {
+		t.Fatal("attachment boundary-preserving content change did not change operation digest")
+	}
+}
+
+func TestPrepareRejectsUnsafeOutboundAttachmentSources(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	connection := mailConnection("work")
+	connection.Mail.SMTP = model.SMTPConfig{Address: "localhost:3025", Insecure: true}
+	application := serviceWithConnections(t, connection)
+	prepare := func(path string) error {
+		_, err := application.PrepareSend(context.Background(), model.SendMessage{ConnectionID: "work", To: []string{"person@example.test"}, Attachments: []model.AttachmentInput{{Path: path}}})
+		return err
+	}
+	large := filepath.Join(t.TempDir(), "large.bin")
+	file, err := os.Create(large)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Truncate(maxOutboundAttachmentBytes + 1); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := prepare(large); err == nil || !strings.Contains(err.Error(), "25 MiB") {
+		t.Fatalf("oversized attachment error = %v", err)
+	}
+	if err := prepare(t.TempDir()); err == nil || !strings.Contains(err.Error(), "regular file") {
+		t.Fatalf("non-regular attachment error = %v", err)
+	}
+}
+
+func TestSyncSkipsProtocolAbsentFromSelection(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	application := serviceWithConnections(t, mailConnection("work"))
+	application.mailSearch = func(model.Connection, postmail.SearchOptions) (postmail.SearchResult, error) {
+		return postmail.SearchResult{UIDValidity: 1, UIDNext: 1}, nil
+	}
+	result, err := application.Sync(context.Background(), model.Selector{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if errors := result["errors"].([]model.SourceError); len(errors) != 0 {
+		t.Fatalf("mail-only sync attempted an absent protocol: %#v", errors)
+	}
+}
+
+func TestOccurrenceDeleteIsRejectedBeforeConnectionLookup(t *testing.T) {
+	application := serviceWithConnections(t)
+	_, err := application.PrepareCalendarDelete(context.Background(), "missing", "calendar", "/calendar/event.ics", "etag", "2026-08-15T09:00:00Z")
+	if err == nil || !strings.Contains(err.Error(), "cannot delete one expanded occurrence") {
+		t.Fatalf("PrepareCalendarDelete error = %v", err)
+	}
+}
+
+func TestFailedDraftDeleteDoesNotClaimDeletion(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	connection := mailConnection("work")
+	connection.Mail.Folders.Drafts = "Drafts"
+	application := serviceWithConnections(t, connection)
+	application.mailSnapshot = func(model.Connection, string, uint32) (postmail.MessagePrecondition, error) {
+		return postmail.MessagePrecondition{UIDValidity: 1}, nil
+	}
+	application.mailMarkDeleted = func(model.Connection, string, uint32, postmail.MessagePrecondition) error {
+		return fmt.Errorf("provider rejected delete")
+	}
+	prepared, err := application.PrepareDraft(context.Background(), "work", "mail.draft.delete", "Drafts", 7, model.SendMessage{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := application.ExecuteOperation(context.Background(), prepared.Token)
+	if err == nil || result.Status != "failed" {
+		t.Fatalf("ExecuteOperation result=%#v err=%v", result, err)
+	}
+	if deleted, exists := result.Result["deleted"]; exists || deleted == true {
+		t.Fatalf("failed operation claimed deletion: %#v", result.Result)
+	}
+}
+
+func TestExecutionUsesDigestVerifiedAttachmentSnapshot(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	connection := mailConnection("work")
+	connection.Identity = model.Identity{Email: "work@example.test"}
+	connection.Mail.SMTP = model.SMTPConfig{Address: "localhost:3025", Insecure: true}
+	application := serviceWithConnections(t, connection)
+	path := filepath.Join(t.TempDir(), "attachment.txt")
+	if err := os.WriteFile(path, []byte("verified"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := application.PrepareSend(context.Background(), model.SendMessage{ConnectionID: "work", To: []string{"person@example.test"}, Attachments: []model.AttachmentInput{{Path: path}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	application.mailBuild = func(_ model.Connection, message model.SendMessage) ([]byte, error) {
+		if err := os.WriteFile(path, []byte("changed-after-check"), 0o600); err != nil {
+			return nil, err
+		}
+		return append([]byte(nil), message.Attachments[0].Data...), nil
+	}
+	var sent []byte
+	application.mailSendRaw = func(_ model.Connection, _ model.SendMessage, data []byte) error {
+		sent = append([]byte(nil), data...)
+		return nil
+	}
+	result, err := application.ExecuteOperation(context.Background(), prepared.Token)
+	if err != nil || result.Status != "succeeded" || string(sent) != "verified" {
+		t.Fatalf("ExecuteOperation result=%#v sent=%q err=%v", result, sent, err)
+	}
+}
+
+func TestAppendTransportFailureIsUncertain(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	connection := mailConnection("work")
+	connection.Mail.Folders.Drafts = "Drafts"
+	application := serviceWithConnections(t, connection)
+	application.mailAppend = func(model.Connection, string, model.SendMessage, []imap.Flag) (uint32, error) {
+		return 0, &postmail.UncertainAppendError{Err: fmt.Errorf("connection closed")}
+	}
+	prepared, err := application.PrepareDraft(context.Background(), "work", "mail.draft.create", "Drafts", 0, model.SendMessage{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := application.ExecuteOperation(context.Background(), prepared.Token)
+	if err == nil || result.Status != "uncertain" {
+		t.Fatalf("ExecuteOperation result=%#v err=%v", result, err)
+	}
+}
+
+func TestPartialMailCursorKeepsFailedSourceSnapshot(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	application := serviceWithConnections(t, mailConnection("a"), mailConnection("b"))
+	bAvailable := false
+	application.mailSearch = func(connection model.Connection, options postmail.SearchOptions) (postmail.SearchResult, error) {
+		if connection.ID == "b" && !bAvailable {
+			return postmail.SearchResult{}, fmt.Errorf("temporary outage")
+		}
+		messages := []model.Message{{ConnectionID: connection.ID, UID: 2, ReceivedAt: instant(12)}, {ConnectionID: connection.ID, UID: 1, ReceivedAt: instant(10)}}
+		if connection.ID == "b" {
+			messages = []model.Message{{ConnectionID: "b", UID: 9, ReceivedAt: instant(13)}}
+		}
+		var filtered []model.Message
+		for _, message := range messages {
+			if afterMailCursor(message, options) {
+				filtered = append(filtered, message)
+			}
+		}
+		hasMore := len(filtered) > options.Limit
+		if hasMore {
+			filtered = filtered[:options.Limit]
+		}
+		return postmail.SearchResult{Messages: filtered, UIDValidity: 1, UIDNext: 10, HasMore: hasMore}, nil
+	}
+	first, err := application.SearchMessages(model.Selector{}, postmail.SearchOptions{}, 1, "")
+	if err != nil || len(first.Errors) != 1 || first.NextCursor == "" {
+		t.Fatalf("first partial page = %#v, %v", first, err)
+	}
+	bAvailable = true
+	continued, err := application.SearchMessages(model.Selector{}, postmail.SearchOptions{}, 1, first.NextCursor)
+	if err != nil || len(continued.Messages) != 1 || continued.Messages[0].ConnectionID != "a" || len(continued.Errors) != 1 {
+		t.Fatalf("continued partial page = %#v, %v", continued, err)
+	}
+	fresh, err := application.SearchMessages(model.Selector{}, postmail.SearchOptions{}, 1, "")
+	if err != nil || len(fresh.Messages) != 1 || fresh.Messages[0].ConnectionID != "b" {
+		t.Fatalf("fresh traversal = %#v, %v", fresh, err)
+	}
+}
+
+func TestPreparedOperationExpires(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	connection := mailConnection("work")
+	connection.Identity = model.Identity{Email: "work@example.test"}
+	connection.Mail.SMTP = model.SMTPConfig{Address: "localhost:3025", Insecure: true}
+	application := serviceWithConnections(t, connection)
+	prepared, err := application.PrepareSend(context.Background(), model.SendMessage{ConnectionID: "work", To: []string{"person@example.test"}, Subject: "subject"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	application.now = func() time.Time { return prepared.ExpiresAt.Add(time.Second) }
+	if _, err := application.ExecuteOperation(context.Background(), prepared.Token); err == nil || !strings.Contains(err.Error(), "expired") {
+		t.Fatalf("ExecuteOperation error = %v", err)
+	}
+}
+
+func TestInterruptedClaimBecomesUncertainWithoutRetry(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	connection := mailConnection("work")
+	connection.Identity = model.Identity{Email: "work@example.test"}
+	connection.Mail.SMTP = model.SMTPConfig{Address: "localhost:3025", Insecure: true}
+	application := serviceWithConnections(t, connection)
+	prepared, err := application.PrepareSend(context.Background(), model.SendMessage{ConnectionID: "work", To: []string{"person@example.test"}, Subject: "subject"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger, err := application.ensureState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, claimed, err := ledger.ClaimOperation(context.Background(), prepared.Token); err != nil || !claimed {
+		t.Fatalf("ClaimOperation claimed=%v err=%v", claimed, err)
+	}
+	claimedRecord, err := ledger.GetOperation(context.Background(), prepared.Token)
+	if err != nil {
+		t.Fatalf("GetOperation err=%v", err)
+	}
+	application.now = func() time.Time { return claimedRecord.Public.ExecutedAt.Add(11 * time.Minute) }
+	result, err := application.ExecuteOperation(context.Background(), prepared.Token)
+	if err != nil || result.Status != "uncertain" {
+		t.Fatalf("ExecuteOperation result=%#v err=%v", result, err)
+	}
+}
+
+func TestExecutingTokenDoesNotBlockUnrelatedOperation(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	connection := mailConnection("work")
+	connection.Identity = model.Identity{Email: "work@example.test"}
+	connection.Mail.SMTP = model.SMTPConfig{Address: "localhost:3025", Insecure: true}
+	application := serviceWithConnections(t, connection)
+	application.mailBuild = func(model.Connection, model.SendMessage) ([]byte, error) { return []byte("message"), nil }
+	application.mailSendRaw = func(model.Connection, model.SendMessage, []byte) error { return nil }
+	first, err := application.PrepareSend(context.Background(), model.SendMessage{ConnectionID: "work", To: []string{"first@example.test"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := application.PrepareSend(context.Background(), model.SendMessage{ConnectionID: "work", To: []string{"second@example.test"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger, err := application.ensureState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, claimed, err := ledger.ClaimOperation(context.Background(), first.Token); err != nil || !claimed {
+		t.Fatalf("ClaimOperation claimed=%v err=%v", claimed, err)
+	}
+	enteredWait := make(chan struct{})
+	var signal sync.Once
+	application.now = func() time.Time {
+		signal.Do(func() { close(enteredWait) })
+		return time.Now().UTC()
+	}
+	firstContext, cancelFirst := context.WithCancel(context.Background())
+	defer cancelFirst()
+	firstDone := make(chan struct{})
+	go func() {
+		defer close(firstDone)
+		_, _ = application.ExecuteOperation(firstContext, first.Token)
+	}()
+	<-enteredWait
+	secondDone := make(chan error, 1)
+	go func() {
+		result, executeErr := application.ExecuteOperation(context.Background(), second.Token)
+		if executeErr == nil && result.Status != "succeeded" {
+			executeErr = fmt.Errorf("status = %s", result.Status)
+		}
+		secondDone <- executeErr
+	}()
+	select {
+	case executeErr := <-secondDone:
+		if executeErr != nil {
+			t.Fatal(executeErr)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("unrelated operation was blocked by executing token")
+	}
+	cancelFirst()
+	<-firstDone
+}
+
+func TestPrepareSendPreviewIncludesExactContentAndThreading(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	connection := mailConnection("work")
+	connection.Identity = model.Identity{Email: "work@example.test"}
+	connection.Mail.SMTP = model.SMTPConfig{Address: "localhost:3025", Insecure: true}
+	application := serviceWithConnections(t, connection)
+	prepared, err := application.PrepareSend(context.Background(), model.SendMessage{
+		ConnectionID: "work", To: []string{"person@example.test"}, Subject: "subject", Text: "complete body",
+		ReplyTo: "reply@example.test", InReplyTo: "parent-id", References: []string{"root-id", "parent-id"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for key, want := range map[string]any{"text": "complete body", "reply_to": "reply@example.test", "in_reply_to": "parent-id"} {
+		if prepared.Preview[key] != want {
+			t.Fatalf("preview[%q]=%#v want %#v", key, prepared.Preview[key], want)
+		}
+	}
+	if references, ok := prepared.Preview["references"].([]string); !ok || len(references) != 2 {
+		t.Fatalf("preview references=%#v", prepared.Preview["references"])
+	}
+}
+
+func TestPrepareDraftPreviewIncludesEverySerializedField(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	connection := mailConnection("work")
+	connection.Mail.Folders.Drafts = "Drafts"
+	application := serviceWithConnections(t, connection)
+	message := model.SendMessage{To: []string{"to@example.test"}, CC: []string{"cc@example.test"}, BCC: []string{"bcc@example.test"}, Subject: "subject", Text: "body", ReplyTo: "reply@example.test", InReplyTo: "parent", References: []string{"one", "two"}}
+	prepared, err := application.PrepareDraft(context.Background(), "work", "mail.draft.create", "Drafts", 0, message)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for key, want := range map[string]string{"subject": message.Subject, "text": message.Text, "reply_to": message.ReplyTo, "in_reply_to": message.InReplyTo} {
+		if prepared.Preview[key] != want {
+			t.Fatalf("preview[%q]=%#v want %#v", key, prepared.Preview[key], want)
+		}
+	}
+	recipients, ok := prepared.Preview["recipients"].(map[string]any)
+	if !ok || len(recipients) != 3 {
+		t.Fatalf("preview recipients=%#v", prepared.Preview["recipients"])
+	}
+	if references, ok := prepared.Preview["references"].([]string); !ok || len(references) != 2 {
+		t.Fatalf("preview references=%#v", prepared.Preview["references"])
+	}
+}
+
+func TestCalendarUpdateRequiresProviderHref(t *testing.T) {
+	connection := model.Connection{ID: "work", Name: "Work", Calendar: &model.CalendarConfig{Kind: "caldav", URL: "http://localhost:5232", Username: "work", Secret: model.SecretRef{Env: "CALENDAR_PASSWORD"}, Collections: []model.CalendarCollection{{ID: "team", Path: "/work/team/"}}}}
+	application := serviceWithConnections(t, connection)
+	_, err := application.PrepareCalendarWrite(context.Background(), "work", "calendar.update", model.Event{ID: "event", CollectionID: "team", ETag: "etag", Start: instant(9), End: instant(10)})
+	if err == nil || !strings.Contains(err.Error(), "provider href") {
+		t.Fatalf("PrepareCalendarWrite error = %v", err)
+	}
+}
+
+func TestSyncSnapshotsSupportOrdinaryOfflineMailReads(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	application := serviceWithConnections(t, mailConnection("work"))
+	application.now = func() time.Time { return instant(14) }
+	application.mailSearch = func(_ model.Connection, options postmail.SearchOptions) (postmail.SearchResult, error) {
+		messages := []model.Message{{ConnectionID: "work", Folder: "INBOX", UID: 2, Subject: "new", ReceivedAt: instant(13)}, {ConnectionID: "work", Folder: "INBOX", UID: 1, Subject: "old", ReceivedAt: instant(12)}}
+		var filtered []model.Message
+		for _, message := range messages {
+			if afterMailCursor(message, options) {
+				filtered = append(filtered, message)
+			}
+		}
+		return postmail.SearchResult{Messages: filtered, UIDValidity: 1, UIDNext: 3}, nil
+	}
+	if _, err := application.Sync(context.Background(), model.Selector{}); err != nil {
+		t.Fatal(err)
+	}
+	page, err := application.SearchMessages(model.Selector{}, postmail.SearchOptions{Mode: "offline"}, 10, "")
+	if err != nil || messageUIDs(page.Messages) != "work:2,work:1" {
+		t.Fatalf("offline page after sync = %#v, %v", page, err)
+	}
+}
+
+func TestCalendarSyncCountsAllPagesAndSupportsNarrowOfflineRead(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	application := serviceWithConnections(t, calendarConnection("calendar", "Calendar"))
+	application.now = func() time.Time { return time.Date(2026, 8, 15, 0, 0, 0, 0, time.UTC) }
+	var feed strings.Builder
+	feed.WriteString("BEGIN:VCALENDAR\r\nVERSION:2.0\r\n")
+	for index := 0; index < 501; index++ {
+		when := application.now().Add(time.Duration(index) * time.Minute)
+		fmt.Fprintf(&feed, "BEGIN:VEVENT\r\nUID:event-%03d\r\nSUMMARY:event-%03d\r\nDTSTART:%s\r\nDTEND:%s\r\nEND:VEVENT\r\n", index, index, when.Format("20060102T150405Z"), when.Add(time.Minute).Format("20060102T150405Z"))
+	}
+	feed.WriteString("END:VCALENDAR\r\n")
+	application.calendar = calendar.NewClient(&http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: make(http.Header), Body: io.NopCloser(strings.NewReader(feed.String()))}, nil
+	})})
+	result, err := application.Sync(context.Background(), model.Selector{Capability: "calendar.read"})
+	if err != nil || result["events"] != 501 {
+		t.Fatalf("Sync result=%#v err=%v", result, err)
+	}
+	start := application.now().Add(499 * time.Minute)
+	page, err := application.ListEventsMode(context.Background(), model.Selector{}, start, start.Add(3*time.Minute), "", 10, "", "offline")
+	if err != nil || len(page.Events) != 2 || page.Events[0].ID != "event-499" {
+		t.Fatalf("narrow offline page=%#v err=%v", page, err)
+	}
+}
+
+func TestEventCursorComparatorIncludesCollectionAndObjectIdentity(t *testing.T) {
+	start := instant(9)
+	one := model.Event{Start: start, ConnectionID: "work", CollectionID: "one", ID: "same", Href: "/one/same.ics"}
+	two := model.Event{Start: start, ConnectionID: "work", CollectionID: "two", ID: "same", Href: "/two/same.ics"}
+	if compareEvents(one, two) == 0 {
+		t.Fatal("event comparator collapsed distinct collection objects")
+	}
+}
+
+func TestNormalizeEventRangeBoundsProviderQueries(t *testing.T) {
+	now := instant(12)
+	start, end := normalizeEventRange(time.Time{}, time.Time{}, now)
+	if !start.Equal(now.Add(-90*24*time.Hour)) || !end.Equal(now.Add(365*24*time.Hour)) {
+		t.Fatalf("normalized range = %v to %v", start, end)
+	}
+}
+
+func TestListEventsRejectsInvertedRange(t *testing.T) {
+	application := serviceWithConnections(t, calendarConnection("calendar", "Calendar"))
+	_, err := application.ListEventsMode(context.Background(), model.Selector{}, instant(10), instant(9), "", 10, "", "refresh")
+	if err == nil || !strings.Contains(err.Error(), "end must be after start") {
+		t.Fatalf("ListEventsMode accepted inverted range: %v", err)
+	}
+}
+
+func TestDraftUpdateCleanupFailurePreservesAppendedUIDAsUncertain(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	application := serviceWithConnections(t, mailConnection("work"))
+	precondition := postmail.MessagePrecondition{UIDValidity: 7, ModSeq: 11}
+	application.mailSnapshot = func(model.Connection, string, uint32) (postmail.MessagePrecondition, error) { return precondition, nil }
+	application.mailAppend = func(model.Connection, string, model.SendMessage, []imap.Flag) (uint32, error) { return 42, nil }
+	application.mailMarkDeleted = func(model.Connection, string, uint32, postmail.MessagePrecondition) error {
+		return fmt.Errorf("concurrent modification")
+	}
+	prepared, err := application.PrepareDraft(context.Background(), "work", "mail.draft.update", "Drafts", 5, model.SendMessage{Subject: "replacement"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := application.ExecuteOperation(context.Background(), prepared.Token)
+	if err == nil || result.Status != "uncertain" || fmt.Sprint(result.Result["uid"]) != "42" || result.Result["cleanup"] != "failed" {
+		t.Fatalf("ExecuteOperation result=%#v err=%v", result, err)
+	}
+	replayed, err := application.ExecuteOperation(context.Background(), prepared.Token)
+	if err != nil || replayed.Status != "uncertain" || fmt.Sprint(replayed.Result["uid"]) != "42" {
+		t.Fatalf("replay result=%#v err=%v", replayed, err)
+	}
+}
+
+func TestSentCopyUsesDeliveredBytesAndAppendFailureIsUncertain(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	connection := mailConnection("work")
+	connection.Identity = model.Identity{Email: "work@example.test"}
+	connection.Mail.SMTP = model.SMTPConfig{Address: "localhost:3025", Insecure: true}
+	connection.Mail.SentCopy = "always"
+	connection.Mail.Folders.Sent = "Sent"
+	application := serviceWithConnections(t, connection)
+	serialized := []byte("exact serialized message")
+	builds, sends, appends := 0, 0, 0
+	application.mailBuild = func(model.Connection, model.SendMessage) ([]byte, error) {
+		builds++
+		return append([]byte(nil), serialized...), nil
+	}
+	application.mailSendRaw = func(_ model.Connection, _ model.SendMessage, data []byte) error {
+		sends++
+		if string(data) != string(serialized) {
+			t.Fatalf("sent data = %q", data)
+		}
+		return nil
+	}
+	application.mailAppendRaw = func(_ model.Connection, folder string, data []byte, _ []imap.Flag) (uint32, error) {
+		appends++
+		if folder != "Sent" || string(data) != string(serialized) {
+			t.Fatalf("append folder=%q data=%q", folder, data)
+		}
+		return 0, fmt.Errorf("IMAP unavailable")
+	}
+	prepared, err := application.PrepareSend(context.Background(), model.SendMessage{ConnectionID: "work", To: []string{"person@example.test"}, Subject: "subject"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := application.ExecuteOperation(context.Background(), prepared.Token)
+	if err == nil || result.Status != "uncertain" || result.Result["sent"] != true || result.Result["sent_copy"] != "failed" {
+		t.Fatalf("ExecuteOperation result=%#v err=%v", result, err)
+	}
+	replayed, replayErr := application.ExecuteOperation(context.Background(), prepared.Token)
+	if replayErr != nil || replayed.Status != "uncertain" || builds != 1 || sends != 1 || appends != 1 {
+		t.Fatalf("replay=%#v err=%v counts=%d/%d/%d", replayed, replayErr, builds, sends, appends)
+	}
+}
+
+func TestSentCopyPreservesBCCWithoutExposingItToSMTP(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	connection := mailConnection("work")
+	connection.Identity = model.Identity{Email: "work@example.test"}
+	connection.Mail.SMTP = model.SMTPConfig{Address: "localhost:3025", Insecure: true}
+	connection.Mail.SentCopy = "always"
+	connection.Mail.Folders.Sent = "Sent"
+	application := serviceWithConnections(t, connection)
+	var delivered, archived []byte
+	application.mailSendRaw = func(_ model.Connection, _ model.SendMessage, data []byte) error {
+		delivered = append([]byte(nil), data...)
+		return nil
+	}
+	application.mailAppendRaw = func(_ model.Connection, _ string, data []byte, _ []imap.Flag) (uint32, error) {
+		archived = append([]byte(nil), data...)
+		return 9, nil
+	}
+	message := model.SendMessage{ConnectionID: "work", To: []string{"person@example.test"}, BCC: []string{"hidden@example.test"}, Subject: "subject", Text: "body"}
+	prepared, err := application.PrepareSend(context.Background(), message)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := application.ExecuteOperation(context.Background(), prepared.Token); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(delivered), "hidden@example.test") || !strings.Contains(string(archived), "Bcc: <hidden@example.test>") {
+		t.Fatalf("delivered=%q archived=%q", delivered, archived)
+	}
+	withoutBCC := strings.Replace(string(archived), "\r\nBcc: <hidden@example.test>", "", 1)
+	if withoutBCC != string(delivered) {
+		t.Fatal("sent copy changed bytes other than the archival Bcc header")
+	}
+}
+
+func TestSentCopyWithoutReturnedUIDStillSucceeds(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	connection := mailConnection("work")
+	connection.Identity = model.Identity{Email: "work@example.test"}
+	connection.Mail.SMTP = model.SMTPConfig{Address: "localhost:3025", Insecure: true}
+	connection.Mail.SentCopy = "always"
+	connection.Mail.Folders.Sent = "Sent"
+	application := serviceWithConnections(t, connection)
+	application.mailBuild = func(model.Connection, model.SendMessage) ([]byte, error) { return []byte("message"), nil }
+	application.mailSendRaw = func(model.Connection, model.SendMessage, []byte) error { return nil }
+	application.mailAppendRaw = func(model.Connection, string, []byte, []imap.Flag) (uint32, error) { return 0, nil }
+	prepared, err := application.PrepareSend(context.Background(), model.SendMessage{ConnectionID: "work", To: []string{"person@example.test"}, Subject: "subject"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := application.ExecuteOperation(context.Background(), prepared.Token)
+	if err != nil || result.Status != "succeeded" || result.Result["sent_copy"] != "appended" {
+		t.Fatalf("ExecuteOperation result=%#v err=%v", result, err)
+	}
+}
+
+func TestSyncAcceptsGranularReadCapability(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	application := serviceWithConnections(t, mailConnection("work"))
+	calls := 0
+	application.mailSearch = func(connection model.Connection, _ postmail.SearchOptions) (postmail.SearchResult, error) {
+		calls++
+		return postmail.SearchResult{Messages: []model.Message{{ConnectionID: connection.ID, UID: 1}}, UIDValidity: 1, UIDNext: 2}, nil
+	}
+	result, err := application.Sync(context.Background(), model.Selector{Capability: "mail.read"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 || result["messages"] != 1 {
+		t.Fatalf("Sync returned %#v after %d calls", result, calls)
+	}
+	if _, err := application.Sync(context.Background(), model.Selector{Capability: "mail.send"}); err == nil {
+		t.Fatal("Sync accepted non-readable capability")
+	}
+}
+
+func TestSyncFreezesMailRangeAcrossPages(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	application := serviceWithConnections(t, mailConnection("work"))
+	clock := time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)
+	application.now = func() time.Time { clock = clock.Add(time.Second); return clock }
+	var cutoffs []time.Time
+	application.mailSearch = func(connection model.Connection, options postmail.SearchOptions) (postmail.SearchResult, error) {
+		cutoffs = append(cutoffs, options.Since)
+		messages := make([]model.Message, 0, 101)
+		for uid := uint32(101); uid > 0; uid-- {
+			message := model.Message{ConnectionID: connection.ID, UID: uid, ReceivedAt: time.Unix(int64(uid), 0)}
+			if afterMailCursor(message, options) {
+				messages = append(messages, message)
+			}
+		}
+		if len(messages) > options.Limit {
+			messages = messages[:options.Limit]
+		}
+		return postmail.SearchResult{Messages: messages, UIDValidity: 1, UIDNext: 102}, nil
+	}
+	result, err := application.Sync(context.Background(), model.Selector{Capability: "mail.read"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result["messages"] != 101 || len(cutoffs) != 2 || !cutoffs[0].Equal(cutoffs[1]) {
+		t.Fatalf("Sync result=%#v cutoffs=%v", result, cutoffs)
+	}
+}
+
+func TestCombinedSyncReportsFailedProtocolSources(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	application := serviceWithConnections(t, mailConnection("mail"), calendarConnection("calendar", "Calendar"))
+	application.mailSearch = func(model.Connection, postmail.SearchOptions) (postmail.SearchResult, error) {
+		return postmail.SearchResult{}, fmt.Errorf("mail offline")
+	}
+	application.calendar = calendar.NewClient(&http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: make(http.Header), Body: io.NopCloser(strings.NewReader("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nEND:VCALENDAR\r\n"))}, nil
+	})})
+	result, err := application.Sync(context.Background(), model.Selector{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	errors, ok := result["errors"].([]model.SourceError)
+	if !ok || len(errors) != 1 || errors[0].ConnectionID != "mail" || errors[0].Code != "mail_sync_failed" {
+		t.Fatalf("Sync result=%#v", result)
+	}
+}
+
+func TestPrepareCalendarUpdateRejectsSeriesReplacementFromOccurrence(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	connection := model.Connection{ID: "work", Name: "Work", Calendar: &model.CalendarConfig{
+		Kind: "caldav", URL: "http://localhost:5232", Username: "work", Secret: model.SecretRef{Env: "CALENDAR_PASSWORD"},
+		Collections: []model.CalendarCollection{{ID: "team", Path: "/work/team/"}},
+	}}
+	application := serviceWithConnections(t, connection)
+	event := model.Event{ID: "series#20260815T090000Z", SeriesID: "series", CollectionID: "team", Href: "/work/team/series.ics", ETag: "etag", Start: instant(9), End: instant(10)}
+	if _, err := application.PrepareCalendarWrite(context.Background(), "work", "calendar.update", event); err == nil || !strings.Contains(err.Error(), "series master") {
+		t.Fatalf("PrepareCalendarWrite returned %v", err)
+	}
+}
+
+func TestReplyRecipientsPreferReplyTo(t *testing.T) {
+	original := model.MessageDetail{Message: model.Message{From: []model.Address{{Email: "from@example.test"}}}, ReplyTo: []model.Address{{Email: "reply@example.test"}}}
+	got := replyRecipients(original)
+	if len(got) != 1 || got[0] != "reply@example.test" {
+		t.Fatalf("replyRecipients returned %#v", got)
+	}
+}
+
 func serviceWithConnections(t *testing.T, connections ...model.Connection) *Service {
 	t.Helper()
+	t.Setenv("PASSWORD", "test-password")
+	t.Setenv("CALENDAR_PASSWORD", "test-password")
 	store, err := config.New(filepath.Join(t.TempDir(), "config.json"))
 	if err != nil {
 		t.Fatalf("config.New returned error: %v", err)
@@ -148,6 +2486,14 @@ func messageUIDs(messages []model.Message) string {
 		parts[index] = fmt.Sprintf("%s:%d", message.ConnectionID, message.UID)
 	}
 	return strings.Join(parts, ",")
+}
+
+func afterMailCursor(message model.Message, options postmail.SearchOptions) bool {
+	if options.CursorTime.IsZero() {
+		return true
+	}
+	boundary := model.Message{ConnectionID: message.ConnectionID, ReceivedAt: options.CursorTime, UID: options.CursorUID}
+	return messageBefore(boundary, message)
 }
 
 type roundTripFunc func(*http.Request) (*http.Response, error)

@@ -13,7 +13,7 @@ The person or address presented to recipients and attendees when a connection ac
 _Avoid_: User, account
 
 **Capability**:
-A class of operations a connection supports, currently mail or calendar.
+A granular operation a connection supports, such as `mail.read`, `mail.send`, `calendar.read`, or `calendar.write`.
 _Avoid_: Service, feature
 
 **Category**:
@@ -42,4 +42,16 @@ _Avoid_: Meeting, appointment
 
 **Calendar feed**:
 A read-only iCalendar subscription identified by a public URL or a private URL supplied through a secret environment variable.
-_Avoid_: Calendar account, CalDAV connection
+_Avoid_: Calendar account
+
+**Calendar collection**:
+A selectable calendar exposed by one CalDAV-capable connection. A connection may discover multiple collections with independent identifiers and read-only state.
+_Avoid_: Calendar account, feed
+
+**Prepared operation**:
+An encrypted, opaque, short-lived record that binds one external write to its exact connection, acting identity, payload digest, preview, and provider preconditions. Preparation does not perform the provider side effect.
+_Avoid_: Draft, queued action
+
+**Offline cache**:
+The encrypted local SQLite state used for bounded stale reads, sync state, fetched bodies/attachments, and prepared operations. It is not a canonical mailbox or calendar database.
+_Avoid_: Archive, backup

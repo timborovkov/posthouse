@@ -1,25 +1,22 @@
 # Roadmap
 
-## v0.2 — accounts people can actually onboard
+## v0.2.0 release gate
 
-- OAuth 2.0 authorization-code flow, refresh-token storage, IMAP XOAUTH2, and SMTP OAuth for Google Workspace and Microsoft 365.
-- OS keychain and encrypted-file secret backends; keep environment references for containers.
-- Provider presets and discovery for Gmail, Microsoft 365, Fastmail, iCloud, generic IMAP/SMTP, and private ICS feed URLs.
-- Connection doctor command with non-mutating authentication and capability checks.
-- Full-screen TUI for onboarding, selection, previews, and explicit write confirmation.
+- Run `make validate-all` from a clean checkout with Docker available.
+- Keep GreenMail `2.1.11`, Radicale `3.7.3`, generated Go-TUI sources, migration notes, and MCP descriptions aligned with the tag.
+- Publish only when both GitHub Actions jobs pass; there is no partial v0.2 release.
 
-## v0.3 — complete daily operations
+## Deliberately outside v0.2
 
-- Fetch complete MIME messages and safe text/HTML alternatives; stream attachments with size limits.
-- Reply, forward, draft, move, archive, flag, and mark read/unread.
-- Optional CalDAV/provider-API connectors for event update, recurrence, cancellations, attendee status, and free/busy.
-- Per-connection partial failures so cross-connection reads return useful results plus structured errors.
-- Provider-aware rate limiting and retry guidance.
+- OAuth and native Gmail/Microsoft APIs.
+- Live-provider certification gates for Fastmail, iCloud, Google, or Microsoft.
+- HTML composition, contacts, permanent IMAP expunge, and background-daemon sync.
+- Server-side CalDAV scheduling/free-busy and attendee-response processing.
+- Provider notifications or other external push integrations.
 
-## Before a public production release
+## Later hardening
 
-- Threat model, security policy, audit logging with content redaction, and external review.
-- HTTP authorization scopes separating reads, mail writes, artifact generation, and future provider mutations.
-- Integration suites against disposable IMAP/SMTP servers and representative ICS feeds.
-- Stable config migrations, release automation, signed artifacts, SBOM, and vulnerability scanning.
-- Resolve the final project name and GitHub organization.
+- Broaden generic-server interoperability fixtures and fuzz MIME/iCalendar parsing.
+- Add scoped HTTP authorization and independent read/write credentials.
+- External security review, SBOM/signing, vulnerability gates, and recovery documentation.
+- Optional provider presets and OAuth without weakening generic protocol support.

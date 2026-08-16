@@ -2,12 +2,16 @@ package mcpserver
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/timborovkov/posthouse/internal/config"
@@ -52,13 +56,52 @@ func TestServerListsAndCallsReadOnlyConnectionTool(t *testing.T) {
 		t.Fatalf("ListTools returned error: %v", err)
 	}
 	names := make([]string, 0, len(listed.Tools))
+	var executeTool, sendTool, draftTool, attachmentTool *mcp.Tool
 	for _, tool := range listed.Tools {
 		names = append(names, tool.Name)
+		if tool.Name == "operation_execute" {
+			executeTool = tool
+		}
+		if tool.Name == "messages_send_prepare" {
+			sendTool = tool
+		}
+		if tool.Name == "messages_draft_prepare" {
+			draftTool = tool
+		}
+		if tool.Name == "messages_attachment_get" {
+			attachmentTool = tool
+		}
 	}
-	for _, want := range []string{"connections_list", "messages_search", "messages_send", "events_list", "event_ics_generate"} {
+	for _, want := range []string{"connections_list", "messages_search", "messages_get", "messages_attachment_get", "messages_send_prepare", "messages_reply_prepare", "messages_forward_prepare", "messages_draft_prepare", "messages_action_prepare", "events_list", "event_ics_generate", "event_create_prepare", "operation_execute", "connection_doctor", "sync", "cache_status"} {
 		if !slices.Contains(names, want) {
 			t.Fatalf("tools %v do not contain %s", names, want)
 		}
+	}
+	if slices.Contains(names, "messages_send") {
+		t.Fatal("direct messages_send tool bypasses the prepared-operation safety boundary")
+	}
+	if executeTool == nil || executeTool.Annotations == nil || executeTool.Annotations.DestructiveHint == nil || !*executeTool.Annotations.DestructiveHint || !executeTool.Annotations.IdempotentHint {
+		t.Fatalf("operation_execute annotations=%#v", executeTool)
+	}
+	for _, tool := range []*mcp.Tool{sendTool, draftTool} {
+		schema, _ := json.Marshal(tool.InputSchema)
+		if strings.Contains(string(schema), `"path"`) {
+			t.Fatalf("remote attachment schema exposes host filesystem paths: %s", schema)
+		}
+	}
+	attachmentSchema, _ := json.Marshal(attachmentTool.InputSchema)
+	if !strings.Contains(string(attachmentSchema), `"cursor"`) {
+		t.Fatalf("attachment schema lacks snapshot cursor: %s", attachmentSchema)
+	}
+	missingCursor, err := clientSession.CallTool(context.Background(), &mcp.CallToolParams{Name: "messages_attachment_get", Arguments: map[string]any{"connection": "work", "uid": 1, "attachment_id": "file", "offset": 1}})
+	errorText := ""
+	if missingCursor != nil && len(missingCursor.Content) > 0 {
+		if content, ok := missingCursor.Content[0].(*mcp.TextContent); ok {
+			errorText = content.Text
+		}
+	}
+	if err != nil || missingCursor == nil || !missingCursor.IsError || !strings.Contains(errorText, "cursor is required") {
+		t.Fatalf("attachment continuation without cursor returned %#v, %v", missingCursor, err)
 	}
 
 	result, err := clientSession.CallTool(context.Background(), &mcp.CallToolParams{Name: "connections_list", Arguments: map[string]any{"page_size": 1}})
@@ -98,6 +141,16 @@ func TestServerListsAndCallsReadOnlyConnectionTool(t *testing.T) {
 	if !ok || resource.Resource.MIMEType != "text/calendar" || !strings.Contains(resource.Resource.Text, "BEGIN:VCALENDAR") {
 		t.Fatalf("embedded resource is %#v", icsResult.Content[0])
 	}
+	cancelResult, err := clientSession.CallTool(context.Background(), &mcp.CallToolParams{Name: "event_ics_generate", Arguments: map[string]any{
+		"id": "planning-uid", "title": "Planning", "start": "2026-08-17T09:00:00Z", "end": "2026-08-17T10:00:00Z", "method": "cancel", "sequence": 3,
+	}})
+	if err != nil || cancelResult.IsError {
+		t.Fatalf("event_ics_generate cancel returned %#v, %v", cancelResult, err)
+	}
+	cancelResource, ok := cancelResult.Content[0].(*mcp.EmbeddedResource)
+	if !ok || !strings.Contains(cancelResource.Resource.Text, "METHOD:CANCEL") || !strings.Contains(cancelResource.Resource.Text, "SEQUENCE:3") {
+		t.Fatalf("cancel invitation is %#v", cancelResult.Content[0])
+	}
 }
 
 func TestAuthenticate(t *testing.T) {
@@ -116,5 +169,68 @@ func TestAuthenticate(t *testing.T) {
 	handler.ServeHTTP(authorized, request)
 	if authorized.Code != http.StatusNoContent {
 		t.Fatalf("authorized status is %d", authorized.Code)
+	}
+}
+
+func TestRunHTTPRejectsNonLoopbackEvenWithToken(t *testing.T) {
+	server := New(nil)
+	err := server.RunHTTP(context.Background(), "0.0.0.0:8791", "secret", false, slog.Default())
+	if err == nil || !strings.Contains(err.Error(), "must listen on loopback") {
+		t.Fatalf("RunHTTP non-loopback error = %v", err)
+	}
+}
+
+func TestRunHTTPContainerListenerStillRequiresToken(t *testing.T) {
+	server := New(nil)
+	err := server.RunHTTP(context.Background(), "0.0.0.0:8791", "", true, slog.Default())
+	if err == nil || !strings.Contains(err.Error(), "TOKEN is required") {
+		t.Fatalf("RunHTTP container-listener error = %v", err)
+	}
+}
+
+func TestRunHTTPLoopbackStillRequiresToken(t *testing.T) {
+	server := New(nil)
+	err := server.RunHTTP(context.Background(), "127.0.0.1:8791", "", false, slog.Default())
+	if err == nil || !strings.Contains(err.Error(), "POSTHOUSE_MCP_TOKEN") {
+		t.Fatalf("RunHTTP loopback error = %v", err)
+	}
+}
+
+func TestHTTPBodyLimitAccommodatesDocumentedAttachment(t *testing.T) {
+	encodedAttachment := base64.StdEncoding.EncodedLen(25 << 20)
+	if maxMCPHTTPRequestBytes < int64(encodedAttachment+(1<<20)) {
+		t.Fatalf("HTTP body limit %d cannot carry a base64 25 MiB attachment plus JSON envelope", maxMCPHTTPRequestBytes)
+	}
+}
+
+func TestHTTPShutdownWaitsForInFlightHandler(t *testing.T) {
+	shutdownStarted := make(chan struct{})
+	release := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	finished := make(chan error, 1)
+	go func() {
+		finished <- serveHTTPUntilShutdown(ctx, func() error {
+			<-shutdownStarted
+			return http.ErrServerClosed
+		}, func(context.Context) error {
+			close(shutdownStarted)
+			<-release
+			return nil
+		})
+	}()
+	cancel()
+	select {
+	case <-shutdownStarted:
+	case <-time.After(time.Second):
+		t.Fatal("HTTP shutdown did not start")
+	}
+	select {
+	case err := <-finished:
+		t.Fatalf("server returned before in-flight handler completed: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+	if err := <-finished; err != nil {
+		t.Fatal(err)
 	}
 }

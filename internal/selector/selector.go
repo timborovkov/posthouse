@@ -11,6 +11,7 @@ import (
 func Match(all []model.Connection, s model.Selector) ([]model.Connection, error) {
 	wantedConnections := normalized(s.Connections)
 	wantedLabels := normalized(s.Labels)
+	wantedCollections := normalized(s.Collections)
 	category := strings.ToLower(strings.TrimSpace(s.Category))
 	capability := strings.ToLower(strings.TrimSpace(s.Capability))
 
@@ -29,10 +30,16 @@ func Match(all []model.Connection, s model.Selector) ([]model.Connection, error)
 		if !containsAll(labels, wantedLabels) {
 			continue
 		}
+		if len(wantedCollections) > 0 && !matchesCollection(connection, wantedCollections) {
+			continue
+		}
 		if capability == "mail" && connection.Mail == nil {
 			continue
 		}
 		if capability == "calendar" && connection.Calendar == nil {
+			continue
+		}
+		if strings.Contains(capability, ".") && !slices.Contains(connection.Capabilities, capability) {
 			continue
 		}
 		matches = append(matches, connection)
@@ -44,7 +51,29 @@ func Match(all []model.Connection, s model.Selector) ([]model.Connection, error)
 	return matches, nil
 }
 
+func matchesCollection(connection model.Connection, wanted []string) bool {
+	if connection.Calendar == nil || connection.Calendar.Kind != "caldav" {
+		return false
+	}
+	for _, collection := range connection.Calendar.Collections {
+		if slices.Contains(wanted, strings.ToLower(collection.ID)) || slices.Contains(wanted, strings.ToLower(collection.Name)) {
+			return true
+		}
+	}
+	return false
+}
+
 func One(all []model.Connection, id string, capability string) (model.Connection, error) {
+	for _, connection := range all {
+		if !strings.EqualFold(strings.TrimSpace(connection.ID), strings.TrimSpace(id)) {
+			continue
+		}
+		matches, err := Match([]model.Connection{connection}, model.Selector{Capability: capability})
+		if err != nil {
+			return model.Connection{}, err
+		}
+		return matches[0], nil
+	}
 	matches, err := Match(all, model.Selector{Connections: []string{id}, Capability: capability})
 	if err != nil {
 		return model.Connection{}, err

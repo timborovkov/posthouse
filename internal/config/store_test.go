@@ -1,12 +1,195 @@
 package config
 
 import (
+	"encoding/json"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/timborovkov/posthouse/internal/model"
 )
+
+func TestLoadMigratesV1AtomicallyAndKeepsBackup(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	v1 := model.Config{Version: 1, Connections: []model.Connection{{ID: "work", Name: "Work", Mail: &model.MailConfig{Username: "work@example.test", SecretEnv: "WORK_PASSWORD", IMAP: model.IMAPConfig{Address: "localhost:3143", Insecure: true}}}}}
+	data, _ := json.Marshal(v1)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := New(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	migrated, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if migrated.Version != 2 || migrated.Connections[0].Mail.Secret.Env != "WORK_PASSWORD" || migrated.Connections[0].Mail.SecretEnv != "" {
+		t.Fatalf("migration returned %#v", migrated)
+	}
+	backup, err := os.ReadFile(path + ".v1.bak")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var original model.Config
+	if err := json.Unmarshal(backup, &original); err != nil {
+		t.Fatal(err)
+	}
+	if original.Version != 1 || original.Connections[0].Mail.SecretEnv != "WORK_PASSWORD" {
+		t.Fatalf("backup changed: %#v", original)
+	}
+}
+
+func TestStoreUpdateSerializesAcrossProcesses(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	store, err := New(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(model.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	commands := []*exec.Cmd{
+		exec.Command(os.Args[0], "-test.run=^TestStoreUpdateHelperProcess$"),
+		exec.Command(os.Args[0], "-test.run=^TestStoreUpdateHelperProcess$"),
+	}
+	for index, command := range commands {
+		command.Env = append(os.Environ(), "POSTHOUSE_CONFIG_UPDATE_HELPER=1", "POSTHOUSE_CONFIG_UPDATE_PATH="+path, fmt.Sprintf("POSTHOUSE_CONFIG_UPDATE_ID=connection-%d", index))
+		if err := command.Start(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, command := range commands {
+		if err := command.Wait(); err != nil {
+			t.Fatalf("config update helper failed: %v", err)
+		}
+	}
+	cfg, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Connections) != 2 {
+		t.Fatalf("concurrent updates retained %d connections, want 2: %#v", len(cfg.Connections), cfg.Connections)
+	}
+}
+
+func TestStoreUpdateHelperProcess(t *testing.T) {
+	if os.Getenv("POSTHOUSE_CONFIG_UPDATE_HELPER") != "1" {
+		return
+	}
+	store, err := New(os.Getenv("POSTHOUSE_CONFIG_UPDATE_PATH"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = store.Update(func(cfg model.Config) (model.Config, error) {
+		time.Sleep(100 * time.Millisecond)
+		id := os.Getenv("POSTHOUSE_CONFIG_UPDATE_ID")
+		cfg.Connections = append(cfg.Connections, model.Connection{ID: id, Name: id, Calendar: &model.CalendarConfig{URL: "https://calendar.example.test/events.ics"}})
+		return cfg, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestValidateRejectsRemoteCleartextSMTPAuthentication(t *testing.T) {
+	cfg := model.Config{Version: 2, Connections: []model.Connection{{ID: "work", Name: "Work", Mail: &model.MailConfig{Username: "work@example.test", Secret: model.SecretRef{Env: "WORK_PASSWORD"}, SMTP: model.SMTPConfig{Address: "smtp.example.test:25", Insecure: true}}}}}
+	if err := Validate(cfg); err == nil {
+		t.Fatal("Validate accepted remote cleartext SMTP authentication")
+	}
+	cfg.Connections[0].Mail.SMTP.Address = "localhost:3025"
+	if err := Validate(cfg); err != nil {
+		t.Fatalf("Validate rejected loopback development SMTP: %v", err)
+	}
+}
+
+func TestValidateRejectsRemoteCleartextIMAPAuthentication(t *testing.T) {
+	cfg := model.Config{Version: 2, Connections: []model.Connection{{ID: "work", Name: "Work", Mail: &model.MailConfig{Username: "work@example.test", Secret: model.SecretRef{Env: "WORK_PASSWORD"}, IMAP: model.IMAPConfig{Address: "imap.example.test:143", Insecure: true}}}}}
+	if err := Validate(cfg); err == nil || !strings.Contains(err.Error(), "remote cleartext IMAP") {
+		t.Fatalf("Validate accepted remote cleartext IMAP authentication: %v", err)
+	}
+	cfg.Connections[0].Mail.IMAP.Address = "localhost:3143"
+	if err := Validate(cfg); err != nil {
+		t.Fatalf("Validate rejected loopback development IMAP: %v", err)
+	}
+}
+
+func TestValidateRejectsRemoteInsecureCalDAVTLS(t *testing.T) {
+	cfg := model.Config{Version: 2, Connections: []model.Connection{{ID: "work", Name: "Work", Calendar: &model.CalendarConfig{Kind: "caldav", URL: "https://calendar.example.test/", Username: "work", Secret: model.SecretRef{Env: "CALENDAR_PASSWORD"}, Insecure: true}}}}
+	if err := Validate(cfg); err == nil || !strings.Contains(err.Error(), "loopback") {
+		t.Fatalf("Validate accepted remote insecure CalDAV TLS: %v", err)
+	}
+	cfg.Connections[0].Calendar.URL = "https://localhost:5232/"
+	if err := Validate(cfg); err != nil {
+		t.Fatalf("Validate rejected loopback insecure CalDAV TLS: %v", err)
+	}
+	cfg.Connections[0].Calendar.URL = ""
+	cfg.Connections[0].Calendar.URLSecret = model.SecretRef{Env: "CALDAV_URL"}
+	if err := Validate(cfg); err == nil || !strings.Contains(err.Error(), "cannot be used with url_secret") {
+		t.Fatalf("Validate accepted unverifiable insecure CalDAV URL secret: %v", err)
+	}
+}
+
+func TestValidateCalendarLiteralURLSecurity(t *testing.T) {
+	connection := model.Connection{ID: "work", Name: "Work", Calendar: &model.CalendarConfig{Kind: "feed", URL: "https://calendar.example.test/events.ics"}}
+	cfg := model.Config{Version: 2, Connections: []model.Connection{connection}}
+	if err := Validate(cfg); err != nil {
+		t.Fatalf("Validate rejected HTTPS calendar URL: %v", err)
+	}
+	for _, value := range []string{"calendar.example.test/events.ics", "://bad", "http://calendar.example.test/events.ics", "ftp://calendar.example.test/events.ics", "https://user:pass@calendar.example.test/events.ics"} {
+		cfg.Connections[0].Calendar.URL = value
+		if err := Validate(cfg); err == nil {
+			t.Fatalf("Validate accepted unsafe calendar URL %q", value)
+		}
+	}
+	for _, value := range []string{"http://localhost:5232/events.ics", "http://127.0.0.1:5232/events.ics", "http://[::1]:5232/events.ics"} {
+		cfg.Connections[0].Calendar.URL = value
+		if err := Validate(cfg); err != nil {
+			t.Fatalf("Validate rejected loopback URL %q: %v", value, err)
+		}
+	}
+}
+
+func TestValidateRequiresSafeCalDAVCollectionPath(t *testing.T) {
+	cfg := model.Config{Version: 2, Connections: []model.Connection{{
+		ID: "work", Name: "Work",
+		Calendar: &model.CalendarConfig{
+			Kind: "caldav", URL: "https://calendar.example.test/", Username: "work",
+			Secret:      model.SecretRef{Env: "CALENDAR_PASSWORD"},
+			Collections: []model.CalendarCollection{{ID: "team", Path: "/calendars/team/"}},
+		},
+	}}}
+	if err := Validate(cfg); err != nil {
+		t.Fatalf("Validate rejected safe collection path: %v", err)
+	}
+	for _, value := range []string{"", "relative/", "/calendars/../team/", "/calendars/team", "https://other.example.test/team/", "/team/?query=1", "/team/#fragment"} {
+		cfg.Connections[0].Calendar.Collections[0].Path = value
+		if err := Validate(cfg); err == nil {
+			t.Fatalf("Validate accepted collection path %q", value)
+		}
+	}
+}
+
+func TestValidateRejectsNegativeCacheRetention(t *testing.T) {
+	for name, mutate := range map[string]func(*model.CacheConfig){
+		"metadata": func(cache *model.CacheConfig) { cache.MessageMetadataDays = -1 },
+		"body":     func(cache *model.CacheConfig) { cache.MessageBodyDays = -1 },
+		"past":     func(cache *model.CacheConfig) { cache.EventPastDays = -1 },
+		"future":   func(cache *model.CacheConfig) { cache.EventFutureDays = -1 },
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := model.Config{Version: 2}
+			mutate(&cfg.Cache)
+			if err := Validate(cfg); err == nil {
+				t.Fatal("Validate accepted negative retention")
+			}
+		})
+	}
+}
 
 func TestStoreRoundTripAndPermissions(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "nested", "config.json")
@@ -62,5 +245,39 @@ func TestValidateCalendarRequiresOneFeedURLSource(t *testing.T) {
 	connection.Calendar = &model.CalendarConfig{URLSecretEnv: "CALENDAR_URL"}
 	if err := Validate(model.Config{Connections: []model.Connection{connection}}); err != nil {
 		t.Fatalf("Validate rejected a secret feed URL: %v", err)
+	}
+}
+
+func TestValidateRequiresFolderForAlwaysSentCopy(t *testing.T) {
+	connection := model.Connection{ID: "work", Name: "Work", Mail: &model.MailConfig{
+		Username: "work@example.test", SecretEnv: "WORK_PASSWORD",
+		SMTP: model.SMTPConfig{Address: "smtp.example.test:465", TLS: true}, SentCopy: "always",
+	}}
+	if err := Validate(model.Config{Connections: []model.Connection{connection}}); err == nil {
+		t.Fatal("Validate accepted always sent-copy without a sent folder")
+	}
+	connection.Mail.Folders.Sent = "Sent"
+	if err := Validate(model.Config{Connections: []model.Connection{connection}}); err != nil {
+		t.Fatalf("Validate rejected configured sent-copy folder: %v", err)
+	}
+}
+
+func TestValidateRejectsDuplicateCalendarCollectionIDs(t *testing.T) {
+	cfg := model.Config{Version: 2, Connections: []model.Connection{{ID: "calendar", Name: "Calendar", Calendar: &model.CalendarConfig{
+		Kind: "caldav", URL: "https://calendar.example.test/", Username: "calendar", Secret: model.SecretRef{Env: "CALENDAR_PASSWORD"},
+		Collections: []model.CalendarCollection{{ID: "Team", Path: "/team/"}, {ID: "team", Path: "/other/"}},
+	}}}}
+	if err := Validate(cfg); err == nil || !strings.Contains(err.Error(), "duplicate collection id") {
+		t.Fatalf("Validate duplicate collections error = %v", err)
+	}
+}
+
+func TestValidateRejectsWhitespaceEquivalentConnectionIDs(t *testing.T) {
+	connection := model.Connection{ID: "work", Name: "Work", Mail: &model.MailConfig{Username: "work@example.test", SecretEnv: "WORK_PASSWORD", IMAP: model.IMAPConfig{Address: "imap.example.test:993", TLS: true}}}
+	spaced := connection
+	spaced.ID = " work "
+	spaced.Name = "Spaced"
+	if err := Validate(model.Config{Connections: []model.Connection{connection, spaced}}); err == nil || !strings.Contains(err.Error(), "surrounding whitespace") {
+		t.Fatalf("Validate whitespace-equivalent IDs error = %v", err)
 	}
 }

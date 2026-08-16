@@ -1,17 +1,22 @@
 package calendar
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
 
+	ics "github.com/arran4/golang-ical"
+	"github.com/teambition/rrule-go"
 	"github.com/timborovkov/posthouse/internal/config"
 	"github.com/timborovkov/posthouse/internal/model"
 )
@@ -30,6 +35,9 @@ func NewClient(httpClient *http.Client) *Client {
 }
 
 func (c *Client) List(ctx context.Context, connection model.Connection, start, end time.Time, query string) ([]model.Event, error) {
+	if connection.Calendar != nil && connection.Calendar.Kind == "caldav" {
+		return c.ListCalDAV(ctx, connection, nil, start, end, query)
+	}
 	feedURL, err := resolveFeedURL(connection)
 	if err != nil {
 		return nil, err
@@ -39,14 +47,25 @@ func (c *Client) List(ctx context.Context, connection model.Connection, start, e
 		return nil, fmt.Errorf("create calendar feed request: %w", err)
 	}
 	request.Header.Set("Accept", "text/calendar")
-	response, err := c.httpClient.Do(request)
+	feedClient := *c.httpClient
+	origin := request.URL
+	configuredRedirect := feedClient.CheckRedirect
+	feedClient.CheckRedirect = func(redirect *http.Request, via []*http.Request) error {
+		if !sameOrigin(origin, redirect.URL) {
+			return fmt.Errorf("refusing cross-origin calendar feed redirect")
+		}
+		if configuredRedirect != nil {
+			return configuredRedirect(redirect, via)
+		}
+		return nil
+	}
+	response, err := feedClient.Do(request)
 	if err != nil {
-		return nil, fmt.Errorf("fetch calendar feed: %w", err)
+		return nil, safeTransportError("fetch calendar feed", err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		body, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
-		return nil, fmt.Errorf("fetch calendar feed: %s: %s", response.Status, strings.TrimSpace(string(body)))
+		return nil, fmt.Errorf("fetch calendar feed: %s", response.Status)
 	}
 	data, err := io.ReadAll(io.LimitReader(response.Body, maxFeedBytes+1))
 	if err != nil {
@@ -55,7 +74,7 @@ func (c *Client) List(ctx context.Context, connection model.Connection, start, e
 	if len(data) > maxFeedBytes {
 		return nil, fmt.Errorf("calendar feed exceeds 16 MiB")
 	}
-	events, err := Parse(data)
+	events, err := ParseRange(data, start, end)
 	if err != nil {
 		return nil, fmt.Errorf("parse calendar feed: %w", err)
 	}
@@ -76,70 +95,590 @@ func (c *Client) List(ctx context.Context, connection model.Connection, start, e
 }
 
 func Parse(data []byte) ([]model.Event, error) {
-	lines := unfold(string(data))
-	var events []model.Event
-	var current *model.Event
-	for _, line := range lines {
-		switch strings.ToUpper(line) {
-		case "BEGIN:VEVENT":
-			current = &model.Event{}
+	calendar, err := ics.ParseCalendar(bytes.NewReader(data))
+	if err != nil {
+		return nil, fmt.Errorf("parse iCalendar: %w", err)
+	}
+	locations, err := embeddedTimezones(calendar)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]model.Event, 0, len(calendar.Events()))
+	for _, component := range calendar.Events() {
+		event, err := typedEvent(component, locations)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, event)
+	}
+	return result, nil
+}
+
+func ParseRange(data []byte, rangeStart, rangeEnd time.Time) ([]model.Event, error) {
+	parsed, err := Parse(data)
+	if err != nil {
+		return nil, err
+	}
+	if rangeStart.IsZero() {
+		rangeStart = time.Now().Add(-90 * 24 * time.Hour)
+	}
+	if rangeEnd.IsZero() {
+		rangeEnd = time.Now().Add(365 * 24 * time.Hour)
+	}
+	overrides := make(map[string]model.Event)
+	futureOverrides := make(map[string][]futureOverride)
+	consumedOverrides := make(map[string]bool)
+	cancelledMasters := make(map[string]bool)
+	for _, event := range parsed {
+		if event.RecurrenceID != "" {
+			overrides[event.ID+"\x00"+event.RecurrenceID] = event
+			if strings.EqualFold(event.RecurrenceRange, "THISANDFUTURE") {
+				original, err := time.Parse(time.RFC3339, event.RecurrenceID)
+				if err != nil {
+					return nil, fmt.Errorf("parse recurrence range for event %s: %w", event.ID, err)
+				}
+				futureOverrides[event.ID] = append(futureOverrides[event.ID], futureOverride{original: original, event: event})
+			}
+		} else if strings.EqualFold(event.Status, "CANCELLED") {
+			cancelledMasters[event.ID] = true
+		}
+	}
+	for id := range futureOverrides {
+		slices.SortFunc(futureOverrides[id], func(a, b futureOverride) int { return a.original.Compare(b.original) })
+	}
+	const maxOccurrences = 10000
+	result := make([]model.Event, 0, len(parsed))
+	for _, event := range parsed {
+		if event.RecurrenceID != "" {
 			continue
-		case "END:VEVENT":
-			if current == nil {
-				continue
+		}
+		if strings.EqualFold(event.Status, "CANCELLED") {
+			continue
+		}
+		if event.RecurrenceRule == "" && len(event.RecurrenceDates) == 0 && len(event.RecurrencePeriods) == 0 {
+			if overlaps(event, rangeStart, rangeEnd) {
+				result = append(result, event)
 			}
-			if current.ID == "" || current.Start.IsZero() {
-				return nil, fmt.Errorf("VEVENT is missing UID or DTSTART")
+			continue
+		}
+		intervals := recurrenceCandidateIntervals(event, futureOverrides[event.ID], rangeStart, rangeEnd)
+		rdates := append([]time.Time{event.Start}, event.RecurrenceDates...)
+		periodEnds := make(map[string]time.Time, len(event.RecurrencePeriods))
+		for _, period := range event.RecurrencePeriods {
+			rdates = append(rdates, period.Start)
+			periodEnds[period.Start.UTC().Format(time.RFC3339Nano)] = period.End
+		}
+		generated := 0
+		processedStarts := make(map[string]bool)
+		for _, interval := range intervals {
+			set := &rrule.Set{}
+			if event.RecurrenceRule != "" {
+				rule, err := rrule.StrToRRule("RRULE:" + event.RecurrenceRule)
+				if err != nil {
+					return nil, fmt.Errorf("parse RRULE for event %s: %w", event.ID, err)
+				}
+				rule.DTStart(event.Start)
+				rule, exhausted, err := fastForwardRule(rule, interval.start)
+				if err != nil {
+					return nil, fmt.Errorf("fast-forward RRULE for event %s: %w", event.ID, err)
+				}
+				if !exhausted {
+					set.RRule(rule)
+				}
+			} else {
+				set.DTStart(event.Start)
 			}
-			if current.End.IsZero() {
-				current.End = current.Start
-				if current.AllDay {
-					current.End = current.Start.Add(24 * time.Hour)
+			set.SetRDates(rdates)
+			set.SetExDates(event.ExceptionDates)
+			next := set.Iterator()
+			for {
+				occurrenceStart, ok := next()
+				if !ok || occurrenceStart.After(interval.end) {
+					break
+				}
+				if occurrenceStart.Before(interval.start) {
+					continue
+				}
+				startKey := occurrenceStart.UTC().Format(time.RFC3339Nano)
+				if processedStarts[startKey] {
+					continue
+				}
+				processedStarts[startKey] = true
+				generated++
+				if generated > maxOccurrences || len(result) >= maxOccurrences {
+					return nil, fmt.Errorf("calendar recurrence expansion exceeds %d occurrences", maxOccurrences)
+				}
+				recurrenceID := occurrenceStart.UTC().Format(time.RFC3339)
+				overrideKey := event.ID + "\x00" + recurrenceID
+				if override, ok := overrides[overrideKey]; ok {
+					consumedOverrides[overrideKey] = true
+					if !strings.EqualFold(override.Status, "CANCELLED") && overlaps(override, rangeStart, rangeEnd) {
+						override.ID = stableOccurrenceID(event.ID, occurrenceStart)
+						clearRecurrenceSet(&override)
+						result = append(result, override)
+					}
+					continue
+				}
+				if ranged, originalStart, ok := applicableFutureOverride(futureOverrides[event.ID], occurrenceStart); ok {
+					if !strings.EqualFold(ranged.Status, "CANCELLED") {
+						occurrence := ranged
+						occurrence.ID = stableOccurrenceID(event.ID, occurrenceStart)
+						occurrence.RecurrenceID = recurrenceID
+						if event.Floating {
+							occurrence.RecurrenceWall = occurrenceStart.Format("20060102T150405")
+						}
+						occurrence.RecurrenceRange = ""
+						occurrence.Start = occurrenceStart.Add(ranged.Start.Sub(originalStart))
+						occurrence.End = recurringEnd(ranged, occurrence.Start)
+						clearRecurrenceSet(&occurrence)
+						if overlaps(occurrence, rangeStart, rangeEnd) {
+							result = append(result, occurrence)
+						}
+					}
+					continue
+				}
+				occurrence := event
+				occurrence.RecurrenceID = recurrenceID
+				if event.Floating {
+					occurrence.RecurrenceWall = occurrenceStart.Format("20060102T150405")
+				}
+				occurrence.ID = stableOccurrenceID(event.ID, occurrenceStart)
+				clearRecurrenceSet(&occurrence)
+				if periodEnd, ok := periodEnds[occurrenceStart.UTC().Format(time.RFC3339Nano)]; ok {
+					occurrence.End = occurrenceStart.Add(periodEnd.Sub(occurrenceStart))
+				} else {
+					occurrence.End = recurringEnd(event, occurrenceStart)
+				}
+				occurrence.Start = occurrenceStart
+				if overlaps(occurrence, rangeStart, rangeEnd) {
+					result = append(result, occurrence)
 				}
 			}
-			events = append(events, *current)
-			current = nil
+		}
+	}
+	// An override may move an occurrence whose original start is outside the
+	// requested expansion window into the window. Such an occurrence never
+	// appears in starts above, so include the unmatched detached event directly.
+	for _, override := range parsed {
+		if override.RecurrenceID == "" || strings.EqualFold(override.Status, "CANCELLED") || cancelledMasters[override.ID] {
 			continue
 		}
-		if current == nil {
+		key := override.ID + "\x00" + override.RecurrenceID
+		if consumedOverrides[key] || !overlaps(override, rangeStart, rangeEnd) {
 			continue
 		}
-		nameAndParams, value, ok := strings.Cut(line, ":")
+		originalStart, err := time.Parse(time.RFC3339, override.RecurrenceID)
+		if err != nil {
+			return nil, fmt.Errorf("parse recurrence override for event %s: %w", override.ID, err)
+		}
+		override.ID = stableOccurrenceID(override.ID, originalStart)
+		clearRecurrenceSet(&override)
+		result = append(result, override)
+		if len(result) > maxOccurrences {
+			return nil, fmt.Errorf("calendar recurrence expansion exceeds %d occurrences", maxOccurrences)
+		}
+	}
+	slices.SortFunc(result, func(a, b model.Event) int {
+		if compared := a.Start.Compare(b.Start); compared != 0 {
+			return compared
+		}
+		return strings.Compare(a.ID, b.ID)
+	})
+	return result, nil
+}
+
+type recurrenceInterval struct {
+	start time.Time
+	end   time.Time
+}
+
+func recurrenceCandidateIntervals(master model.Event, overrides []futureOverride, rangeStart, rangeEnd time.Time) []recurrenceInterval {
+	lookback := recurrenceLookback(master, rangeStart)
+	intervals := []recurrenceInterval{{start: lookback, end: rangeEnd}}
+	for _, period := range master.RecurrencePeriods {
+		if period.End.After(rangeStart) && period.Start.Before(rangeEnd) {
+			intervals = append(intervals, recurrenceInterval{start: period.Start, end: period.Start})
+		}
+	}
+	for index, override := range overrides {
+		delta := override.event.Start.Sub(override.original)
+		candidateStart := recurrenceLookback(override.event, rangeStart).Add(-delta)
+		shiftedEnd := rangeEnd.Add(-delta)
+		applicabilityStart := override.original
+		var applicabilityEnd time.Time
+		if index+1 < len(overrides) {
+			applicabilityEnd = overrides[index+1].original
+		}
+		if shiftedEnd.Before(applicabilityStart) || shiftedEnd.Equal(applicabilityStart) || (!applicabilityEnd.IsZero() && !candidateStart.Before(applicabilityEnd)) {
+			continue
+		}
+		if candidateStart.Before(applicabilityStart) {
+			candidateStart = applicabilityStart
+		}
+		if !applicabilityEnd.IsZero() && shiftedEnd.After(applicabilityEnd) {
+			shiftedEnd = applicabilityEnd
+		}
+		if candidateStart.Before(shiftedEnd) {
+			intervals = append(intervals, recurrenceInterval{start: candidateStart, end: shiftedEnd})
+		}
+	}
+	slices.SortFunc(intervals, func(a, b recurrenceInterval) int { return a.start.Compare(b.start) })
+	merged := intervals[:0]
+	for _, interval := range intervals {
+		if len(merged) == 0 || interval.start.After(merged[len(merged)-1].end) {
+			merged = append(merged, interval)
+			continue
+		}
+		if interval.end.After(merged[len(merged)-1].end) {
+			merged[len(merged)-1].end = interval.end
+		}
+	}
+	return merged
+}
+
+func recurrenceLookback(event model.Event, boundary time.Time) time.Time {
+	if event.AllDay {
+		return boundary.In(event.Start.Location()).AddDate(0, 0, -calendarDaySpan(event.Start, event.End))
+	}
+	if event.Duration != "" {
+		if duration, err := parseDuration(event.Duration); err == nil && duration.sign > 0 {
+			return durationLookback(boundary.In(event.Start.Location()), duration, event.Duration)
+		}
+	}
+	return boundary.Add(-event.End.Sub(event.Start))
+}
+
+func durationLookback(boundary time.Time, duration calendarDuration, value string) time.Time {
+	// Invert addDuration from the later repeated hour when the boundary sits in a
+	// DST fallback. AddDate reconstructs the earlier instance, so a naive reverse
+	// can place the cutoff after an occurrence that still overlaps the later hour.
+	target := laterRepeatedInstant(boundary)
+	lookback := target.Add(-duration.clock).AddDate(0, 0, -duration.days)
+	if slack := target.Sub(boundary); slack > 0 {
+		lookback = lookback.Add(-slack)
+	}
+	if forward, err := addDuration(lookback, value); err == nil && forward.Before(target) {
+		lookback = lookback.Add(forward.Sub(target))
+	}
+	return lookback
+}
+
+func laterRepeatedInstant(t time.Time) time.Time {
+	year, month, day := t.Date()
+	hour, min, sec := t.Clock()
+	earlier := time.Date(year, month, day, hour, min, sec, t.Nanosecond(), t.Location())
+	later := t
+	for _, delta := range []time.Duration{30 * time.Minute, time.Hour, 2 * time.Hour} {
+		probe := earlier.Add(delta)
+		probeYear, probeMonth, probeDay := probe.Date()
+		probeHour, probeMin, probeSec := probe.Clock()
+		if probeYear == year && probeMonth == month && probeDay == day && probeHour == hour && probeMin == min && probeSec == sec && probe.After(later) {
+			later = probe
+		}
+	}
+	return later
+}
+
+type futureOverride struct {
+	original time.Time
+	event    model.Event
+}
+
+func applicableFutureOverride(overrides []futureOverride, occurrenceStart time.Time) (model.Event, time.Time, bool) {
+	index := -1
+	for candidate := range overrides {
+		if overrides[candidate].original.After(occurrenceStart) {
+			break
+		}
+		index = candidate
+	}
+	if index < 0 {
+		return model.Event{}, time.Time{}, false
+	}
+	return overrides[index].event, overrides[index].original, true
+}
+
+func fastForwardRule(rule *rrule.RRule, lookback time.Time) (*rrule.RRule, bool, error) {
+	options := rule.OrigOptions
+	if !options.Dtstart.Before(lookback) {
+		return rule, false, nil
+	}
+	var unit time.Duration
+	switch options.Freq {
+	case rrule.SECONDLY:
+		unit = time.Second
+	case rrule.MINUTELY:
+		unit = time.Minute
+	case rrule.HOURLY:
+		unit = time.Hour
+	default:
+		return rule, false, nil
+	}
+	interval := options.Interval
+	if interval < 1 {
+		interval = 1
+	}
+	steps := int64(lookback.Sub(options.Dtstart)/unit) / int64(interval)
+	if steps > 1 {
+		steps--
+	}
+	if steps == 0 {
+		return rule, false, nil
+	}
+	if options.Count != 0 {
+		if hasRecurrenceSelectors(options) {
+			return fastForwardCountedRule(rule, lookback)
+		}
+		if steps >= int64(options.Count) {
+			return nil, true, nil
+		}
+		options.Count -= int(steps)
+	}
+	options.Dtstart = options.Dtstart.Add(time.Duration(steps*int64(interval)) * unit)
+	shifted, err := rrule.NewRRule(options)
+	return shifted, false, err
+}
+
+func fastForwardCountedRule(rule *rrule.RRule, lookback time.Time) (*rrule.RRule, bool, error) {
+	const maxFastForwardWork = 1000000
+	options := rule.OrigOptions
+	next := rule.Iterator()
+	skipped := 0
+	for {
+		occurrence, ok := next()
 		if !ok {
+			return nil, true, nil
+		}
+		if !occurrence.Before(lookback) {
+			options.Dtstart = occurrence
+			options.Count -= skipped
+			shifted, err := rrule.NewRRule(options)
+			return shifted, false, err
+		}
+		skipped++
+		if skipped > maxFastForwardWork {
+			return nil, false, fmt.Errorf("recurrence fast-forward exceeds %d occurrences", maxFastForwardWork)
+		}
+	}
+}
+
+func hasRecurrenceSelectors(options rrule.ROption) bool {
+	return len(options.Bysetpos)+len(options.Bymonth)+len(options.Bymonthday)+len(options.Byyearday)+len(options.Byweekno)+len(options.Byweekday)+len(options.Byhour)+len(options.Byminute)+len(options.Bysecond)+len(options.Byeaster) != 0
+}
+
+func clearRecurrenceSet(event *model.Event) {
+	event.RecurrenceRule = ""
+	event.RecurrenceDates = nil
+	event.RecurrencePeriods = nil
+	event.ExceptionDates = nil
+}
+
+func calendarDaySpan(start, end time.Time) int {
+	startDate := time.Date(start.Year(), start.Month(), start.Day(), 0, 0, 0, 0, time.UTC)
+	endDate := time.Date(end.Year(), end.Month(), end.Day(), 0, 0, 0, 0, time.UTC)
+	days := int(endDate.Sub(startDate) / (24 * time.Hour))
+	if days < 1 {
+		return 1
+	}
+	return days
+}
+
+func recurringEnd(event model.Event, occurrenceStart time.Time) time.Time {
+	if event.AllDay {
+		return occurrenceStart.AddDate(0, 0, calendarDaySpan(event.Start, event.End))
+	}
+	if event.Duration != "" {
+		if end, err := addDuration(occurrenceStart, event.Duration); err == nil {
+			return end
+		}
+	}
+	return occurrenceStart.Add(event.End.Sub(event.Start))
+}
+
+func typedEvent(component *ics.VEvent, locations map[string]*time.Location) (model.Event, error) {
+	event := model.Event{ID: component.Id(), SeriesID: component.Id()}
+	if event.ID == "" {
+		return model.Event{}, fmt.Errorf("VEVENT is missing UID")
+	}
+	propertyText := func(property ics.ComponentProperty) string {
+		if value := component.GetProperty(property); value != nil {
+			return ics.FromText(value.Value)
+		}
+		return ""
+	}
+	event.Title = propertyText(ics.ComponentPropertySummary)
+	event.Description = propertyText(ics.ComponentPropertyDescription)
+	event.Location = propertyText(ics.ComponentPropertyLocation)
+	event.Status = propertyText(ics.ComponentPropertyStatus)
+	startProperty := component.GetProperty(ics.ComponentPropertyDtStart)
+	if startProperty == nil {
+		return model.Event{}, fmt.Errorf("VEVENT %s is missing DTSTART", event.ID)
+	}
+	event.AllDay = startProperty.GetValueType() == ics.ValueDataTypeDate
+	event.Floating = isFloatingDateTime(startProperty)
+	var err error
+	if event.AllDay {
+		event.Start, err = time.Parse("20060102", startProperty.Value)
+	} else {
+		event.Start, err = componentTime(component, ics.ComponentPropertyDtStart, locations)
+	}
+	if err != nil {
+		return model.Event{}, fmt.Errorf("parse DTSTART for event %s: %w", event.ID, err)
+	}
+	if component.GetProperty(ics.ComponentPropertyDtEnd) != nil {
+		if event.AllDay {
+			event.End, err = time.Parse("20060102", component.GetProperty(ics.ComponentPropertyDtEnd).Value)
+		} else {
+			event.End, err = componentTime(component, ics.ComponentPropertyDtEnd, locations)
+		}
+		if err != nil {
+			return model.Event{}, fmt.Errorf("parse DTEND for event %s: %w", event.ID, err)
+		}
+	} else if duration := component.GetProperty(ics.ComponentPropertyDuration); duration != nil {
+		event.End, err = addDuration(event.Start, duration.Value)
+		if err != nil {
+			return model.Event{}, fmt.Errorf("parse DURATION for event %s: %w", event.ID, err)
+		}
+		event.Duration = duration.Value
+	} else if event.AllDay {
+		event.End = event.Start.Add(24 * time.Hour)
+	} else {
+		event.End = event.Start
+	}
+	if organizer := component.GetProperty(ics.ComponentPropertyOrganizer); organizer != nil {
+		event.Organizer = trimMailto(organizer.Value)
+	}
+	for _, attendee := range component.Attendees() {
+		event.Attendees = append(event.Attendees, trimMailto(attendee.Value))
+	}
+	if recurrence := component.GetProperty(ics.ComponentPropertyRrule); recurrence != nil {
+		event.RecurrenceRule = recurrence.Value
+	}
+	if event.RecurrenceDates, event.RecurrencePeriods, err = componentRecurrences(component, locations); err != nil {
+		return model.Event{}, fmt.Errorf("parse RDATE for event %s: %w", event.ID, err)
+	}
+	if event.ExceptionDates, err = componentTimes(component, ics.ComponentPropertyExdate, locations); err != nil {
+		return model.Event{}, fmt.Errorf("parse EXDATE for event %s: %w", event.ID, err)
+	}
+	if recurrenceID := component.GetProperty(ics.ComponentPropertyRecurrenceId); recurrenceID != nil {
+		parsed, err := propertyTime(recurrenceID, locations)
+		if err != nil {
+			return model.Event{}, fmt.Errorf("parse RECURRENCE-ID for event %s: %w", event.ID, err)
+		}
+		event.RecurrenceID = parsed.UTC().Format(time.RFC3339)
+		if recurrenceID.GetValueType() != ics.ValueDataTypeDate && len(recurrenceID.ICalParameters["TZID"]) == 0 && !strings.HasSuffix(recurrenceID.Value, "Z") {
+			event.RecurrenceWall = recurrenceID.Value
+		}
+		if values := recurrenceID.ICalParameters["RANGE"]; len(values) > 0 {
+			event.RecurrenceRange = strings.ToUpper(values[0])
+		}
+	}
+	if sequence := component.GetProperty(ics.ComponentPropertySequence); sequence != nil {
+		event.Sequence, _ = strconv.Atoi(sequence.Value)
+	}
+	return event, nil
+}
+
+func stableOccurrenceID(uid string, start time.Time) string {
+	return uid + "#" + start.UTC().Format("20060102T150405Z")
+}
+
+type calendarDuration struct {
+	sign  int
+	days  int
+	clock time.Duration
+}
+
+func parseDuration(value string) (calendarDuration, error) {
+	original := value
+	sign := 1
+	if strings.HasPrefix(value, "-") {
+		sign, value = -1, strings.TrimPrefix(value, "-")
+	} else {
+		value = strings.TrimPrefix(value, "+")
+	}
+	if !strings.HasPrefix(value, "P") {
+		return calendarDuration{}, fmt.Errorf("invalid RFC5545 duration %q", original)
+	}
+	value = strings.TrimPrefix(value, "P")
+	if value == "" {
+		return calendarDuration{}, fmt.Errorf("invalid RFC5545 duration %q", original)
+	}
+	parsed := calendarDuration{sign: sign}
+	var number int
+	haveNumber, haveUnit, inTime, timeUnit, usedWeeks := false, false, false, false, false
+	for _, char := range value {
+		if char >= '0' && char <= '9' {
+			haveNumber = true
+			number = number*10 + int(char-'0')
+			if number > 1_000_000 {
+				return calendarDuration{}, fmt.Errorf("RFC5545 duration %q is too large", original)
+			}
 			continue
 		}
-		name := strings.ToUpper(strings.Split(nameAndParams, ";")[0])
-		switch name {
-		case "UID":
-			current.ID = unescape(value)
-		case "SUMMARY":
-			current.Title = unescape(value)
-		case "DESCRIPTION":
-			current.Description = unescape(value)
-		case "LOCATION":
-			current.Location = unescape(value)
-		case "DTSTART":
-			parsed, allDay, err := parseTime(nameAndParams, value)
-			if err != nil {
-				return nil, fmt.Errorf("parse DTSTART: %w", err)
+		if char == 'T' {
+			if inTime || haveNumber || usedWeeks {
+				return calendarDuration{}, fmt.Errorf("invalid RFC5545 duration %q", original)
 			}
-			current.Start, current.AllDay = parsed, allDay
-		case "DTEND":
-			parsed, _, err := parseTime(nameAndParams, value)
-			if err != nil {
-				return nil, fmt.Errorf("parse DTEND: %w", err)
-			}
-			current.End = parsed
-		case "ATTENDEE":
-			current.Attendees = append(current.Attendees, trimMailto(value))
-		case "ORGANIZER":
-			current.Organizer = trimMailto(value)
+			inTime = true
+			continue
 		}
+		if !haveNumber {
+			return calendarDuration{}, fmt.Errorf("invalid RFC5545 duration %q", original)
+		}
+		switch char {
+		case 'W':
+			if inTime || haveUnit {
+				return calendarDuration{}, fmt.Errorf("invalid RFC5545 duration %q", original)
+			}
+			parsed.days = number * 7
+			usedWeeks = true
+		case 'D':
+			if inTime || usedWeeks {
+				return calendarDuration{}, fmt.Errorf("invalid RFC5545 duration %q", original)
+			}
+			parsed.days = number
+		case 'H':
+			if !inTime || usedWeeks {
+				return calendarDuration{}, fmt.Errorf("invalid RFC5545 duration %q", original)
+			}
+			parsed.clock += time.Duration(number) * time.Hour
+			timeUnit = true
+		case 'M':
+			if !inTime || usedWeeks {
+				return calendarDuration{}, fmt.Errorf("month durations are not valid for VEVENT")
+			}
+			parsed.clock += time.Duration(number) * time.Minute
+			timeUnit = true
+		case 'S':
+			if !inTime || usedWeeks {
+				return calendarDuration{}, fmt.Errorf("invalid RFC5545 duration %q", original)
+			}
+			parsed.clock += time.Duration(number) * time.Second
+			timeUnit = true
+		default:
+			return calendarDuration{}, fmt.Errorf("invalid duration unit %q", char)
+		}
+		haveNumber = false
+		haveUnit = true
+		number = 0
 	}
-	if current != nil {
-		return nil, fmt.Errorf("unterminated VEVENT")
+	if haveNumber || !haveUnit || (inTime && !timeUnit) {
+		return calendarDuration{}, fmt.Errorf("invalid RFC5545 duration %q", original)
 	}
-	return events, nil
+	return parsed, nil
+}
+
+func addDuration(start time.Time, value string) (time.Time, error) {
+	duration, err := parseDuration(value)
+	if err != nil {
+		return time.Time{}, err
+	}
+	end := start.AddDate(0, 0, duration.sign*duration.days)
+	if duration.sign > 0 && duration.days > 0 {
+		end = laterRepeatedInstant(end)
+	}
+	return end.Add(time.Duration(duration.sign) * duration.clock), nil
 }
 
 func Generate(event model.Event) (model.Event, string, error) {
@@ -149,15 +688,81 @@ func Generate(event model.Event) (model.Event, string, error) {
 	if event.Start.IsZero() || event.End.IsZero() || !event.End.After(event.Start) {
 		return model.Event{}, "", fmt.Errorf("event end must be after start")
 	}
+	if event.AllDay {
+		startDate := time.Date(event.Start.Year(), event.Start.Month(), event.Start.Day(), 0, 0, 0, 0, time.UTC)
+		endDate := time.Date(event.End.Year(), event.End.Month(), event.End.Day(), 0, 0, 0, 0, time.UTC)
+		if !endDate.After(startDate) {
+			return model.Event{}, "", fmt.Errorf("all-day event end date must be after start date")
+		}
+	}
+	if event.RecurrenceRange != "" {
+		if event.RecurrenceID == "" || !strings.EqualFold(event.RecurrenceRange, "THISANDFUTURE") {
+			return model.Event{}, "", fmt.Errorf("recurrence range must be THISANDFUTURE on a recurrence override")
+		}
+		event.RecurrenceRange = "THISANDFUTURE"
+	}
+	if event.Status != "" {
+		event.Status = strings.ToUpper(strings.TrimSpace(event.Status))
+		if strings.ContainsAny(event.Status, "\r\n") || (event.Status != "TENTATIVE" && event.Status != "CONFIRMED" && event.Status != "CANCELLED") {
+			return model.Event{}, "", fmt.Errorf("event status must be TENTATIVE, CONFIRMED, or CANCELLED")
+		}
+	}
+	if event.RecurrenceRule != "" {
+		event.RecurrenceRule = strings.TrimSpace(event.RecurrenceRule)
+		if strings.ContainsAny(event.RecurrenceRule, "\r\n") {
+			return model.Event{}, "", fmt.Errorf("recurrence rule must be a single content-line value")
+		}
+		if _, err := rrule.StrToRRule("RRULE:" + event.RecurrenceRule); err != nil {
+			return model.Event{}, "", fmt.Errorf("invalid recurrence rule: %w", err)
+		}
+	}
 	if event.ID == "" {
 		event.ID = "posthouse-" + rand.Text()
+	}
+	uid := event.SeriesID
+	if uid == "" {
+		uid = event.ID
 	}
 	startKey, startValue := formatTime("DTSTART", event.Start, event.AllDay)
 	endKey, endValue := formatTime("DTEND", event.End, event.AllDay)
 	lines := []string{
 		"BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//Posthouse//EN", "CALSCALE:GREGORIAN", "BEGIN:VEVENT",
-		"UID:" + escape(event.ID), "DTSTAMP:" + time.Now().UTC().Format("20060102T150405Z"), startKey + ":" + startValue, endKey + ":" + endValue,
+		"UID:" + escape(uid), "DTSTAMP:" + time.Now().UTC().Format("20060102T150405Z"), startKey + ":" + startValue, endKey + ":" + endValue,
 		"SUMMARY:" + escape(event.Title),
+	}
+	if event.RecurrenceID != "" {
+		if recurrenceTime, err := time.Parse(time.RFC3339, event.RecurrenceID); err == nil {
+			key, value := formatRecurrenceTime("RECURRENCE-ID", recurrenceTime, event.AllDay)
+			if event.RecurrenceRange != "" {
+				key += ";RANGE=" + strings.ToUpper(event.RecurrenceRange)
+			}
+			lines = append(lines, key+":"+value)
+		}
+	}
+	if event.RecurrenceRule != "" {
+		lines = append(lines, "RRULE:"+event.RecurrenceRule)
+	}
+	if len(event.RecurrenceDates) > 0 {
+		lines = append(lines, formatRecurrenceLines("RDATE", event.RecurrenceDates, event.AllDay)...)
+	}
+	if len(event.RecurrencePeriods) > 0 {
+		values := make([]string, len(event.RecurrencePeriods))
+		for index, period := range event.RecurrencePeriods {
+			if period.Start.IsZero() || period.End.IsZero() || !period.End.After(period.Start) {
+				return model.Event{}, "", fmt.Errorf("recurrence period %d end must be after start", index+1)
+			}
+			values[index] = period.Start.UTC().Format("20060102T150405Z") + "/" + period.End.UTC().Format("20060102T150405Z")
+		}
+		lines = append(lines, "RDATE;VALUE=PERIOD:"+strings.Join(values, ","))
+	}
+	if len(event.ExceptionDates) > 0 {
+		lines = append(lines, formatRecurrenceLines("EXDATE", event.ExceptionDates, event.AllDay)...)
+	}
+	if event.Sequence > 0 {
+		lines = append(lines, fmt.Sprintf("SEQUENCE:%d", event.Sequence))
+	}
+	if event.Status != "" {
+		lines = append(lines, "STATUS:"+strings.ToUpper(event.Status))
 	}
 	if event.Description != "" {
 		lines = append(lines, "DESCRIPTION:"+escape(event.Description))
@@ -205,8 +810,17 @@ func resolveFeedURL(connection model.Connection) (string, error) {
 	if connection.Calendar == nil {
 		return "", fmt.Errorf("connection %s has no calendar feed", connection.ID)
 	}
-	feedURL := connection.Calendar.URL
-	if connection.Calendar.URLSecretEnv != "" {
+	feedURL := connection.Calendar.ResolvedURL
+	if feedURL == "" {
+		feedURL = connection.Calendar.URL
+	}
+	if connection.Calendar.ResolvedURL == "" && (connection.Calendar.URLSecret.Env != "" || connection.Calendar.URLSecret.Keychain != "") {
+		var err error
+		feedURL, err = config.ResolveSecret(connection.Calendar.URLSecret)
+		if err != nil {
+			return "", err
+		}
+	} else if connection.Calendar.ResolvedURL == "" && connection.Calendar.URLSecretEnv != "" {
 		var err error
 		feedURL, err = config.Secret(connection.Calendar.URLSecretEnv)
 		if err != nil {
@@ -217,7 +831,9 @@ func resolveFeedURL(connection model.Connection) (string, error) {
 	if err != nil || parsed.Host == "" {
 		return "", fmt.Errorf("connection %s has an invalid calendar feed URL", connection.ID)
 	}
-	if parsed.Scheme != "https" && parsed.Hostname() != "localhost" && parsed.Hostname() != "127.0.0.1" {
+	host := parsed.Hostname()
+	ip := net.ParseIP(host)
+	if parsed.Scheme != "https" && host != "localhost" && (ip == nil || !ip.IsLoopback()) {
 		return "", fmt.Errorf("connection %s calendar feed URL must use HTTPS", connection.ID)
 	}
 	return feedURL, nil
@@ -251,6 +867,10 @@ func unfold(data string) []string {
 }
 
 func parseTime(key, value string) (time.Time, bool, error) {
+	return parseTimeWithLocations(key, value, nil)
+}
+
+func parseTimeWithLocations(key, value string, locations map[string]*time.Location) (time.Time, bool, error) {
 	if strings.Contains(strings.ToUpper(key), "VALUE=DATE") || len(value) == 8 {
 		parsed, err := time.Parse("20060102", value)
 		return parsed, true, err
@@ -263,9 +883,14 @@ func parseTime(key, value string) (time.Time, bool, error) {
 	for _, parameter := range strings.Split(key, ";")[1:] {
 		name, zone, ok := strings.Cut(parameter, "=")
 		if ok && strings.EqualFold(name, "TZID") {
-			loaded, err := time.LoadLocation(strings.Trim(zone, `"`))
-			if err != nil {
-				return time.Time{}, false, fmt.Errorf("load TZID %s: %w", zone, err)
+			zone = strings.Trim(zone, `"`)
+			loaded := locations[zone]
+			if loaded == nil {
+				var err error
+				loaded, err = time.LoadLocation(zone)
+				if err != nil {
+					return time.Time{}, false, fmt.Errorf("load TZID %s: %w", zone, err)
+				}
 			}
 			location = loaded
 		}
@@ -278,7 +903,51 @@ func formatTime(name string, value time.Time, allDay bool) (string, string) {
 	if allDay {
 		return name + ";VALUE=DATE", value.Format("20060102")
 	}
+	if timezone, ok := formatTZID(value.Location()); ok {
+		return name + ";TZID=" + timezone, value.Format("20060102T150405")
+	}
 	return name, value.UTC().Format("20060102T150405Z")
+}
+
+func formatRecurrenceTime(name string, value time.Time, allDay bool) (string, string) {
+	if allDay {
+		return name + ";VALUE=DATE", value.Format("20060102")
+	}
+	if timezone, ok := formatTZID(value.Location()); ok {
+		return name + ";TZID=" + timezone, value.Format("20060102T150405")
+	}
+	return name, value.UTC().Format("20060102T150405Z")
+}
+
+func formatRecurrenceLines(name string, values []time.Time, allDay bool) []string {
+	groups := make(map[string][]string)
+	keys := make([]string, 0, len(values))
+	for _, value := range values {
+		key, formatted := formatRecurrenceTime(name, value, allDay)
+		if _, exists := groups[key]; !exists {
+			keys = append(keys, key)
+		}
+		groups[key] = append(groups[key], formatted)
+	}
+	lines := make([]string, 0, len(keys))
+	for _, key := range keys {
+		lines = append(lines, key+":"+strings.Join(groups[key], ","))
+	}
+	return lines
+}
+
+func formatTZID(location *time.Location) (string, bool) {
+	if location == nil {
+		return "", false
+	}
+	name := location.String()
+	if name == "" || name == "UTC" || name == "Local" || strings.ContainsAny(name, "\r\n") {
+		return "", false
+	}
+	if strings.ContainsAny(name, `;:," `) {
+		name = `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(name) + `"`
+	}
+	return name, true
 }
 
 func fold(line string) string {
