@@ -354,6 +354,9 @@ func durationLookback(boundary time.Time, duration calendarDuration, value strin
 	// can place the cutoff after an occurrence that still overlaps the later hour.
 	target := laterRepeatedInstant(boundary)
 	lookback := target.Add(-duration.clock).AddDate(0, 0, -duration.days)
+	if slack := target.Sub(boundary); slack > 0 {
+		lookback = lookback.Add(-slack)
+	}
 	if forward, err := addDuration(lookback, value); err == nil && forward.Before(target) {
 		lookback = lookback.Add(forward.Sub(target))
 	}
@@ -671,7 +674,11 @@ func addDuration(start time.Time, value string) (time.Time, error) {
 	if err != nil {
 		return time.Time{}, err
 	}
-	return start.AddDate(0, 0, duration.sign*duration.days).Add(time.Duration(duration.sign) * duration.clock), nil
+	end := start.AddDate(0, 0, duration.sign*duration.days)
+	if duration.sign > 0 && duration.days > 0 {
+		end = laterRepeatedInstant(end)
+	}
+	return end.Add(time.Duration(duration.sign) * duration.clock), nil
 }
 
 func Generate(event model.Event) (model.Event, string, error) {

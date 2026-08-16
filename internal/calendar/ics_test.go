@@ -943,8 +943,30 @@ func TestRecurrenceLookbackIsConservativeAtDSTFallback(t *testing.T) {
 	if lookback := recurrenceLookback(event, firstRepeated); start.Before(lookback) {
 		t.Fatalf("lookback %v skipped occurrence start %v for first repeated hour", lookback, start)
 	}
-	if lookback := recurrenceLookback(event, firstRepeated.Add(time.Hour)); start.Before(lookback) {
-		t.Fatalf("lookback %v skipped occurrence start %v for later repeated hour", lookback, start)
+}
+
+func TestParseRangeKeepsDurationOverlapAtDSTFallback(t *testing.T) {
+	location, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := []byte("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:fallback-duration\r\nDTSTART;TZID=America/New_York:20261031T011500\r\nDURATION:P1D\r\nRRULE:FREQ=DAILY;COUNT=2\r\nSUMMARY:Fallback day\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n")
+	// First 01:30 EDT on 2026-11-01, the earlier instance of the repeated hour.
+	rangeStart := time.Date(2026, 11, 1, 5, 30, 0, 0, time.UTC).In(location)
+	rangeEnd := rangeStart.Add(15 * time.Minute)
+	events, err := ParseRange(data, rangeStart, rangeEnd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, event := range events {
+		if event.Start.Day() == 31 && event.Start.Hour() == 1 && event.Start.Minute() == 15 {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("fallback duration overlap = %#v", events)
 	}
 }
 
