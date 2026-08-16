@@ -2537,10 +2537,9 @@ func (s *Service) cachedEvents(connection model.Connection, scope any, collectio
 	filtered := events[:0]
 	query = strings.ToLower(strings.TrimSpace(query))
 	collectionIDs := selectedCollectionIDs(connection, collections)
+	oldest := s.now().Add(-s.eventTTL())
+	expiredApplicable := false
 	for _, event := range events {
-		if fromIndex && (event.CachedAt.IsZero() || event.CachedAt.Before(s.now().Add(-s.eventTTL()))) {
-			continue
-		}
 		if fromIndex && len(collectionIDs) > 0 && !slices.ContainsFunc(collectionIDs, func(value string) bool { return strings.EqualFold(value, event.CollectionID) }) {
 			continue
 		}
@@ -2550,6 +2549,10 @@ func (s *Service) cachedEvents(connection model.Connection, scope any, collectio
 		if query != "" && !strings.Contains(strings.ToLower(event.Title+" "+event.Description+" "+event.Location), query) {
 			continue
 		}
+		if fromIndex && (event.CachedAt.IsZero() || event.CachedAt.Before(oldest)) {
+			expiredApplicable = true
+			continue
+		}
 		if !fromIndex {
 			event.CachedAt = entry.CachedAt
 		}
@@ -2557,6 +2560,9 @@ func (s *Service) cachedEvents(connection model.Connection, scope any, collectio
 			event.Stale = true
 		}
 		filtered = append(filtered, event)
+	}
+	if fromIndex && len(filtered) == 0 && expiredApplicable {
+		return nil, false, nil
 	}
 	return filtered, true, partialErrors
 }

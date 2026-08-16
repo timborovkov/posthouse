@@ -931,6 +931,23 @@ func TestRecurringAllDayEndUsesCalendarDaysAcrossDST(t *testing.T) {
 	}
 }
 
+func TestRecurrenceLookbackIsConservativeAtDSTFallback(t *testing.T) {
+	location, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Date(2026, 10, 31, 1, 15, 0, 0, location)
+	event := model.Event{Start: start, Duration: "P1D"}
+	// 2026-11-01 01:30 EDT, the first instance of the repeated fallback hour.
+	firstRepeated := time.Date(2026, 11, 1, 5, 30, 0, 0, time.UTC).In(location)
+	if lookback := recurrenceLookback(event, firstRepeated); start.Before(lookback) {
+		t.Fatalf("lookback %v skipped occurrence start %v for first repeated hour", lookback, start)
+	}
+	if lookback := recurrenceLookback(event, firstRepeated.Add(time.Hour)); start.Before(lookback) {
+		t.Fatalf("lookback %v skipped occurrence start %v for later repeated hour", lookback, start)
+	}
+}
+
 func TestParseRangeLooksBackByCalendarDurationAcrossDST(t *testing.T) {
 	location, err := time.LoadLocation("America/New_York")
 	if err != nil {

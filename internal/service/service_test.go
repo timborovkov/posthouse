@@ -692,6 +692,44 @@ func TestEventIndexDoesNotRenewRetainedEventAge(t *testing.T) {
 	}
 }
 
+func TestExpiredBroadIndexEventsAreCacheMiss(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	connection := calendarConnection("calendar", "Calendar")
+	application := serviceWithConnections(t, connection)
+	cfg, err := application.store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Cache.EventPastDays = 1
+	cfg.Cache.EventFutureDays = 1
+	if err := application.store.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	base := time.Now().UTC().Truncate(time.Hour)
+	now := base
+	application.now = func() time.Time { return now }
+	oldStart, oldEnd := base, base.Add(2*time.Hour)
+	old := model.Event{ID: "old", Start: base.Add(time.Hour), End: base.Add(2 * time.Hour)}
+	if err := application.cacheEvents(connection.ID, "old", []model.Event{old}, oldStart, oldEnd, true, false); err != nil {
+		t.Fatal(err)
+	}
+	now = base.Add(12 * time.Hour)
+	freshStart, freshEnd := now, now.Add(2*time.Hour)
+	fresh := model.Event{ID: "fresh", Start: now.Add(time.Hour), End: now.Add(2 * time.Hour)}
+	if err := application.cacheEvents(connection.ID, "fresh", []model.Event{fresh}, freshStart, freshEnd, true, false); err != nil {
+		t.Fatal(err)
+	}
+	now = base.Add(25 * time.Hour)
+	events, ok, _ := application.cachedEvents(connection, "missing", nil, oldStart, oldEnd, "")
+	if ok || len(events) != 0 {
+		t.Fatalf("expired broad-index scope = %#v, %v", events, ok)
+	}
+	events, ok, _ = application.cachedEvents(connection, "missing", nil, freshStart, freshEnd, "")
+	if !ok || len(events) != 1 || events[0].ID != "fresh" {
+		t.Fatalf("fresh broad-index scope = %#v, %v", events, ok)
+	}
+}
+
 func TestGetEventRejectsAmbiguousID(t *testing.T) {
 	application := serviceWithConnections(t, calendarConnection("work", "Work"), calendarConnection("personal", "Personal"))
 	feed := "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n" + eventFixture("shared", "Shared", "20260814T090000Z") + "END:VCALENDAR\r\n"

@@ -342,12 +342,38 @@ func recurrenceLookback(event model.Event, boundary time.Time) time.Time {
 	}
 	if event.Duration != "" {
 		if duration, err := parseDuration(event.Duration); err == nil && duration.sign > 0 {
-			// addDuration applies calendar days before clock time, so invert those
-			// operations in reverse order in the event's timezone.
-			return boundary.In(event.Start.Location()).Add(-duration.clock).AddDate(0, 0, -duration.days)
+			return durationLookback(boundary.In(event.Start.Location()), duration, event.Duration)
 		}
 	}
 	return boundary.Add(-event.End.Sub(event.Start))
+}
+
+func durationLookback(boundary time.Time, duration calendarDuration, value string) time.Time {
+	// Invert addDuration from the later repeated hour when the boundary sits in a
+	// DST fallback. AddDate reconstructs the earlier instance, so a naive reverse
+	// can place the cutoff after an occurrence that still overlaps the later hour.
+	target := laterRepeatedInstant(boundary)
+	lookback := target.Add(-duration.clock).AddDate(0, 0, -duration.days)
+	if forward, err := addDuration(lookback, value); err == nil && forward.Before(target) {
+		lookback = lookback.Add(forward.Sub(target))
+	}
+	return lookback
+}
+
+func laterRepeatedInstant(t time.Time) time.Time {
+	year, month, day := t.Date()
+	hour, min, sec := t.Clock()
+	earlier := time.Date(year, month, day, hour, min, sec, t.Nanosecond(), t.Location())
+	later := t
+	for _, delta := range []time.Duration{30 * time.Minute, time.Hour, 2 * time.Hour} {
+		probe := earlier.Add(delta)
+		probeYear, probeMonth, probeDay := probe.Date()
+		probeHour, probeMin, probeSec := probe.Clock()
+		if probeYear == year && probeMonth == month && probeDay == day && probeHour == hour && probeMin == min && probeSec == sec && probe.After(later) {
+			later = probe
+		}
+	}
+	return later
 }
 
 type futureOverride struct {
