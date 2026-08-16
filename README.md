@@ -14,7 +14,7 @@ Posthouse is a local-first Go CLI, MCP server, and full-screen terminal app for 
 - Discover IMAP special-use folders, capabilities, CalDAV principals/homes, and multiple calendar collections.
 - Expand recurring ICS events with exclusions, overrides, cancellations, all-day and timezone handling.
 - Prepare and execute ETag-guarded CalDAV create, update, occurrence/series update, and delete operations.
-- Generate portable `METHOD:REQUEST` and `METHOD:CANCEL` invitations, then send them as a separate prepared mail operation.
+- Generate portable `METHOD:REQUEST` and `METHOD:CANCEL` invitations from the CLI or MCP, then send them as a separate prepared mail operation.
 - Use live-first reads with stale encrypted-cache fallback, `--offline`, `--refresh`, explicit sync, LRU limits, clear, and rekey.
 - Run the same contracts through CLI JSON, MCP stdio, authenticated Streamable HTTP, and a keyboard-complete Go-TUI.
 

@@ -46,6 +46,7 @@ type Service struct {
 	mailGetMessage         func(context.Context, model.Connection, string, uint32) (postmail.FetchedMessage, error)
 	mailGetAttachment      func(context.Context, model.Connection, string, uint32, string) (model.Attachment, []byte, uint32, error)
 	mailboxUIDValidity     func(context.Context, model.Connection, string) (uint32, error)
+	calendarListCalDAV     func(context.Context, model.Connection, []string, time.Time, time.Time, string) ([]model.Event, error)
 	stateMu                sync.Mutex
 	state                  *state.Store
 	stateErr               error
@@ -594,7 +595,11 @@ func (s *Service) ListEventsMode(ctx context.Context, selection model.Selector, 
 			if err == nil {
 				requestCacheID = calendarCacheID(connection)
 				if connection.Calendar.Kind == "caldav" {
-					events, err = s.calendar.ListCalDAV(ctx, connection, selection.Collections, start, end, query)
+					if s.calendarListCalDAV != nil {
+						events, err = s.calendarListCalDAV(ctx, connection, selection.Collections, start, end, query)
+					} else {
+						events, err = s.calendar.ListCalDAV(ctx, connection, selection.Collections, start, end, query)
+					}
 				} else {
 					events, err = s.calendar.List(ctx, connection, start, end, query)
 				}
@@ -603,7 +608,7 @@ func (s *Service) ListEventsMode(ctx context.Context, selection model.Selector, 
 		var partial *calendar.PartialError
 		if errors.As(err, &partial) {
 			pageErrors = append(pageErrors, partial.Errors...)
-			if partial.SuccessfulCollections > 0 {
+			if partial.SuccessfulCollections > 0 || len(events) > 0 {
 				partialResult = true
 				partialErrors = append(partialErrors, partial.Errors...)
 				successfulCollections = append(successfulCollections, partial.SuccessfulCollectionIDs...)
@@ -2459,20 +2464,28 @@ func (s *Service) cacheEventsReplacingWithID(connection model.Connection, cacheI
 		if err := ledger.Put(context.Background(), state.CacheEntry{Namespace: "event_scope_partial", Key: scopeKey, ConnectionID: connectionID, Kind: "sync_state", CachedAt: now, ExpiresAt: now.Add(s.eventTTL()), Value: data}); err != nil {
 			return err
 		}
-	} else if err := ledger.Mutate(context.Background(), state.CacheEntry{Namespace: "events", Key: scopeKey, ConnectionID: connectionID, Kind: "event", CachedAt: now, ExpiresAt: now.Add(s.eventTTL())}, func(current []byte, found bool) ([]byte, error) {
-		scoped := append([]model.Event(nil), events...)
-		if !replaceScoped && found {
-			var existing []model.Event
-			if json.Unmarshal(current, &existing) == nil {
-				if len(replaceCollections) > 0 {
-					existing = slices.DeleteFunc(existing, func(event model.Event) bool { return containsFolded(replaceCollections, event.CollectionID) })
+	}
+	writeScoped := len(partialErrors) == 0
+	if !writeScoped {
+		_, found, getErr := ledger.Get(context.Background(), "events", scopeKey, false)
+		writeScoped = getErr == nil && found
+	}
+	if writeScoped {
+		if err := ledger.Mutate(context.Background(), state.CacheEntry{Namespace: "events", Key: scopeKey, ConnectionID: connectionID, Kind: "event", CachedAt: now, ExpiresAt: now.Add(s.eventTTL())}, func(current []byte, found bool) ([]byte, error) {
+			scoped := append([]model.Event(nil), events...)
+			if !replaceScoped && found {
+				var existing []model.Event
+				if json.Unmarshal(current, &existing) == nil {
+					if len(replaceCollections) > 0 {
+						existing = slices.DeleteFunc(existing, func(event model.Event) bool { return containsFolded(replaceCollections, event.CollectionID) })
+					}
+					scoped = mergeEvents(existing, scoped)
 				}
-				scoped = mergeEvents(existing, scoped)
 			}
+			return json.Marshal(scoped)
+		}); err != nil {
+			return err
 		}
-		return json.Marshal(scoped)
-	}); err != nil {
-		return err
 	}
 	if err := ledger.Mutate(context.Background(), state.CacheEntry{Namespace: "event_index", Key: cacheID, ConnectionID: connectionID, Kind: "event", CachedAt: now, ExpiresAt: now.Add(s.eventTTL())}, func(current []byte, found bool) ([]byte, error) {
 		index := append([]model.Event(nil), events...)

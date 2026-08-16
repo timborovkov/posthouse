@@ -270,6 +270,8 @@ type eventICSInput struct {
 	AllDay      bool     `json:"all_day,omitempty"`
 	Attendees   []string `json:"attendees,omitempty"`
 	Organizer   string   `json:"organizer,omitempty"`
+	Method      string   `json:"method,omitempty" jsonschema:"empty for a portable VEVENT, request or cancel for METHOD invitations"`
+	Sequence    int      `json:"sequence,omitempty"`
 }
 
 type icsOutput struct {
@@ -384,7 +386,7 @@ func (s *Server) registerTools() {
 			return nil, prepared, err
 		})
 
-	mcp.AddTool(s.mcp, &mcp.Tool{Name: "events_list", Title: "List calendar events", Description: "List and search ICS feeds and CalDAV calendar collections across selected connections in an optional time range, up to 500 per page. Pass next_cursor back unchanged with identical filters.", Annotations: readOnly},
+	mcp.AddTool(s.mcp, &mcp.Tool{Name: "events_list", Title: "List calendar events", Description: "List and search ICS feeds and CalDAV calendar collections across selected connections in an optional time range, up to 500 per page. Live-first is the default with stale-cache fallback; mode=offline is cache-only and treats a miss as an error rather than an empty calendar; mode=refresh refuses stale fallback. Pass next_cursor back unchanged with identical filters.", Annotations: readOnly},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input eventListInput) (*mcp.CallToolResult, model.EventPage, error) {
 			start, err := optionalTime(input.Start)
 			if err != nil {
@@ -401,7 +403,7 @@ func (s *Server) registerTools() {
 			return nil, page, err
 		})
 
-	mcp.AddTool(s.mcp, &mcp.Tool{Name: "event_ics_generate", Title: "Generate ICS file", Description: "Generate a portable .ics calendar file without modifying any provider. Returns structured event data, the raw ICS string, and an embedded text/calendar resource.", Annotations: readOnly},
+	mcp.AddTool(s.mcp, &mcp.Tool{Name: "event_ics_generate", Title: "Generate ICS file", Description: "Generate a portable .ics calendar file without modifying any provider. Omit method for a VEVENT file; set method to request or cancel for METHOD invitations. Cancel requires id. Returns structured event data, the raw ICS string, and an embedded text/calendar resource.", Annotations: readOnly},
 		func(_ context.Context, _ *mcp.CallToolRequest, input eventICSInput) (*mcp.CallToolResult, icsOutput, error) {
 			start, err := time.Parse(time.RFC3339, input.Start)
 			if err != nil {
@@ -411,7 +413,22 @@ func (s *Server) registerTools() {
 			if err != nil {
 				return nil, icsOutput{}, fmt.Errorf("end: %w", err)
 			}
-			event, data, err := s.service.GenerateICS(model.Event{ID: input.ID, Title: input.Title, Description: input.Description, Location: input.Location, Start: start, End: end, AllDay: input.AllDay, Attendees: input.Attendees, Organizer: input.Organizer})
+			event := model.Event{ID: input.ID, Title: input.Title, Description: input.Description, Location: input.Location, Start: start, End: end, AllDay: input.AllDay, Attendees: input.Attendees, Organizer: input.Organizer, Sequence: input.Sequence}
+			method := strings.ToLower(strings.TrimSpace(input.Method))
+			var data string
+			switch method {
+			case "":
+				event, data, err = s.service.GenerateICS(event)
+			case "request":
+				event, data, err = calendar.GenerateInvitation(event, false)
+			case "cancel":
+				if strings.TrimSpace(input.ID) == "" {
+					return nil, icsOutput{}, fmt.Errorf("cancel invitations require id")
+				}
+				event, data, err = calendar.GenerateInvitation(event, true)
+			default:
+				return nil, icsOutput{}, fmt.Errorf("method must be request or cancel")
+			}
 			if err != nil {
 				return nil, icsOutput{}, err
 			}

@@ -730,6 +730,47 @@ func TestExpiredBroadIndexEventsAreCacheMiss(t *testing.T) {
 	}
 }
 
+func TestExpiredBroadIndexIsOfflineAndStaleMiss(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	connection := calendarConnection("calendar", "Calendar")
+	application := serviceWithConnections(t, connection)
+	cfg, err := application.store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Cache.EventPastDays = 1
+	cfg.Cache.EventFutureDays = 1
+	if err := application.store.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	base := time.Now().UTC().Truncate(time.Hour)
+	now := base
+	application.now = func() time.Time { return now }
+	oldStart, oldEnd := base, base.Add(2*time.Hour)
+	old := model.Event{ID: "old", Start: base.Add(time.Hour), End: base.Add(2 * time.Hour)}
+	if err := application.cacheEvents(connection.ID, "old", []model.Event{old}, oldStart, oldEnd, true, false); err != nil {
+		t.Fatal(err)
+	}
+	now = base.Add(12 * time.Hour)
+	freshStart, freshEnd := now, now.Add(2*time.Hour)
+	fresh := model.Event{ID: "fresh", Start: now.Add(time.Hour), End: now.Add(2 * time.Hour)}
+	if err := application.cacheEvents(connection.ID, "fresh", []model.Event{fresh}, freshStart, freshEnd, true, false); err != nil {
+		t.Fatal(err)
+	}
+	now = base.Add(25 * time.Hour)
+	offline, err := application.ListEventsMode(context.Background(), model.Selector{}, oldStart, oldEnd, "", 10, "", "offline")
+	if err == nil || len(offline.Events) != 0 {
+		t.Fatalf("offline expired index = %#v, %v", offline, err)
+	}
+	application.calendar = calendar.NewClient(&http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, fmt.Errorf("provider down")
+	})})
+	stale, err := application.ListEventsMode(context.Background(), model.Selector{}, oldStart, oldEnd, "", 10, "", "")
+	if err == nil || len(stale.Events) != 0 {
+		t.Fatalf("stale expired index = %#v, %v", stale, err)
+	}
+}
+
 func TestGetEventRejectsAmbiguousID(t *testing.T) {
 	application := serviceWithConnections(t, calendarConnection("work", "Work"), calendarConnection("personal", "Personal"))
 	feed := "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n" + eventFixture("shared", "Shared", "20260814T090000Z") + "END:VCALENDAR\r\n"
@@ -917,7 +958,10 @@ func TestPartialCalendarScopePreservesOfflineSourceStatus(t *testing.T) {
 		t.Fatal(err)
 	}
 	start, end := instant(8), instant(18)
-	old := []model.Event{{ConnectionID: "calendar", CollectionID: "personal", ID: "old", Start: instant(9), End: instant(10)}}
+	old := []model.Event{
+		{ConnectionID: "calendar", CollectionID: "personal", ID: "old", Start: instant(9), End: instant(10)},
+		{ConnectionID: "calendar", CollectionID: "team", ID: "deleted", Start: instant(9), End: instant(10)},
+	}
 	if err := application.cacheEvents("calendar", "scope", old, start, end, true, true); err != nil {
 		t.Fatal(err)
 	}
@@ -927,7 +971,7 @@ func TestPartialCalendarScopePreservesOfflineSourceStatus(t *testing.T) {
 		t.Fatal(err)
 	}
 	events, found, cachedErrors := application.cachedEvents(resolved, "scope", nil, start, end, "")
-	if !found || len(events) != 1 || !events[0].Stale || len(cachedErrors) != 1 || !cachedErrors[0].Stale || cachedErrors[0].CollectionID != "personal" {
+	if !found || len(events) != 2 || slices.ContainsFunc(events, func(event model.Event) bool { return event.ID == "deleted" }) || !slices.ContainsFunc(events, func(event model.Event) bool { return event.ID == "old" }) || !slices.ContainsFunc(events, func(event model.Event) bool { return event.ID == "fresh" }) || !events[0].Stale || len(cachedErrors) != 1 || !cachedErrors[0].Stale || cachedErrors[0].CollectionID != "personal" {
 		t.Fatalf("partial offline calendar = %#v, found=%v errors=%#v", events, found, cachedErrors)
 	}
 	if err := application.cacheEventsReplacingWithID(resolved, calendarCacheID(resolved), "scope", fresh, start, end, true, true, nil, nil); err != nil {
@@ -936,6 +980,20 @@ func TestPartialCalendarScopePreservesOfflineSourceStatus(t *testing.T) {
 	_, _, cachedErrors = application.cachedEvents(resolved, "scope", nil, start, end, "")
 	if len(cachedErrors) != 0 {
 		t.Fatalf("complete refresh retained partial status: %#v", cachedErrors)
+	}
+}
+
+func TestPartialCalDAVObjectFailuresKeepLiveEvents(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	connection := model.Connection{ID: "calendar", Name: "Calendar", Calendar: &model.CalendarConfig{Kind: "caldav", URL: "http://localhost:5232", Username: "calendar", Secret: model.SecretRef{Env: "CALENDAR_PASSWORD"}, Collections: []model.CalendarCollection{{ID: "team", Path: "/team/"}}}}
+	application := serviceWithConnections(t, connection)
+	live := model.Event{ConnectionID: "calendar", CollectionID: "team", ID: "live", Title: "Kept", Start: instant(9), End: instant(10)}
+	application.calendarListCalDAV = func(context.Context, model.Connection, []string, time.Time, time.Time, string) ([]model.Event, error) {
+		return []model.Event{live}, &calendar.PartialError{Errors: []model.SourceError{{ConnectionID: "calendar", CollectionID: "team", Code: "calendar_object_unavailable", Message: "object missing", Retryable: true}}}
+	}
+	page, err := application.ListEventsMode(context.Background(), model.Selector{}, instant(8), instant(18), "", 10, "", "refresh")
+	if err != nil || len(page.Events) != 1 || page.Events[0].ID != "live" || len(page.Errors) != 1 || page.Errors[0].Code != "calendar_object_unavailable" {
+		t.Fatalf("object-level partial page=%#v err=%v", page, err)
 	}
 }
 

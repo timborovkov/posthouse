@@ -141,6 +141,16 @@ func TestServerListsAndCallsReadOnlyConnectionTool(t *testing.T) {
 	if !ok || resource.Resource.MIMEType != "text/calendar" || !strings.Contains(resource.Resource.Text, "BEGIN:VCALENDAR") {
 		t.Fatalf("embedded resource is %#v", icsResult.Content[0])
 	}
+	cancelResult, err := clientSession.CallTool(context.Background(), &mcp.CallToolParams{Name: "event_ics_generate", Arguments: map[string]any{
+		"id": "planning-uid", "title": "Planning", "start": "2026-08-17T09:00:00Z", "end": "2026-08-17T10:00:00Z", "method": "cancel", "sequence": 3,
+	}})
+	if err != nil || cancelResult.IsError {
+		t.Fatalf("event_ics_generate cancel returned %#v, %v", cancelResult, err)
+	}
+	cancelResource, ok := cancelResult.Content[0].(*mcp.EmbeddedResource)
+	if !ok || !strings.Contains(cancelResource.Resource.Text, "METHOD:CANCEL") || !strings.Contains(cancelResource.Resource.Text, "SEQUENCE:3") {
+		t.Fatalf("cancel invitation is %#v", cancelResult.Content[0])
+	}
 }
 
 func TestAuthenticate(t *testing.T) {
