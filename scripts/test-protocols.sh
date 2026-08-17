@@ -25,6 +25,7 @@ case "$layer" in
     ;;
   e2e)
     GOCACHE=${GOCACHE:-/tmp/posthouse-go-cache} go test -count=1 -race -tags=e2e ./internal/e2e
+    GOCACHE=${GOCACHE:-/tmp/posthouse-go-cache} go test -count=1 -race -tags=e2e ./internal/tui
     ;;
   *)
     echo "unknown test layer: $layer" >&2

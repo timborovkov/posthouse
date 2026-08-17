@@ -3,10 +3,11 @@
 [![CI](https://github.com/timborovkov/posthouse/actions/workflows/ci.yml/badge.svg)](https://github.com/timborovkov/posthouse/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Local-first CLI, MCP server, and terminal app for multiple mail and calendar
-connections. Generic IMAP/SMTP, CalDAV, and read-only ICS feeds, plus native
-Gmail API and Microsoft Graph backends. Reads can span connections; every
-write is previewed, then executed on exactly one connection.
+Personal, local-first CLI, MCP server, REST API, and terminal app for multiple
+mail and calendar connections. Generic IMAP/SMTP, CalDAV, and read-only ICS
+feeds, plus native Gmail API and Microsoft Graph backends. Reads can span
+connections; every write is previewed, then executed on exactly one connection.
+It is not a hosted SaaS: you run it on your laptop or on a machine you control.
 
 Send text or HTML (`--html` / `--html-file`, MCP `html`, TUI body type). The
 TUI is optional: config, CLI, and MCP already cover every operation.
@@ -26,7 +27,11 @@ go install github.com/timborovkov/posthouse/cmd/posthouse@latest
 posthouse tui
 ```
 
-Full setup, CLI, MCP, and Docker: [INSTALLATION-AND-USAGE-GUIDE.md](./INSTALLATION-AND-USAGE-GUIDE.md).
+Non-technical path (first connection, agents, private server):
+[GETTING-STARTED.md](./GETTING-STARTED.md).
+
+Full CLI, MCP, REST, Docker, and Railway:
+[INSTALLATION-AND-USAGE-GUIDE.md](./INSTALLATION-AND-USAGE-GUIDE.md).
 
 ## Develop
 
