@@ -67,6 +67,7 @@
         <a href="#features">Features</a>
         <a href="#connect">Connect</a>
         <a href="#setup">Setup</a>
+        <a href="#setup-railway">Deploy</a>
         <a href="privacy.html">Privacy</a>
         <a href="https://github.com/timborovkov/posthouse">GitHub</a>
         <a href="https://timb.dev">timb.dev</a>
@@ -86,7 +87,7 @@
         <div class="cta-row">
           <a class="btn btn-primary" href="https://github.com/timborovkov/posthouse">View on GitHub</a>
           <a class="btn btn-ghost" href="#setup-cli">Install CLI</a>
-          <a class="btn btn-ghost" href="privacy.html">Privacy</a>
+          <a class="btn btn-ghost" href="#setup-railway">Deploy</a>
         </div>
         <img
           class="shot"
@@ -295,8 +296,9 @@
       <section class="wrap section" id="setup" aria-labelledby="setup-title">
         <h2 id="setup-title">Setup</h2>
         <p>
-          Install the CLI, add a connection, then use it yourself or hand it to
-          an agent. Fold a section open for the exact commands. Full prose:
+          Install the CLI on your laptop, or deploy a private HTTP server
+          (Railway, Docker, any VPS), then hand MCP/REST to an agent. Fold a
+          section open for the exact commands. Full prose:
           <a href="https://github.com/timborovkov/posthouse/blob/main/GETTING-STARTED.md"
             >Getting started</a
           >.
@@ -454,53 +456,151 @@ posthouse mcp stdio
           </div>
         </details>
 
-        <p class="setup-group">Deploy (still your process)</p>
+        <p class="setup-group" id="setup-deploy">Private server</p>
 
-        <details class="setup-block" id="setup-docker">
-          <summary>Docker Compose (VPS / homelab)</summary>
+        <details class="setup-block" id="setup-railway" open>
+          <summary>Deploy on Railway</summary>
           <div class="setup-body">
-            <pre><code>git clone https://github.com/timborovkov/posthouse
-cd posthouse
-posthouse setup --write-env .env
-# add provider app-password variables to .env
-docker compose up --build
-# listens on 127.0.0.1:8791 — put TLS in front for remote access</code></pre>
             <p>
-              On a private network or behind TLS you can also layer
-              <code>docker-compose.private.yml</code>. Set
-              <code>POSTHOUSE_TRUST_PROXY=1</code> when a reverse proxy supplies
-              <code>X-Real-IP</code> / <code>X-Forwarded-For</code>.
+              Your own Posthouse process on Railway — not a multi-tenant SaaS.
+              The repo’s <code>railway.json</code> builds the Dockerfile, starts
+              <code>posthouse serve --allow-container-listener</code>, health-checks
+              <code>/healthz</code>, and expects a volume at <code>/data</code>.
+            </p>
+            <ol>
+              <li>
+                In Railway, create a new project →
+                <strong>Deploy from GitHub</strong> → select
+                <a href="https://github.com/timborovkov/posthouse">timborovkov/posthouse</a>.
+              </li>
+              <li>
+                Attach a <strong>volume</strong> mounted at <code>/data</code>
+                (config + encrypted cache live there).
+              </li>
+              <li>
+                Generate secrets locally, then paste them into Railway Variables:
+              </li>
+            </ol>
+            <pre><code>posthouse setup
+# copy the printed POSTHOUSE_CACHE_KEY and POSTHOUSE_ACCESS_KEY</code></pre>
+            <p>Set at least:</p>
+            <pre><code>POSTHOUSE_CACHE_KEY=…          # required (headless)
+POSTHOUSE_ACCESS_KEY=…         # ≥16 chars; required for /mcp and /v1
+POSTHOUSE_TRUST_PROXY=1        # Railway edge is your TLS proxy
+# plus every provider secret your config references, e.g.:
+ACME_MAIL_PASSWORD=…
+ACME_CALENDAR_PASSWORD=…</code></pre>
+            <ol start="5">
+              <li>
+                Deploy. Railway injects <code>PORT</code>; Posthouse listens on
+                <code>0.0.0.0:$PORT</code>. Open a public HTTPS domain on the service.
+              </li>
+              <li>
+                Put a connection config on the volume (first boot via volume file
+                or local CLI against that store). Example shape:
+                <a href="https://github.com/timborovkov/posthouse/blob/main/examples/connection.json"
+                  >examples/connection.json</a
+                >
+                as <code>/data/config.json</code>.
+              </li>
+              <li>Point agents / HTTP clients at the public host:</li>
+            </ol>
+            <pre><code>MCP:  https://YOUR-RAILWAY-HOST/mcp
+REST: https://YOUR-RAILWAY-HOST/v1
+Header: Authorization: Bearer &lt;POSTHOUSE_ACCESS_KEY&gt;
+
+curl -sS -H "Authorization: Bearer $POSTHOUSE_ACCESS_KEY" \
+  https://YOUR-RAILWAY-HOST/healthz
+curl -sS -H "Authorization: Bearer $POSTHOUSE_ACCESS_KEY" \
+  https://YOUR-RAILWAY-HOST/v1</code></pre>
+            <p>
+              Keep bearer auth on. Railway’s HTTPS is the reverse proxy;
+              <code>POSTHOUSE_TRUST_PROXY=1</code> makes failed-login lockout key
+              off the real client. Do not disable the access key.
             </p>
           </div>
         </details>
 
-        <details class="setup-block" id="setup-railway">
-          <summary>Railway</summary>
+        <details class="setup-block" id="setup-docker">
+          <summary>Docker Compose (VPS / homelab)</summary>
           <div class="setup-body">
             <p>
-              Not a Posthouse cloud — your service from this repo.
-              <code>railway.json</code> builds the Dockerfile and health-checks
-              <code>/healthz</code>.
+              Same HTTP surface as Railway: Streamable MCP at <code>/mcp</code>,
+              REST at <code>/v1</code>, behind an access key. Default Compose binds
+              loopback only — put TLS in front for the internet.
             </p>
-            <ol>
-              <li>Create a service from the GitHub repository.</li>
-              <li>Attach a volume at <code>/data</code>.</li>
-              <li>
-                Set <code>POSTHOUSE_CACHE_KEY</code>,
-                <code>POSTHOUSE_ACCESS_KEY</code> (≥16 chars),
-                <code>POSTHOUSE_TRUST_PROXY=1</code>, and provider secret variables.
-              </li>
-              <li>
-                Point MCP/REST at
-                <code>https://your-url/mcp</code> and
-                <code>https://your-url/v1</code> with
-                <code>Authorization: Bearer &lt;POSTHOUSE_ACCESS_KEY&gt;</code>.
-              </li>
-            </ol>
+            <pre><code>git clone https://github.com/timborovkov/posthouse
+cd posthouse
+posthouse setup --write-env .env
+# edit .env: POSTHOUSE_CACHE_KEY, POSTHOUSE_ACCESS_KEY, provider passwords
+docker compose up --build -d
+# host: 127.0.0.1:8791 → container :8791
+curl -sS -H "Authorization: Bearer $POSTHOUSE_ACCESS_KEY" \
+  http://127.0.0.1:8791/healthz</code></pre>
+            <p>Expose remotely only behind TLS (Caddy, nginx, Traefik, …):</p>
+            <pre><code># reverse-proxy https://mail.example.com → 127.0.0.1:8791
+# then set on the container:
+POSTHOUSE_TRUST_PROXY=1
+
+# or, only on a private network / already-TLS host port:
+docker compose -f docker-compose.yml -f docker-compose.private.yml up --build -d</code></pre>
             <p>
-              Railway injects <code>PORT</code>; the start command already passes
-              <code>--allow-container-listener</code>. Keep bearer auth on.
+              Data persists in the <code>posthouse-data</code> volume at
+              <code>/data</code>. Full flags:
+              <a href="https://github.com/timborovkov/posthouse/blob/main/INSTALLATION-AND-USAGE-GUIDE.md"
+                >Installation guide</a
+              >.
             </p>
+          </div>
+        </details>
+
+        <details class="setup-block" id="setup-vps">
+          <summary>Any VPS (binary + reverse proxy)</summary>
+          <div class="setup-body">
+            <p>
+              Install the CLI on the server, write secrets, then run
+              <code>posthouse serve</code> behind HTTPS.
+            </p>
+            <pre><code># on the VPS
+curl -fsSL https://raw.githubusercontent.com/timborovkov/posthouse/main/scripts/install.sh | sh
+sudo mkdir -p /etc/posthouse /var/lib/posthouse
+posthouse setup --write-env /etc/posthouse/env
+sudo chmod 600 /etc/posthouse/env
+# put connections in /var/lib/posthouse/config.json
+set -a; . /etc/posthouse/env; set +a
+posthouse --config /var/lib/posthouse/config.json serve --address 127.0.0.1:8791</code></pre>
+            <p>
+              Terminate TLS on Caddy/nginx to <code>127.0.0.1:8791</code>, set
+              <code>POSTHOUSE_TRUST_PROXY=1</code>, and keep
+              <code>POSTHOUSE_ACCESS_KEY</code>. Hosts that inject
+              <code>PORT</code> (PaaS containers) need
+              <code>--allow-container-listener</code> or
+              <code>POSTHOUSE_ALLOW_CONTAINER_LISTENER=1</code> — same as Railway.
+            </p>
+            <pre><code>MCP:  https://mail.example.com/mcp
+REST: https://mail.example.com/v1
+Authorization: Bearer &lt;POSTHOUSE_ACCESS_KEY&gt;</code></pre>
+          </div>
+        </details>
+
+        <details class="setup-block" id="setup-remote-agents">
+          <summary>Point an agent at your server</summary>
+          <div class="setup-body">
+            <p>
+              After Railway, Docker, or a VPS is up, teach the agent the HTTP
+              skills and the URL — not local <code>stdio</code>.
+            </p>
+            <pre><code>posthouse skill install --agent claude rest mcp
+# (or cursor / codex / hermes)
+
+# MCP over HTTPS
+URL:     https://YOUR-HOST/mcp
+Header:  Authorization: Bearer &lt;POSTHOUSE_ACCESS_KEY&gt;
+
+# REST
+curl -sS -H "Authorization: Bearer $POSTHOUSE_ACCESS_KEY" \
+  https://YOUR-HOST/v1
+# Writes still prepare → preview → POST /v1/operations/execute</code></pre>
           </div>
         </details>
       </section>

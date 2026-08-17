@@ -81,7 +81,7 @@ Full CLI, MCP, REST, and deploy detail:
 [INSTALLATION-AND-USAGE-GUIDE.md](./INSTALLATION-AND-USAGE-GUIDE.md).
 
 Setup guides on the site: [website/#setup](./website/index.html#setup)
-(CLI install, Claude, Codex, Hermes, Cursor, Railway, Docker).
+(CLI, agents, [Railway](./website/index.html#setup-railway), Docker, VPS).
 
 ## Develop
 
