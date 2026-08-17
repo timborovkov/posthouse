@@ -269,11 +269,11 @@ func TestCanceledRefreshSnapshotCannotReplaceCurrentState(t *testing.T) {
 	app.refreshGeneration.Store(10)
 	app.loading.Set(true)
 	app.messages.Set([]model.Message{{Subject: "current"}})
-	app.applySnapshot(snapshot{generation: 9, messages: []model.Message{{Subject: "stale"}}})
+	app.applySnapshot(snapshot{generation: 9, scope: "mail", messages: []model.Message{{Subject: "stale"}}})
 	if got := app.messages.Get(); len(got) != 1 || got[0].Subject != "current" || !app.loading.Get() {
 		t.Fatalf("stale snapshot changed state: %#v loading=%v", got, app.loading.Get())
 	}
-	app.applySnapshot(snapshot{generation: 10, messages: []model.Message{{Subject: "fresh"}}})
+	app.applySnapshot(snapshot{generation: 10, scope: "mail", messages: []model.Message{{Subject: "fresh"}}})
 	if got := app.messages.Get(); len(got) != 1 || got[0].Subject != "fresh" || app.loading.Get() {
 		t.Fatalf("current snapshot state: %#v loading=%v", got, app.loading.Get())
 	}

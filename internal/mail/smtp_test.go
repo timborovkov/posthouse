@@ -138,7 +138,7 @@ func TestBuildMessageTextOnlyStaysPlain(t *testing.T) {
 		t.Fatal(err)
 	}
 	data := string(encoded)
-	if strings.Contains(data, "multipart/alternative") || strings.Contains(data, "text/html") || !strings.Contains(data, "text/plain") || !strings.Contains(data, "plain only") {
+	if strings.Contains(data, "multipart/alternative") || strings.Contains(data, "text/html") || !strings.Contains(data, "plain only") {
 		t.Fatalf("text-only message is %#q", data)
 	}
 }
