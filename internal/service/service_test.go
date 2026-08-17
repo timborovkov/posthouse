@@ -518,7 +518,7 @@ func TestReplyPreparationUsesOneProviderSnapshotBeforeMessageRead(t *testing.T) 
 		t.Setenv("PASSWORD", "rotated-during-read")
 		return postmail.FetchedMessage{Detail: model.MessageDetail{Message: model.Message{MessageID: "original", From: []model.Address{{Email: "sender@example.test"}}, Subject: "subject"}, Text: "original"}, UIDValidity: 7}, nil
 	}
-	prepared, err := application.PrepareReply(context.Background(), "work", "INBOX", 1, "reply")
+	prepared, err := application.PrepareReply(context.Background(), "work", "INBOX", 1, "reply", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -550,6 +550,27 @@ func TestReplyPreparationUsesOneProviderSnapshotBeforeMessageRead(t *testing.T) 
 	originalDigest, _ := digestOperationConnection(original, "mail.send")
 	if record.Precondition != originalDigest {
 		t.Fatalf("prepared precondition = %q, want original provider %q", record.Precondition, originalDigest)
+	}
+}
+
+func TestHTMLOnlyReplyLeavesTextEmptyForDerivedFallback(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	connection := mailConnection("work")
+	connection.Mail.SMTP = model.SMTPConfig{Address: "localhost:3025", Insecure: true}
+	application := serviceWithConnections(t, connection)
+	application.mailGetMessage = func(context.Context, model.Connection, string, uint32) (postmail.FetchedMessage, error) {
+		return postmail.FetchedMessage{Detail: model.MessageDetail{Message: model.Message{MessageID: "original", From: []model.Address{{Email: "sender@example.test"}}, Subject: "subject"}, Text: "original", HTML: "<p>original</p>"}, UIDValidity: 7}, nil
+	}
+	prepared, err := application.PrepareReply(context.Background(), "work", "INBOX", 1, "", "<p>Thanks</p>")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text, _ := prepared.Preview["text"].(string); text != "" {
+		t.Fatalf("html-only reply preview text = %q", text)
+	}
+	htmlBody, _ := prepared.Preview["html"].(string)
+	if !strings.Contains(htmlBody, "<p>Thanks</p>") {
+		t.Fatalf("html-only reply preview html = %q", htmlBody)
 	}
 }
 
@@ -2116,13 +2137,13 @@ func TestPrepareSendPreviewIncludesExactContentAndThreading(t *testing.T) {
 	connection.Mail.SMTP = model.SMTPConfig{Address: "localhost:3025", Insecure: true}
 	application := serviceWithConnections(t, connection)
 	prepared, err := application.PrepareSend(context.Background(), model.SendMessage{
-		ConnectionID: "work", To: []string{"person@example.test"}, Subject: "subject", Text: "complete body",
+		ConnectionID: "work", To: []string{"person@example.test"}, Subject: "subject", Text: "complete body", HTML: "<p>Hi</p>",
 		ReplyTo: "reply@example.test", InReplyTo: "parent-id", References: []string{"root-id", "parent-id"},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	for key, want := range map[string]any{"text": "complete body", "reply_to": "reply@example.test", "in_reply_to": "parent-id"} {
+	for key, want := range map[string]any{"text": "complete body", "html": "<p>Hi</p>", "reply_to": "reply@example.test", "in_reply_to": "parent-id"} {
 		if prepared.Preview[key] != want {
 			t.Fatalf("preview[%q]=%#v want %#v", key, prepared.Preview[key], want)
 		}
@@ -2137,12 +2158,12 @@ func TestPrepareDraftPreviewIncludesEverySerializedField(t *testing.T) {
 	connection := mailConnection("work")
 	connection.Mail.Folders.Drafts = "Drafts"
 	application := serviceWithConnections(t, connection)
-	message := model.SendMessage{To: []string{"to@example.test"}, CC: []string{"cc@example.test"}, BCC: []string{"bcc@example.test"}, Subject: "subject", Text: "body", ReplyTo: "reply@example.test", InReplyTo: "parent", References: []string{"one", "two"}}
+	message := model.SendMessage{To: []string{"to@example.test"}, CC: []string{"cc@example.test"}, BCC: []string{"bcc@example.test"}, Subject: "subject", Text: "body", HTML: "<p>body</p>", ReplyTo: "reply@example.test", InReplyTo: "parent", References: []string{"one", "two"}}
 	prepared, err := application.PrepareDraft(context.Background(), "work", "mail.draft.create", "Drafts", 0, message)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for key, want := range map[string]string{"subject": message.Subject, "text": message.Text, "reply_to": message.ReplyTo, "in_reply_to": message.InReplyTo} {
+	for key, want := range map[string]string{"subject": message.Subject, "text": message.Text, "html": message.HTML, "reply_to": message.ReplyTo, "in_reply_to": message.InReplyTo} {
 		if prepared.Preview[key] != want {
 			t.Fatalf("preview[%q]=%#v want %#v", key, prepared.Preview[key], want)
 		}

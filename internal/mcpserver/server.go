@@ -136,7 +136,8 @@ type sendMessageInput struct {
 	CC          []string             `json:"cc,omitempty"`
 	BCC         []string             `json:"bcc,omitempty"`
 	Subject     string               `json:"subject"`
-	Text        string               `json:"text"`
+	Text        string               `json:"text,omitempty"`
+	HTML        string               `json:"html,omitempty" jsonschema:"HTML body; sent as text/html or multipart/alternative with text"`
 	ReplyTo     string               `json:"reply_to,omitempty"`
 	InReplyTo   string               `json:"in_reply_to,omitempty"`
 	References  []string             `json:"references,omitempty"`
@@ -162,6 +163,7 @@ type messageReplyInput struct {
 	Folder     string `json:"folder,omitempty"`
 	UID        uint32 `json:"uid"`
 	Text       string `json:"text,omitempty"`
+	HTML       string `json:"html,omitempty" jsonschema:"HTML body to place before the quoted message"`
 }
 
 type messageForwardInput struct {
@@ -183,6 +185,7 @@ type mcpDraftMessage struct {
 	BCC         []string             `json:"bcc,omitempty"`
 	Subject     string               `json:"subject,omitempty"`
 	Text        string               `json:"text,omitempty"`
+	HTML        string               `json:"html,omitempty"`
 	ReplyTo     string               `json:"reply_to,omitempty"`
 	InReplyTo   string               `json:"in_reply_to,omitempty"`
 	References  []string             `json:"references,omitempty"`
@@ -190,7 +193,7 @@ type mcpDraftMessage struct {
 }
 
 func (input mcpDraftMessage) model() model.SendMessage {
-	return model.SendMessage{To: input.To, CC: input.CC, BCC: input.BCC, Subject: input.Subject, Text: input.Text, ReplyTo: input.ReplyTo, InReplyTo: input.InReplyTo, References: input.References, Attachments: mcpAttachments(input.Attachments)}
+	return model.SendMessage{To: input.To, CC: input.CC, BCC: input.BCC, Subject: input.Subject, Text: input.Text, HTML: input.HTML, ReplyTo: input.ReplyTo, InReplyTo: input.InReplyTo, References: input.References, Attachments: mcpAttachments(input.Attachments)}
 }
 
 type operationOutput struct {
@@ -311,21 +314,21 @@ func (s *Server) registerTools() {
 			return nil, page, err
 		})
 
-	mcp.AddTool(s.mcp, &mcp.Tool{Name: "messages_send_prepare", Title: "Prepare message send", Description: "Prepare a plain-text email with up to 25 MiB total attachment data through exactly one SMTP connection. Returns a ten-minute opaque token and exact side-effect preview; no message is sent until operation_execute is called.", Annotations: readOnly},
+	mcp.AddTool(s.mcp, &mcp.Tool{Name: "messages_send_prepare", Title: "Prepare message send", Description: "Prepare a plain-text or HTML email with up to 25 MiB total attachment data through exactly one SMTP connection. Text-only is text/plain. HTML-only is multipart/alternative with a derived text/plain fallback. Both bodies are multipart/alternative as supplied. Returns a ten-minute opaque token and exact side-effect preview; no message is sent until operation_execute is called.", Annotations: readOnly},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input sendMessageInput) (*mcp.CallToolResult, model.PreparedOperation, error) {
-			prepared, err := s.service.PrepareSend(ctx, model.SendMessage{ConnectionID: input.Connection, To: input.To, CC: input.CC, BCC: input.BCC, Subject: input.Subject, Text: input.Text, ReplyTo: input.ReplyTo, InReplyTo: input.InReplyTo, References: input.References, Attachments: mcpAttachments(input.Attachments)})
+			prepared, err := s.service.PrepareSend(ctx, model.SendMessage{ConnectionID: input.Connection, To: input.To, CC: input.CC, BCC: input.BCC, Subject: input.Subject, Text: input.Text, HTML: input.HTML, ReplyTo: input.ReplyTo, InReplyTo: input.InReplyTo, References: input.References, Attachments: mcpAttachments(input.Attachments)})
 			return nil, prepared, err
 		})
 
-	mcp.AddTool(s.mcp, &mcp.Tool{Name: "messages_reply_prepare", Title: "Prepare message reply", Description: "Fetch one provider message and prepare a threaded plain-text reply through the same exact connection, honoring Reply-To. No message is sent until operation_execute.", Annotations: readOnly},
+	mcp.AddTool(s.mcp, &mcp.Tool{Name: "messages_reply_prepare", Title: "Prepare message reply", Description: "Fetch one provider message and prepare a threaded plain-text or HTML reply through the same exact connection, honoring Reply-To. No message is sent until operation_execute.", Annotations: readOnly},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input messageReplyInput) (*mcp.CallToolResult, model.PreparedOperation, error) {
-			prepared, err := s.service.PrepareReply(ctx, input.Connection, input.Folder, input.UID, input.Text)
+			prepared, err := s.service.PrepareReply(ctx, input.Connection, input.Folder, input.UID, input.Text, input.HTML)
 			return nil, prepared, err
 		})
 
-	mcp.AddTool(s.mcp, &mcp.Tool{Name: "messages_forward_prepare", Title: "Prepare message forward", Description: "Fetch one provider message and prepare a plain-text forward through the same exact connection. No message is sent until operation_execute.", Annotations: readOnly},
+	mcp.AddTool(s.mcp, &mcp.Tool{Name: "messages_forward_prepare", Title: "Prepare message forward", Description: "Fetch one provider message and prepare a plain-text or HTML forward through the same exact connection. No message is sent until operation_execute.", Annotations: readOnly},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input messageForwardInput) (*mcp.CallToolResult, model.PreparedOperation, error) {
-			prepared, err := s.service.PrepareForward(ctx, input.Connection, input.Folder, input.UID, input.To, input.Text)
+			prepared, err := s.service.PrepareForward(ctx, input.Connection, input.Folder, input.UID, input.To, input.Text, input.HTML)
 			return nil, prepared, err
 		})
 
