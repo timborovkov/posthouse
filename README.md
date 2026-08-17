@@ -25,6 +25,15 @@ go install github.com/timborovkov/posthouse/cmd/posthouse@latest
 posthouse tui
 ```
 
+Teach a local agent the CLI skills (Codex, Claude, Cursor, Hermes):
+
+```sh
+posthouse skill install --agent codex connections mail calendar
+posthouse skill list
+```
+
+Add `--all` (or `mcp` / `rest`) when the agent should also use MCP or the HTTP API. Re-running install refreshes files and removes retired skill folders (`cli`, `email-inboxes`, `email-send`). `--agent codex` installs into `~/.agents/skills` and also refreshes `~/.codex/skills` for older Codex builds.
+
 Non-technical path (first connection, agents, private server):
 [GETTING-STARTED.md](./GETTING-STARTED.md).
 
