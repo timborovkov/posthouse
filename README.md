@@ -1,238 +1,55 @@
 # Posthouse
 
-Posthouse is a **personal**, local-first Go CLI, MCP server, REST API, and full-screen terminal app for operating multiple generic mail and calendar connections through one safe interface. It is not a hosted SaaS: you run it on your laptop or on a machine you control. v0.2 covers IMAP/SMTP, read-only ICS feeds, mutable CalDAV calendars, encrypted offline state, and prepare-before-execute writes.
+[![CI](https://github.com/timborovkov/posthouse/actions/workflows/ci.yml/badge.svg)](https://github.com/timborovkov/posthouse/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-> **Release target:** v0.2.0. OAuth, native provider APIs, HTML composition, permanent mail deletion, CalDAV scheduling/free-busy, and live-provider certification are intentionally outside this release.
+Personal, local-first CLI, MCP server, REST API, and terminal app for multiple
+mail and calendar connections. IMAP/SMTP, CalDAV, and read-only ICS feeds.
+Reads can span connections; every write is previewed, then executed on exactly
+one connection. It is not a hosted SaaS: you run it on your laptop or on a
+machine you control.
 
-New to Posthouse? Start with **[GETTING-STARTED.md](./GETTING-STARTED.md)** — install, first connection, agents, and private-cloud deploy without assuming you live in a terminal.
-
-## What works
-
-- Aggregate and paginate two or more mail, CalDAV, and ICS-feed connections with structured partial-source errors.
-- Fetch complete MIME messages, decoded text, sanitized HTML, threading headers, and bounded attachment chunks.
-- Offline full-text search uses the encrypted headers and bodies already cached; structured `offline_search_incomplete` source warnings identify queries that may omit uncached content.
-- Attachment reads return a cursorless final chunk when the cache cannot retain them; multi-chunk reads require enough `cache.max_bytes` capacity for the encrypted attachment snapshot.
-- Prepare and execute send, reply, forward, draft, mark, flag, move, archive, and trash operations without global IMAP expunge.
-- Discover IMAP special-use folders, capabilities, CalDAV principals/homes, and multiple calendar collections.
-- Expand recurring ICS events with exclusions, overrides, cancellations, all-day and timezone handling.
-- Prepare and execute ETag-guarded CalDAV create, update, occurrence/series update, and delete operations.
-- Generate portable `METHOD:REQUEST` and `METHOD:CANCEL` invitations from the CLI or MCP, then send them as a separate prepared mail operation.
-- Use live-first reads with stale encrypted-cache fallback, `--offline`, `--refresh`, explicit sync, LRU limits, clear, and rekey.
-- Run the same contracts through CLI JSON, MCP stdio, authenticated Streamable HTTP, REST `/v1`, and a keyboard-complete Go-TUI.
-
-Provider-side draft create/update requires IMAP `UIDPLUS` (or IMAP4rev2) so the appended draft always has an addressable UID; sent-copy APPEND remains compatible without it. Cleartext authenticated IMAP/SMTP and disabled CalDAV certificate verification are accepted only on loopback development endpoints; remote connections must use verified TLS or STARTTLS.
-
-## Safety model
-
-Reads may fan out across selectors. Writes never do: every provider mutation resolves to exactly one connection and returns a ten-minute opaque prepared token. The preview includes the connection, acting identity, recipients or calendar, changed fields, attachments, and side effects. Only `operation execute TOKEN` performs the write. Repeated execution returns the original result; changed or expired operations must be prepared again, and an uncertain SMTP result after `DATA` is never retried automatically.
-
-Provider secrets use either environment or OS-keychain references. The SQLite state is CGo-free; message/event content, bodies, attendees, drafts, operation payloads, and attachment chunks are encrypted with XChaCha20-Poly1305. Plain indexing data is limited to connection IDs, opaque provider IDs, timestamps, flags, sizes, and sync state.
+v0.2. No OAuth, no native Gmail/Microsoft APIs. See [TODO.md](./TODO.md).
 
 ## Install
 
-Posthouse pins Go 1.26.6. Guided install:
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/timborovkov/posthouse/main/scripts/install.sh | sh
-posthouse setup
-```
-
-Or:
-
 ```sh
 go install github.com/timborovkov/posthouse/cmd/posthouse@latest
-posthouse setup
-```
-
-From a clone:
-
-```sh
-make build
-./bin/posthouse setup
-./bin/posthouse help
-```
-
-`posthouse setup` prints `POSTHOUSE_CACHE_KEY` and `POSTHOUSE_ACCESS_KEY`. Pass `--write-env PATH` to save them in a mode-`0600` file. Headless and Docker deployments must set the cache key; desktop use can let Posthouse store a path-scoped key in the OS keychain instead.
-
-## Configure
-
-Copy [examples/connection.json](./examples/connection.json), set its endpoints, and add it:
-
-```sh
-export ACME_MAIL_PASSWORD='disposable or provider app password'
-export ACME_CALENDAR_PASSWORD='disposable or provider app password'
-posthouse connection add --file examples/connection.json
-posthouse connection discover acme
-posthouse connection doctor acme
-```
-
-`connection discover` persists discovered special-use folders and CalDAV collections automatically; its displayed connection is redacted for safe inspection and should not be passed to `connection update`. A read-only feed example is in [examples/feed-connection.json](./examples/feed-connection.json). Config v2 accepts exactly one secret source:
-
-```json
-{"secret":{"env":"ACME_MAIL_PASSWORD"}}
-```
-
-or:
-
-```json
-{"secret":{"keychain":"acme-mail"}}
-```
-
-Store a keychain value without putting it on a command line:
-
-```sh
-printf '%s' "$ACME_MAIL_PASSWORD" | posthouse connection secret set acme-mail --file -
-```
-
-Config v1 is migrated atomically to v2 on load and backed up beside the config as `*.v1.bak`. Headless MCP and Docker deployments must use environment references and set `POSTHOUSE_CACHE_KEY` to a base64- or hex-encoded 32-byte key. Desktop use creates a path-scoped cache master key in an isolated OS-credential namespace, so rekeying one configured SQLite database cannot strand another; existing shared desktop keys migrate to the path-scoped slot when opened. Plaintext fallback is never used. State opening verifies an encrypted key marker, so `/readyz` fails instead of accepting a wrong key.
-
-## CLI workflows
-
-Data commands emit JSON except `calendar ics`, which emits `text/calendar` unless `--output` is supplied.
-
-```sh
-# Live-first aggregate reads; add --offline or --refresh when needed
-posthouse mail list --category work --label primary --unread
-posthouse mail search --query renewal --page-size 25
-posthouse calendar list --collection team --start 2026-08-01T00:00:00Z
-
-# Fetch one body or attachment
-posthouse mail get --connection work --folder INBOX --uid 42
-posthouse mail attachment --connection work --folder INBOX --uid 42 --id 'ATTACHMENT_ID_FROM_MAIL_GET' --output report.pdf
-
-# Prepare, inspect, and execute a send
-posthouse mail send --connection work --to teammate@example.test --subject Status --body-file status.txt --attachment report.pdf
-posthouse operation show 'TOKEN_FROM_PREVIOUS_COMMAND'
-posthouse operation execute 'TOKEN_FROM_PREVIOUS_COMMAND'
-
-# Other mail writes use the same flow
-posthouse mail reply --connection work --folder INBOX --uid 42 --body 'Thanks'
-posthouse mail mark --connection work --folder INBOX --uid 42 --read --flagged
-posthouse mail archive --connection work --folder INBOX --uid 42
-
-# Prepare mutable CalDAV operations from event JSON
-posthouse calendar create --connection work --file event.json
-posthouse calendar update --connection work --file event-with-current-etag.json
-posthouse calendar delete --connection work --collection team --href /work/team/item.ics --etag '"etag"'
-
-# Portable ICS generation and explicit cache operations
-posthouse calendar ics --title Planning --start 2026-08-17T09:00:00+03:00 --end 2026-08-17T10:00:00+03:00 --output planning.ics
-posthouse calendar ics --method cancel --id planning-uid --sequence 3 --title Planning --start 2026-08-17T09:00:00+03:00 --end 2026-08-17T10:00:00+03:00 --output planning-cancel.ics
-posthouse sync
-posthouse cache status
-posthouse cache rekey --key-env POSTHOUSE_CACHE_KEY_NEW
-
-# Full-screen keyboard interface
 posthouse tui
 ```
 
-Outbound attachment payloads are limited to 25 MiB total per prepared mail or draft operation. Path-backed attachments must be regular files; directories, devices, pipes, and files that grow past the limit are rejected before provider I/O.
+Non-technical path (first connection, agents, private server):
+[GETTING-STARTED.md](./GETTING-STARTED.md).
 
-For a headless rekey, the command cannot modify its parent shell or deployment secret. Keep both values available until the command succeeds, then replace the active key before starting any other Posthouse process:
+Full CLI, MCP, REST, Docker, and Railway:
+[INSTALLATION-AND-USAGE-GUIDE.md](./INSTALLATION-AND-USAGE-GUIDE.md).
 
-```sh
-export POSTHOUSE_CACHE_KEY_NEW='new-base64-or-hex-encoded-32-byte-key'
-posthouse cache rekey --key-env POSTHOUSE_CACHE_KEY_NEW
-export POSTHOUSE_CACHE_KEY="$POSTHOUSE_CACHE_KEY_NEW"
-unset POSTHOUSE_CACHE_KEY_NEW
-```
+## Develop
 
-The command returns a `required_action` field in headless mode. An already-running process that still holds the old key is prevented from writing and must be restarted. Desktop keychain rekeys keep an encrypted recovery record in the same SQLite transaction; if keychain activation is interrupted after commit, the next startup recovers and promotes the committed key automatically.
-
-Selectors intersect exact connection IDs/names, category, labels, capability, and calendar collections. List cursors are opaque, query-bound, and source-snapshot-bound: new or recovered sources join only a fresh traversal. IMAP cursors also bind UIDVALIDITY and the initial UID boundary.
-
-## Go-TUI
-
-The TUI has five responsive views: connection onboarding/doctor, unified inbox, message detail/attachments, unified agenda/event editor, and operations/cache. It uses `Tab`/`Shift+Tab` for areas, arrows or `j/k` to move, `/` search, `r` refresh, `c` compose/create, `a` actions, `Enter` open/confirm, `Esc` back/cancel, `?` help, and `q` quit. Mail and event editors prepare writes; a separate exact preview modal is required before execution.
-
-The `.gsx` source and generated `_gsx.go` are both committed. Run `make generate`; CI runs `make generate-check` and fails on a diff.
-
-## MCP and REST
-
-Stdio client configuration (local process; no access key):
-
-```json
-{
-  "mcpServers": {
-    "posthouse": {
-      "command": "/absolute/path/to/posthouse",
-      "args": ["mcp", "stdio"],
-      "env": {
-        "POSTHOUSE_CACHE_KEY": "...",
-        "ACME_MAIL_PASSWORD": "...",
-        "ACME_CALENDAR_PASSWORD": "..."
-      }
-    }
-  }
-}
-```
-
-HTTP serves Streamable MCP at `/mcp` and REST at `/v1` from one process:
+Go 1.26.6. Clone, then:
 
 ```sh
-export POSTHOUSE_ACCESS_KEY='a-long-random-token'
-export POSTHOUSE_CACHE_KEY='a-base64-or-hex-encoded-32-byte-key'
-posthouse serve --address 127.0.0.1:8791
+go mod download
+make validate
 ```
-
-`posthouse mcp http` is the same listener. `POSTHOUSE_ACCESS_KEY` is mandatory for every HTTP listener, including loopback (`POSTHOUSE_MCP_TOKEN` remains accepted as an alias; if both are set they must match). Stdio is the only transport with implicit local-process authentication. The access key must be at least 16 characters. Failed bearer attempts are counted per client address; eight failures in fifteen minutes return `429` with `Retry-After` for fifteen minutes. Set `POSTHOUSE_TRUST_PROXY=1` only when a TLS reverse proxy supplies `X-Forwarded-For`. Request bodies are capped at 36 MiB.
-
-`GET /v1` lists REST routes. `/healthz` reports process liveness; `/readyz` checks configuration, cache migration/key availability, and initialized internal services. Provider connectivity belongs to `connection_doctor` and `sync`, not readiness. The direct server is restricted to loopback because it serves HTTP; expose it remotely only through a TLS-terminating reverse proxy forwarding to the loopback listener, and retain bearer-token authentication. `--allow-container-listener` exists only for a container whose published port is externally constrained to loopback or protected by TLS. Hosted platforms that inject `PORT` (Railway) listen on `0.0.0.0:$PORT` automatically.
-
-The typed MCP tools and REST paths include connection listing/doctor; message search/body/attachment reads; send, reply, forward, draft, and message-action preparation; event listing/ICS/CRUD preparation; operation show/execute; sync; and cache status. Tool errors are for invalid requests or total failure; successful multi-source reads carry structured partial errors and stale/cache timestamps in their result.
-
-### Agent skills
 
 ```sh
-posthouse skill list
-posthouse skill install --agent claude --all
-posthouse skill install --dir ./.agents/skills cli rest
+make build             # ./bin/posthouse
+make generate          # regenerate TUI from internal/tui/app.gsx
+make test              # unit tests, no Docker
+make test-integration  # GreenMail + Radicale
+make test-e2e          # CLI and MCP against local servers
+make validate-all      # full release gate
 ```
 
-`--agent` accepts `claude`, `cursor`, `codex`, or `hermes`. Skills teach the CLI, REST, and MCP contracts, including prepare-before-execute. Marketplace plugins are later; these files work today.
+No live provider accounts needed. Generated `_gsx.go` is committed; CI fails
+if `make generate` would change it.
 
-## Docker and private-cloud deploy
+## Contributing
 
-Production-style local container (MCP + REST on loopback):
+Open an [issue](https://github.com/timborovkov/posthouse/issues/new) if
+something is missing or broken. PRs welcome — see
+[CONTRIBUTING.md](./CONTRIBUTING.md). Do not paste secrets or message/event
+content. Security: [SECURITY.md](./SECURITY.md).
 
-```sh
-cp .env.example .env
-# Replace every placeholder, especially POSTHOUSE_CACHE_KEY and POSTHOUSE_ACCESS_KEY.
-# Or: posthouse setup --write-env .env
-docker compose up --build
-```
-
-The service binds `127.0.0.1:8791`, mounts the Docker-managed `posthouse-data` volume at `/data`, and uses `/data/config.json` plus `/data/posthouse.db` by default. The named volume remains writable by the image's non-root Posthouse user; inspect or back it up with standard Docker volume commands rather than replacing it with an unowned host bind mount.
-
-To publish on all host interfaces — only on a private network or behind TLS — add [docker-compose.private.yml](./docker-compose.private.yml):
-
-```sh
-docker compose -f docker-compose.yml -f docker-compose.private.yml up --build
-```
-
-[railway.json](./railway.json) builds the Dockerfile, health-checks `/healthz`, and expects a volume at `/data`. Set `POSTHOUSE_CACHE_KEY`, `POSTHOUSE_ACCESS_KEY`, and provider secrets; Railway's `PORT` is picked up automatically. This is still a personal process, not a Posthouse-hosted service.
-
-Development needs no real provider accounts. [docker-compose.test.yml](./docker-compose.test.yml) pins GreenMail `2.1.11` and Radicale `3.7.3`, binds them only to loopback, seeds isolated `work` and `personal` principals, and discards state after each suite:
-
-```sh
-make test              # race-enabled unit tests, no Docker
-make test-container    # production image plus Compose topology
-make test-integration  # SMTP/IMAP and CalDAV protocol suites
-make test-e2e          # built-binary CLI and MCP workflows
-make validate          # Docker-free local gate
-make validate-all      # complete release gate
-```
-
-The Docker suites exercise two mail identities, concurrent cross-process execution, SMTP→IMAP attachments, reply/forward/drafts/folder actions/sent copies, real MCP stdio and authenticated HTTP writes, and real CalDAV discovery, REPORT, PUT, DELETE, ETags, conflicts, invitations, recurrence, and multiple collections. TUI state tests cover navigation, cancellation, attachment access, and the exact prepared-write preview. HTTP fixtures cover feeds, malformed data, redirects, limits, timeouts, and cancellation. Every run tears down containers and volumes first and again on exit.
-
-## Cache policy and boundaries
-
-- Defaults: 90 days of message metadata, 30 days of bodies, events from 90 days past through 365 days future, and attachments only after explicit access.
-- Default encrypted-state limit: 2 GiB, accounting for both cache data and prepared-operation ciphertext, with LRU attachment eviction before message bodies. Old expired operation records are purged during preparation.
-- Live-first is the default; stale-cache fallback is explicit in result metadata. `--offline` never contacts providers and `--refresh` refuses stale fallback.
-- Cache namespaces are bound to canonical provider configuration plus non-reversible digests of resolved endpoint and credential secrets; unresolved identities cannot read or populate provider cache.
-- Private content never belongs in logs, connection listings, fixtures, or error bodies. Configuration files are atomically written with mode `0600`.
-- No cache is a provider backup. Clearing it removes local cached content, not provider data or the separate prepared-operation ledger.
-- Generic protocol compatibility is covered by deterministic local servers; real Fastmail/iCloud or other provider checks may be added later but do not gate v0.2.
-
-See [GETTING-STARTED.md](./GETTING-STARTED.md) for the non-technical install path, [CONTEXT.md](./CONTEXT.md) for domain language, [design.md](./design.md) for boundaries, [CONTRIBUTING.md](./CONTRIBUTING.md) for gates, and [TODO.md](./TODO.md) for deliberately deferred work.
+MIT. Domain language: [CONTEXT.md](./CONTEXT.md).

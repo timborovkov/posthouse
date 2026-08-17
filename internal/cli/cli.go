@@ -741,7 +741,7 @@ Usage:
 Posthouse is a personal CLI, TUI, MCP server, and REST API — not a hosted SaaS.
 All provider writes return a ten-minute prepared token; only "operation execute" performs the side effect.
 Data commands write JSON except "calendar ics", which writes text/calendar to stdout by default. Run "posthouse <command> -h" for flags.
-See GETTING-STARTED.md for install, first connection, agents, and private-cloud deploy.`)
+See GETTING-STARTED.md for a first-run path, or INSTALLATION-AND-USAGE-GUIDE.md for CLI, MCP, REST, and Docker.`)
 }
 
 type selectorFlags struct {

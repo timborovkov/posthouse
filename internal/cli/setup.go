@@ -75,7 +75,7 @@ func setupNextSteps() []string {
 		"Give an agent local tools: posthouse mcp stdio   and/or   posthouse skill install --agent claude --all",
 		"Or serve MCP + REST on this machine: export the keys above, then posthouse serve",
 		"Private-cloud Docker: copy .env.example to .env, paste the keys, docker compose up --build",
-		"Read GETTING-STARTED.md for the non-technical path",
+		"Read GETTING-STARTED.md, then INSTALLATION-AND-USAGE-GUIDE.md for CLI, MCP, REST, and Docker",
 	}
 }
 
