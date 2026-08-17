@@ -10,9 +10,11 @@ connection.
 
 Probe IMAP/SMTP/CalDAV from an email address (`connection probe` / TUI onboard),
 triage via MCP (`messages_triage`), and keep secrets in env, keychain, or a
-command argv. Send text or HTML (`--html` / `--html-file`, MCP `html`, TUI body
-type). The TUI is optional: config, CLI, and MCP already cover every operation.
-Recipients are raw addresses; there is no contacts registry.
+command argv. Default policy allows every write class; deny send/move/trash/etc.
+via `policy deny` or `POSTHOUSE_POLICY_DENY`, and expose a readonly MCP profile.
+Send text or HTML (`--html` / `--html-file`, MCP `html`, TUI body type). The TUI
+is optional: config, CLI, and MCP already cover every operation. Recipients are
+raw addresses; there is no contacts registry.
 
 Built by [Tim Borovkov](https://timb.dev). Free to use under the
 [MIT License](LICENSE).

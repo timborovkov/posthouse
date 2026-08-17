@@ -6,6 +6,7 @@ type Config struct {
 	Version     int          `json:"version"`
 	Connections []Connection `json:"connections"`
 	Cache       CacheConfig  `json:"cache,omitempty"`
+	Policy      PolicyConfig `json:"policy,omitempty"`
 }
 
 type CacheConfig struct {
@@ -15,6 +16,15 @@ type CacheConfig struct {
 	MessageBodyDays     int    `json:"message_body_days,omitempty"`
 	EventPastDays       int    `json:"event_past_days,omitempty"`
 	EventFutureDays     int    `json:"event_future_days,omitempty"`
+}
+
+// PolicyConfig limits provider writes. Default (empty) allows everything.
+type PolicyConfig struct {
+	// Deny lists operation classes such as mail.send, mail.move, mail.trash,
+	// mail.junk, mail.mark, mail.draft, or calendar.write.
+	Deny []string `json:"deny,omitempty"`
+	// MCPProfile is the default MCP tool surface: empty/"full" or "readonly".
+	MCPProfile string `json:"mcp_profile,omitempty"`
 }
 
 type Connection struct {

@@ -18,6 +18,7 @@ import (
 
 	"github.com/timborovkov/posthouse/internal/filelock"
 	"github.com/timborovkov/posthouse/internal/model"
+	"github.com/timborovkov/posthouse/internal/policy"
 	"github.com/zalando/go-keyring"
 )
 
@@ -175,6 +176,11 @@ func Normalize(cfg model.Config) (model.Config, error) {
 			cfg.Connections[index].Calendar.Collections = nil
 		}
 	}
+	normalizedPolicy, err := policy.Normalize(cfg.Policy)
+	if err != nil {
+		return model.Config{}, err
+	}
+	cfg.Policy = normalizedPolicy
 	if err := Validate(cfg); err != nil {
 		return model.Config{}, err
 	}

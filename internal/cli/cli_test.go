@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,13 +14,48 @@ import (
 	"github.com/timborovkov/posthouse/internal/service"
 )
 
+func TestPolicyCommandsPersistDenyAndProfile(t *testing.T) {
+	application := testCLI(t, new(bytes.Buffer))
+	if err := application.Run(context.Background(), []string{"policy", "deny", "mail.send", "mail.trash"}); err != nil {
+		t.Fatal(err)
+	}
+	output := application.stdout.(*bytes.Buffer).String()
+	if !strings.Contains(output, `"mail.send"`) || !strings.Contains(output, `"mail.trash"`) {
+		t.Fatalf("deny output = %s", output)
+	}
+	application.stdout.(*bytes.Buffer).Reset()
+	if err := application.Run(context.Background(), []string{"policy", "mcp-profile", "readonly"}); err != nil {
+		t.Fatal(err)
+	}
+	if output := application.stdout.(*bytes.Buffer).String(); !strings.Contains(output, `"readonly"`) {
+		t.Fatalf("mcp-profile output = %s", output)
+	}
+	application.stdout.(*bytes.Buffer).Reset()
+	if err := application.Run(context.Background(), []string{"policy", "allow", "mail.send"}); err != nil {
+		t.Fatal(err)
+	}
+	var status struct {
+		Deny       []string `json:"deny"`
+		MCPProfile string   `json:"mcp_profile"`
+	}
+	if err := json.Unmarshal(application.stdout.(*bytes.Buffer).Bytes(), &status); err != nil {
+		t.Fatal(err)
+	}
+	if status.MCPProfile != "readonly" || len(status.Deny) != 1 || status.Deny[0] != "mail.trash" {
+		t.Fatalf("allow status = %#v", status)
+	}
+	if err := application.Run(context.Background(), []string{"policy", "deny", "not.a.class"}); err == nil || !strings.Contains(err.Error(), "unknown policy class") {
+		t.Fatalf("unknown class error = %v", err)
+	}
+}
+
 func TestHelpCreditsAuthorAndLicense(t *testing.T) {
 	application := testCLI(t, new(bytes.Buffer))
 	if err := application.Run(context.Background(), []string{"help"}); err != nil {
 		t.Fatalf("help returned error: %v", err)
 	}
 	output := application.stdout.(*bytes.Buffer).String()
-	for _, expected := range []string{"Built by Tim Borovkov", "https://timb.dev", "MIT License"} {
+	for _, expected := range []string{"Built by Tim Borovkov", "https://timb.dev", "MIT License", "policy show|deny|allow|mcp-profile"} {
 		if !strings.Contains(output, expected) {
 			t.Fatalf("help output %q does not contain %q", output, expected)
 		}

@@ -65,6 +65,8 @@ func (c *CLI) Run(ctx context.Context, args []string) error {
 		return c.sync(ctx, args[1:])
 	case "mcp":
 		return c.mcp(ctx, args[1:])
+	case "policy":
+		return c.policy(args[1:])
 	case "tui":
 		return c.tui()
 	default:
@@ -709,24 +711,83 @@ func calendarListRange(start, end, cursor string, explicitStart, explicitEnd boo
 
 func (c *CLI) mcp(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: posthouse mcp <stdio|http>")
+		return fmt.Errorf("usage: posthouse mcp <stdio|http> [--profile full|readonly]")
 	}
-	server := mcpserver.New(c.service)
 	switch args[0] {
-	case "stdio":
-		return server.RunStdio(ctx)
-	case "http":
-		flags := flag.NewFlagSet("mcp http", flag.ContinueOnError)
-		flags.SetOutput(c.stderr)
-		address := flags.String("address", "127.0.0.1:8791", "listen address")
-		allowContainerListener := flags.Bool("allow-container-listener", false, "allow cleartext non-loopback binding inside an externally loopback- or TLS-constrained container network")
-		if err := flags.Parse(args[1:]); err != nil {
-			return err
-		}
-		logger := slog.New(slog.NewJSONHandler(c.stderr, nil))
-		return server.RunHTTP(ctx, *address, os.Getenv("POSTHOUSE_MCP_TOKEN"), *allowContainerListener, logger)
+	case "stdio", "http":
 	default:
 		return fmt.Errorf("unknown MCP transport %q", args[0])
+	}
+	flags := flag.NewFlagSet("mcp "+args[0], flag.ContinueOnError)
+	flags.SetOutput(c.stderr)
+	profile := flags.String("profile", "", "MCP tool profile: full or readonly (default from config/env)")
+	var (
+		address                *string
+		allowContainerListener *bool
+	)
+	if args[0] == "http" {
+		address = flags.String("address", "127.0.0.1:8791", "listen address")
+		allowContainerListener = flags.Bool("allow-container-listener", false, "allow cleartext non-loopback binding inside an externally loopback- or TLS-constrained container network")
+	}
+	if err := flags.Parse(args[1:]); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return fmt.Errorf("unexpected arguments: %v", flags.Args())
+	}
+	server, err := mcpserver.New(c.service, *profile)
+	if err != nil {
+		return err
+	}
+	if args[0] == "stdio" {
+		return server.RunStdio(ctx)
+	}
+	logger := slog.New(slog.NewJSONHandler(c.stderr, nil))
+	return server.RunHTTP(ctx, *address, os.Getenv("POSTHOUSE_MCP_TOKEN"), *allowContainerListener, logger)
+}
+
+func (c *CLI) policy(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: posthouse policy <show|deny|allow|mcp-profile>")
+	}
+	switch args[0] {
+	case "show":
+		if len(args) != 1 {
+			return fmt.Errorf("usage: posthouse policy show")
+		}
+		status, err := c.service.PolicyStatus()
+		if err != nil {
+			return err
+		}
+		return writeJSON(c.stdout, status)
+	case "deny", "allow":
+		if len(args) < 2 {
+			return fmt.Errorf("usage: posthouse policy %s <class>...", args[0])
+		}
+		var (
+			status any
+			err    error
+		)
+		if args[0] == "deny" {
+			status, err = c.service.PolicyDeny(args[1:])
+		} else {
+			status, err = c.service.PolicyAllow(args[1:])
+		}
+		if err != nil {
+			return err
+		}
+		return writeJSON(c.stdout, status)
+	case "mcp-profile":
+		if len(args) != 2 {
+			return fmt.Errorf("usage: posthouse policy mcp-profile <full|readonly>")
+		}
+		status, err := c.service.PolicySetMCPProfile(args[1])
+		if err != nil {
+			return err
+		}
+		return writeJSON(c.stdout, status)
+	default:
+		return fmt.Errorf("unknown policy command %q", args[0])
 	}
 }
 
@@ -849,13 +910,15 @@ Usage:
   posthouse [--config PATH] mail list|search|triage|unread|get|attachment|send|reply|forward|draft|mark|move|archive|trash|junk
   posthouse [--config PATH] calendar list|get|create|update|delete|ics
   posthouse [--config PATH] operation show|execute
+  posthouse [--config PATH] policy show|deny|allow|mcp-profile
   posthouse [--config PATH] schema write --dir DIR
   posthouse [--config PATH] sync
   posthouse [--config PATH] cache status|clear|rekey
-  posthouse [--config PATH] mcp stdio|http
+  posthouse [--config PATH] mcp stdio|http [--profile full|readonly]
   posthouse [--config PATH] tui
 
 All provider writes return a ten-minute prepared token; only "operation execute" performs the side effect.
+Default policy allows every class; "policy deny" / POSTHOUSE_POLICY_DENY can block send, move, trash, and other writes.
 Data commands write JSON except "calendar ics", which writes text/calendar to stdout by default. Run "posthouse <command> -h" for flags.
 
 Built by Tim Borovkov (https://timb.dev). MIT License.`)

@@ -25,6 +25,7 @@ import (
 	postmail "github.com/timborovkov/posthouse/internal/mail"
 	"github.com/timborovkov/posthouse/internal/model"
 	"github.com/timborovkov/posthouse/internal/pagination"
+	"github.com/timborovkov/posthouse/internal/policy"
 	"github.com/timborovkov/posthouse/internal/selector"
 	"github.com/timborovkov/posthouse/internal/state"
 )
@@ -988,6 +989,9 @@ func mailActionPrecondition(action MailAction, uid uint32) (postmail.MessagePrec
 const maxBatchMailUIDs = 100
 
 func (s *Service) PrepareMailAction(ctx context.Context, connectionID, kind string, payload MailAction) (model.PreparedOperation, error) {
+	if err := s.assertPolicyAllows(kind); err != nil {
+		return model.PreparedOperation{}, err
+	}
 	connection, err := s.exactConnection(connectionID, "mail.read")
 	if err != nil {
 		return model.PreparedOperation{}, err
@@ -1202,6 +1206,9 @@ func (s *Service) PrepareCalendarDelete(ctx context.Context, connectionID, colle
 }
 
 func (s *Service) prepare(ctx context.Context, kind string, connection model.Connection, payload any, preview map[string]any) (model.PreparedOperation, error) {
+	if err := s.assertPolicyAllows(kind); err != nil {
+		return model.PreparedOperation{}, err
+	}
 	ledger, err := s.ensureState()
 	if err != nil {
 		return model.PreparedOperation{}, fmt.Errorf("initialize encrypted operation store: %w", err)
@@ -1237,6 +1244,109 @@ func (s *Service) prepare(ctx context.Context, kind string, connection model.Con
 	return prepared, nil
 }
 
+func (s *Service) assertPolicyAllows(kind string) error {
+	cfg, err := s.store.Load()
+	if err != nil {
+		return err
+	}
+	return policy.Allows(cfg.Policy, kind)
+}
+
+func (s *Service) PolicyStatus() (policy.Status, error) {
+	cfg, err := s.store.Load()
+	if err != nil {
+		return policy.Status{}, err
+	}
+	return policy.StatusFrom(cfg.Policy)
+}
+
+func (s *Service) RawPolicy() (model.PolicyConfig, error) {
+	cfg, err := s.store.Load()
+	if err != nil {
+		return model.PolicyConfig{}, err
+	}
+	return cfg.Policy, nil
+}
+
+func (s *Service) PolicyDeny(classes []string) (policy.Status, error) {
+	return s.updatePolicy(func(current model.PolicyConfig) (model.PolicyConfig, error) {
+		deny := append([]string(nil), current.Deny...)
+		seen := map[string]struct{}{}
+		for _, class := range deny {
+			seen[class] = struct{}{}
+		}
+		for _, class := range classes {
+			class = strings.TrimSpace(strings.ToLower(class))
+			if !policy.IsKnownClass(class) {
+				return model.PolicyConfig{}, fmt.Errorf("unknown policy class %q", class)
+			}
+			if _, ok := seen[class]; ok {
+				continue
+			}
+			seen[class] = struct{}{}
+			deny = append(deny, class)
+		}
+		current.Deny = deny
+		return current, nil
+	})
+}
+
+func (s *Service) PolicyAllow(classes []string) (policy.Status, error) {
+	return s.updatePolicy(func(current model.PolicyConfig) (model.PolicyConfig, error) {
+		remove := map[string]struct{}{}
+		for _, class := range classes {
+			class = strings.TrimSpace(strings.ToLower(class))
+			if !policy.IsKnownClass(class) {
+				return model.PolicyConfig{}, fmt.Errorf("unknown policy class %q", class)
+			}
+			remove[class] = struct{}{}
+		}
+		kept := make([]string, 0, len(current.Deny))
+		for _, class := range current.Deny {
+			if _, drop := remove[class]; drop {
+				continue
+			}
+			kept = append(kept, class)
+		}
+		current.Deny = kept
+		return current, nil
+	})
+}
+
+func (s *Service) PolicySetMCPProfile(profile string) (policy.Status, error) {
+	return s.updatePolicy(func(current model.PolicyConfig) (model.PolicyConfig, error) {
+		profile = strings.TrimSpace(strings.ToLower(profile))
+		switch profile {
+		case policy.MCPProfileFull:
+			current.MCPProfile = ""
+		case policy.MCPProfileReadonly:
+			current.MCPProfile = policy.MCPProfileReadonly
+		default:
+			return model.PolicyConfig{}, fmt.Errorf("mcp profile must be %q or %q", policy.MCPProfileFull, policy.MCPProfileReadonly)
+		}
+		return current, nil
+	})
+}
+
+func (s *Service) updatePolicy(mutate func(model.PolicyConfig) (model.PolicyConfig, error)) (policy.Status, error) {
+	err := s.store.Update(func(cfg model.Config) (model.Config, error) {
+		next, err := mutate(cfg.Policy)
+		if err != nil {
+			return model.Config{}, err
+		}
+		normalized, err := policy.Normalize(next)
+		if err != nil {
+			return model.Config{}, err
+		}
+		cfg.Policy = normalized
+		return cfg, nil
+	})
+	if err != nil {
+		return policy.Status{}, err
+	}
+	return s.PolicyStatus()
+}
+
 func (s *Service) OperationShow(ctx context.Context, token string) (model.PreparedOperation, error) {
 	ledger, err := s.ensureState()
 	if err != nil {
@@ -1266,6 +1376,9 @@ func (s *Service) ExecuteOperation(ctx context.Context, token string) (model.Ope
 	}
 	if !s.now().Before(record.Public.ExpiresAt) {
 		return model.OperationResult{}, fmt.Errorf("prepared operation expired; prepare it again")
+	}
+	if err := s.assertPolicyAllows(record.Public.Kind); err != nil {
+		return model.OperationResult{}, err
 	}
 	executionPayload, err := snapshotAttachmentPayload(record.Public.Kind, record.Payload)
 	if err != nil {

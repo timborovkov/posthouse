@@ -16,6 +16,7 @@ import (
 	"github.com/timborovkov/posthouse/internal/calendar"
 	postmail "github.com/timborovkov/posthouse/internal/mail"
 	"github.com/timborovkov/posthouse/internal/model"
+	"github.com/timborovkov/posthouse/internal/policy"
 	"github.com/timborovkov/posthouse/internal/service"
 	"github.com/timborovkov/posthouse/internal/state"
 )
@@ -28,13 +29,24 @@ const (
 type Server struct {
 	service *service.Service
 	mcp     *mcp.Server
+	profile string
 }
 
-func New(service *service.Service) *Server {
-	server := &Server{service: service}
+// New builds an MCP server. profileOverride may be "", "full", or "readonly".
+// Empty uses config policy.mcp_profile, then POSTHOUSE_MCP_PROFILE, then full.
+func New(application *service.Service, profileOverride string) (*Server, error) {
+	cfg, err := application.RawPolicy()
+	if err != nil {
+		return nil, err
+	}
+	resolved, err := policy.MCPProfile(cfg, profileOverride)
+	if err != nil {
+		return nil, err
+	}
+	server := &Server{service: application, profile: resolved}
 	server.mcp = mcp.NewServer(&mcp.Implementation{Name: "posthouse", Version: Version}, nil)
 	server.registerTools()
-	return server
+	return server, nil
 }
 
 func (s *Server) RunStdio(ctx context.Context) error {
@@ -330,35 +342,37 @@ func (s *Server) registerTools() {
 			return nil, map[string]any{"unread": summaries}, err
 		})
 
-	mcp.AddTool(s.mcp, &mcp.Tool{Name: "messages_send_prepare", Title: "Prepare message send", Description: "Prepare a plain-text or HTML email with up to 25 MiB total attachment data through exactly one SMTP connection. Prefer messages_draft_prepare when the operator should review before sending. Text-only is text/plain. HTML-only is multipart/alternative with a derived text/plain fallback. Both bodies are multipart/alternative as supplied. Returns a ten-minute opaque token and exact side-effect preview; no message is sent until operation_execute is called.", Annotations: readOnly},
-		func(ctx context.Context, _ *mcp.CallToolRequest, input sendMessageInput) (*mcp.CallToolResult, model.PreparedOperation, error) {
-			prepared, err := s.service.PrepareSend(ctx, model.SendMessage{ConnectionID: input.Connection, To: input.To, CC: input.CC, BCC: input.BCC, Subject: input.Subject, Text: input.Text, HTML: input.HTML, ReplyTo: input.ReplyTo, InReplyTo: input.InReplyTo, References: input.References, Attachments: mcpAttachments(input.Attachments)})
-			return nil, prepared, err
-		})
+	if s.profile != policy.MCPProfileReadonly {
+		mcp.AddTool(s.mcp, &mcp.Tool{Name: "messages_send_prepare", Title: "Prepare message send", Description: "Prepare a plain-text or HTML email with up to 25 MiB total attachment data through exactly one SMTP connection. Prefer messages_draft_prepare when the operator should review before sending. Text-only is text/plain. HTML-only is multipart/alternative with a derived text/plain fallback. Both bodies are multipart/alternative as supplied. Returns a ten-minute opaque token and exact side-effect preview; no message is sent until operation_execute is called.", Annotations: readOnly},
+			func(ctx context.Context, _ *mcp.CallToolRequest, input sendMessageInput) (*mcp.CallToolResult, model.PreparedOperation, error) {
+				prepared, err := s.service.PrepareSend(ctx, model.SendMessage{ConnectionID: input.Connection, To: input.To, CC: input.CC, BCC: input.BCC, Subject: input.Subject, Text: input.Text, HTML: input.HTML, ReplyTo: input.ReplyTo, InReplyTo: input.InReplyTo, References: input.References, Attachments: mcpAttachments(input.Attachments)})
+				return nil, prepared, err
+			})
 
-	mcp.AddTool(s.mcp, &mcp.Tool{Name: "messages_reply_prepare", Title: "Prepare message reply", Description: "Fetch one provider message and prepare a threaded plain-text or HTML reply through the same exact connection, honoring Reply-To. Prefer a provider draft via messages_draft_prepare when the operator should review before sending. No message is sent until operation_execute.", Annotations: readOnly},
-		func(ctx context.Context, _ *mcp.CallToolRequest, input messageReplyInput) (*mcp.CallToolResult, model.PreparedOperation, error) {
-			prepared, err := s.service.PrepareReply(ctx, input.Connection, input.Folder, input.UID, input.Text, input.HTML)
-			return nil, prepared, err
-		})
+		mcp.AddTool(s.mcp, &mcp.Tool{Name: "messages_reply_prepare", Title: "Prepare message reply", Description: "Fetch one provider message and prepare a threaded plain-text or HTML reply through the same exact connection, honoring Reply-To. Prefer a provider draft via messages_draft_prepare when the operator should review before sending. No message is sent until operation_execute.", Annotations: readOnly},
+			func(ctx context.Context, _ *mcp.CallToolRequest, input messageReplyInput) (*mcp.CallToolResult, model.PreparedOperation, error) {
+				prepared, err := s.service.PrepareReply(ctx, input.Connection, input.Folder, input.UID, input.Text, input.HTML)
+				return nil, prepared, err
+			})
 
-	mcp.AddTool(s.mcp, &mcp.Tool{Name: "messages_forward_prepare", Title: "Prepare message forward", Description: "Fetch one provider message and prepare a forward through the same exact connection. Set verbatim=true to attach original parts without putting the original body into the preview. No message is sent until operation_execute.", Annotations: readOnly},
-		func(ctx context.Context, _ *mcp.CallToolRequest, input messageForwardInput) (*mcp.CallToolResult, model.PreparedOperation, error) {
-			var prepared model.PreparedOperation
-			var err error
-			if input.Verbatim {
-				prepared, err = s.service.PrepareForwardVerbatim(ctx, input.Connection, input.Folder, input.UID, input.To, input.Text)
-			} else {
-				prepared, err = s.service.PrepareForward(ctx, input.Connection, input.Folder, input.UID, input.To, input.Text, input.HTML)
-			}
-			return nil, prepared, err
-		})
+		mcp.AddTool(s.mcp, &mcp.Tool{Name: "messages_forward_prepare", Title: "Prepare message forward", Description: "Fetch one provider message and prepare a forward through the same exact connection. Set verbatim=true to attach original parts without putting the original body into the preview. No message is sent until operation_execute.", Annotations: readOnly},
+			func(ctx context.Context, _ *mcp.CallToolRequest, input messageForwardInput) (*mcp.CallToolResult, model.PreparedOperation, error) {
+				var prepared model.PreparedOperation
+				var err error
+				if input.Verbatim {
+					prepared, err = s.service.PrepareForwardVerbatim(ctx, input.Connection, input.Folder, input.UID, input.To, input.Text)
+				} else {
+					prepared, err = s.service.PrepareForward(ctx, input.Connection, input.Folder, input.UID, input.To, input.Text, input.HTML)
+				}
+				return nil, prepared, err
+			})
 
-	mcp.AddTool(s.mcp, &mcp.Tool{Name: "messages_draft_prepare", Title: "Prepare provider draft mutation", Description: "Preferred compose path for agent workflows: prepare create, update, or non-expunging delete of one provider-side draft through exactly one IMAP connection so the operator can review before sending. Attachment data is limited to 25 MiB total. No provider draft changes until operation_execute.", Annotations: readOnly},
-		func(ctx context.Context, _ *mcp.CallToolRequest, input messageDraftInput) (*mcp.CallToolResult, model.PreparedOperation, error) {
-			prepared, err := s.service.PrepareDraft(ctx, input.Connection, "mail.draft."+input.Action, input.Folder, input.UID, input.Message.model())
-			return nil, prepared, err
-		})
+		mcp.AddTool(s.mcp, &mcp.Tool{Name: "messages_draft_prepare", Title: "Prepare provider draft mutation", Description: "Preferred compose path for agent workflows: prepare create, update, or non-expunging delete of one provider-side draft through exactly one IMAP connection so the operator can review before sending. Attachment data is limited to 25 MiB total. No provider draft changes until operation_execute.", Annotations: readOnly},
+			func(ctx context.Context, _ *mcp.CallToolRequest, input messageDraftInput) (*mcp.CallToolResult, model.PreparedOperation, error) {
+				prepared, err := s.service.PrepareDraft(ctx, input.Connection, "mail.draft."+input.Action, input.Folder, input.UID, input.Message.model())
+				return nil, prepared, err
+			})
+	}
 
 	mcp.AddTool(s.mcp, &mcp.Tool{Name: "messages_get", Title: "Get message", Description: "Fetch and decode one complete MIME message from an exact connection and UID, including safe HTML, plain text, markdown approximation, threading headers, and attachment metadata.", Annotations: readOnly},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input messageGetInput) (*mcp.CallToolResult, model.MessageDetail, error) {
@@ -420,11 +434,13 @@ func (s *Server) registerTools() {
 			return nil, output, nil
 		})
 
-	mcp.AddTool(s.mcp, &mcp.Tool{Name: "messages_action_prepare", Title: "Prepare message action", Description: "Prepare a mark, move, archive, trash, or junk action for one or more provider messages (uid or uids). No provider state changes until operation_execute.", Annotations: readOnly},
-		func(ctx context.Context, _ *mcp.CallToolRequest, input messageActionInput) (*mcp.CallToolResult, model.PreparedOperation, error) {
-			prepared, err := s.service.PrepareMailAction(ctx, input.Connection, "mail."+input.Action, service.MailAction{Folder: input.Folder, UID: input.UID, UIDs: input.UIDs, Destination: input.Destination, Seen: input.Seen, Flagged: input.Flagged})
-			return nil, prepared, err
-		})
+	if s.profile != policy.MCPProfileReadonly {
+		mcp.AddTool(s.mcp, &mcp.Tool{Name: "messages_action_prepare", Title: "Prepare message action", Description: "Prepare a mark, move, archive, trash, or junk action for one or more provider messages (uid or uids). No provider state changes until operation_execute.", Annotations: readOnly},
+			func(ctx context.Context, _ *mcp.CallToolRequest, input messageActionInput) (*mcp.CallToolResult, model.PreparedOperation, error) {
+				prepared, err := s.service.PrepareMailAction(ctx, input.Connection, "mail."+input.Action, service.MailAction{Folder: input.Folder, UID: input.UID, UIDs: input.UIDs, Destination: input.Destination, Seen: input.Seen, Flagged: input.Flagged})
+				return nil, prepared, err
+			})
+	}
 
 	mcp.AddTool(s.mcp, &mcp.Tool{Name: "events_list", Title: "List calendar events", Description: "List and search ICS feeds and CalDAV calendar collections across selected connections in an optional time range, up to 500 per page. Live-first is the default with stale-cache fallback; mode=offline is cache-only and treats a miss as an error rather than an empty calendar; mode=refresh refuses stale fallback. Pass next_cursor back unchanged with identical filters.", Annotations: readOnly},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input eventListInput) (*mcp.CallToolResult, model.EventPage, error) {
@@ -477,32 +493,34 @@ func (s *Server) registerTools() {
 			return result, icsOutput{Event: event, Filename: filename, MIMEType: "text/calendar", ICS: data}, nil
 		})
 
-	mcp.AddTool(s.mcp, &mcp.Tool{Name: "event_create_prepare", Title: "Prepare event create", Description: "Prepare creation of one event in an exact CalDAV connection and collection. No event is written until operation_execute.", Annotations: readOnly},
-		func(ctx context.Context, _ *mcp.CallToolRequest, input eventMutationInput) (*mcp.CallToolResult, model.PreparedOperation, error) {
-			prepared, err := s.service.PrepareCalendarWrite(ctx, input.Connection, "calendar.create", input.Event)
-			return nil, prepared, err
-		})
-	mcp.AddTool(s.mcp, &mcp.Tool{Name: "event_update_prepare", Title: "Prepare event update", Description: "Prepare an ETag-guarded update to one CalDAV event. No event is written until operation_execute.", Annotations: readOnly},
-		func(ctx context.Context, _ *mcp.CallToolRequest, input eventMutationInput) (*mcp.CallToolResult, model.PreparedOperation, error) {
-			prepared, err := s.service.PrepareCalendarWrite(ctx, input.Connection, "calendar.update", input.Event)
-			return nil, prepared, err
-		})
-	mcp.AddTool(s.mcp, &mcp.Tool{Name: "event_delete_prepare", Title: "Prepare event delete", Description: "Prepare an ETag-guarded delete of one CalDAV event. No event is deleted until operation_execute.", Annotations: readOnly},
-		func(ctx context.Context, _ *mcp.CallToolRequest, input eventDeleteInput) (*mcp.CallToolResult, model.PreparedOperation, error) {
-			prepared, err := s.service.PrepareCalendarDelete(ctx, input.Connection, input.Collection, input.Href, input.ETag, input.RecurrenceID)
-			return nil, prepared, err
-		})
+	if s.profile != policy.MCPProfileReadonly {
+		mcp.AddTool(s.mcp, &mcp.Tool{Name: "event_create_prepare", Title: "Prepare event create", Description: "Prepare creation of one event in an exact CalDAV connection and collection. No event is written until operation_execute.", Annotations: readOnly},
+			func(ctx context.Context, _ *mcp.CallToolRequest, input eventMutationInput) (*mcp.CallToolResult, model.PreparedOperation, error) {
+				prepared, err := s.service.PrepareCalendarWrite(ctx, input.Connection, "calendar.create", input.Event)
+				return nil, prepared, err
+			})
+		mcp.AddTool(s.mcp, &mcp.Tool{Name: "event_update_prepare", Title: "Prepare event update", Description: "Prepare an ETag-guarded update to one CalDAV event. No event is written until operation_execute.", Annotations: readOnly},
+			func(ctx context.Context, _ *mcp.CallToolRequest, input eventMutationInput) (*mcp.CallToolResult, model.PreparedOperation, error) {
+				prepared, err := s.service.PrepareCalendarWrite(ctx, input.Connection, "calendar.update", input.Event)
+				return nil, prepared, err
+			})
+		mcp.AddTool(s.mcp, &mcp.Tool{Name: "event_delete_prepare", Title: "Prepare event delete", Description: "Prepare an ETag-guarded delete of one CalDAV event. No event is deleted until operation_execute.", Annotations: readOnly},
+			func(ctx context.Context, _ *mcp.CallToolRequest, input eventDeleteInput) (*mcp.CallToolResult, model.PreparedOperation, error) {
+				prepared, err := s.service.PrepareCalendarDelete(ctx, input.Connection, input.Collection, input.Href, input.ETag, input.RecurrenceID)
+				return nil, prepared, err
+			})
 
-	mcp.AddTool(s.mcp, &mcp.Tool{Name: "operation_show", Title: "Show prepared operation", Description: "Show the exact preview and status for an opaque prepared-operation token without executing it.", Annotations: readOnly},
-		func(ctx context.Context, _ *mcp.CallToolRequest, input operationInput) (*mcp.CallToolResult, model.PreparedOperation, error) {
-			operation, err := s.service.OperationShow(ctx, input.Token)
-			return nil, operation, err
-		})
-	mcp.AddTool(s.mcp, &mcp.Tool{Name: "operation_execute", Title: "Execute prepared operation", Description: "Execute one confirmed prepared-operation token exactly once. Repeated calls return the original result; uncertain SMTP outcomes are never retried.", Annotations: executeWrite},
-		func(ctx context.Context, _ *mcp.CallToolRequest, input operationInput) (*mcp.CallToolResult, model.OperationResult, error) {
-			result, err := s.service.ExecuteOperation(ctx, input.Token)
-			return nil, result, err
-		})
+		mcp.AddTool(s.mcp, &mcp.Tool{Name: "operation_show", Title: "Show prepared operation", Description: "Show the exact preview and status for an opaque prepared-operation token without executing it.", Annotations: readOnly},
+			func(ctx context.Context, _ *mcp.CallToolRequest, input operationInput) (*mcp.CallToolResult, model.PreparedOperation, error) {
+				operation, err := s.service.OperationShow(ctx, input.Token)
+				return nil, operation, err
+			})
+		mcp.AddTool(s.mcp, &mcp.Tool{Name: "operation_execute", Title: "Execute prepared operation", Description: "Execute one confirmed prepared-operation token exactly once. Repeated calls return the original result; uncertain SMTP outcomes are never retried. Honors policy.deny and POSTHOUSE_POLICY_DENY.", Annotations: executeWrite},
+			func(ctx context.Context, _ *mcp.CallToolRequest, input operationInput) (*mcp.CallToolResult, model.OperationResult, error) {
+				result, err := s.service.ExecuteOperation(ctx, input.Token)
+				return nil, result, err
+			})
+	}
 
 	mcp.AddTool(s.mcp, &mcp.Tool{Name: "connection_doctor", Title: "Doctor connection", Description: "Run non-mutating secret, TLS, authentication, IMAP/SMTP, and CalDAV discovery checks for one exact connection.", Annotations: readOnly},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input connectionInput) (*mcp.CallToolResult, model.DoctorResult, error) {

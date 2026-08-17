@@ -145,6 +145,8 @@ posthouse mail junk --connection work --folder INBOX --uid 42
 posthouse mail archive --connection work --folder INBOX --uids 42,43,44
 posthouse operation show 'TOKEN'
 posthouse operation execute 'TOKEN'
+posthouse policy deny mail.send mail.trash
+posthouse policy show
 
 posthouse mail reply --connection work --folder INBOX --uid 42 --body 'Thanks'
 posthouse mail archive --connection work --folder INBOX --uid 42
@@ -174,6 +176,13 @@ HTML send uses `--html` / `--html-file` (and MCP `html`); text-only stays
         "POSTHOUSE_CACHE_KEY": "...",
         "ACME_MAIL_PASSWORD": "..."
       }
+    },
+    "posthouse-readonly": {
+      "command": "/absolute/path/to/posthouse",
+      "args": ["mcp", "stdio", "--profile", "readonly"],
+      "env": {
+        "POSTHOUSE_CACHE_KEY": "..."
+      }
     }
   }
 }
@@ -196,6 +205,30 @@ Agent-oriented mail tools include `messages_triage`, `messages_unread_counts`,
 `messages_action_prepare` with `junk` plus batch `uids`. Prefer
 `messages_draft_prepare` when the operator should review before send. Every
 write still requires `operation_execute`.
+
+Readonly MCP (omits prepare/execute tools):
+
+```sh
+posthouse mcp stdio --profile readonly
+# or: posthouse policy mcp-profile readonly
+# or: export POSTHOUSE_MCP_PROFILE=readonly
+```
+
+## Policy
+
+Default is allow-all. Deny operation classes in config or from the CLI:
+
+```sh
+posthouse policy show
+posthouse policy deny mail.send mail.move mail.trash
+posthouse policy allow mail.move
+posthouse policy mcp-profile readonly
+```
+
+Classes: `mail.send`, `mail.move` (move+archive), `mail.mark`, `mail.trash`,
+`mail.junk`, `mail.draft`, `calendar.write`. Env overlay
+`POSTHOUSE_POLICY_DENY=mail.send,mail.trash` merges with config. Denials apply
+to both prepare and execute (CLI and MCP).
 
 ## Docker
 
