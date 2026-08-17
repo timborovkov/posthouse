@@ -59,7 +59,7 @@ func (p *posthouseApp) editorLabels() []string {
 	case "connection":
 		return []string{"ID", "Name", "Category", "Identity email", "Mail username", "Mail secret env", "IMAP TLS address", "SMTP TLS address", "CalDAV URL", "CalDAV username", "CalDAV secret env"}
 	case "action":
-		return []string{"Action", "Recipient", "Body type text/html", "Body"}
+		return []string{"Action", "To / destination", "Body type text/html", "Body"}
 	case "event-action":
 		return []string{"Action", "Title", "Start RFC3339", "End RFC3339"}
 	case "mail":
@@ -208,7 +208,6 @@ func (p *posthouseApp) beginEditor(kind string, values []string) {
 	p.pendingToken.Set("")
 	p.pendingDiscover.Set("")
 	p.errorText.Set("")
-	p.editorTick.Set(p.editorTick.Get() + 1)
 }
 
 func (p *posthouseApp) cancelEditor() {

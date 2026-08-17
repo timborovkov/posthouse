@@ -73,7 +73,6 @@ type posthouseApp struct {
 	lastOperationError     *tui.State[string]
 	editor                 *tui.State[bool]
 	editorKind             *tui.State[string]
-	editorTick             *tui.State[int]
 	editorFields           []*tui.State[string]
 	app                    *tui.App
 	mailCursor             *tui.State[string]
@@ -115,7 +114,7 @@ func New(application *service.Service) *posthouseApp {
 		executingToken:     tui.NewState(""),
 		lastOperation:      tui.NewState(model.OperationResult{}),
 		lastOperationError: tui.NewState(""),
-		editor:             tui.NewState(false), editorKind: tui.NewState(""), editorTick: tui.NewState(0),
+		editor:             tui.NewState(false), editorKind: tui.NewState(""),
 		mailCursor: tui.NewState(""), mailNext: tui.NewState(""), mailHistory: tui.NewState([]string{}),
 		eventCursor: tui.NewState(""), eventNext: tui.NewState(""), eventHistory: tui.NewState([]string{}),
 		attachment: tui.NewState(model.Attachment{}), attachmentData: tui.NewState([]byte{}),
@@ -184,7 +183,7 @@ func (p *posthouseApp) KeyMap() tui.KeyMap {
 			}
 		}),
 		tui.On(tui.Rune('?'), func(ke tui.KeyEvent) {
-			p.modalText.Set("Keyboard\n\nTab/Shift+Tab areas · j/k or arrows move · / search · r refresh\nc compose/create · a actions · d discover · s save attachment · n/p page\nEnter open/confirm · Esc back · q quit")
+			p.modalText.Set("Keyboard\n\nTab/Shift+Tab areas · j/k or arrows move · / search · r refresh\nc compose/create · a actions · d discover · s save attachment · n/p page\nEnter open/confirm · Esc back or cancel form · q quit")
 			p.modal.Set(true)
 		}),
 	}
@@ -1129,9 +1128,6 @@ func (p *posthouseApp) bindAppFields(app *tui.App) {
 	}
 	if p.editorKind != nil {
 		p.editorKind.BindApp(app)
-	}
-	if p.editorTick != nil {
-		p.editorTick.BindApp(app)
 	}
 	if p.mailCursor != nil {
 		p.mailCursor.BindApp(app)

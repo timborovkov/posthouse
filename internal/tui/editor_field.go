@@ -13,6 +13,7 @@ type editorField struct {
 	onCancel func()
 }
 
+// NewEditorField is the GSX constructor for a modal editor input.
 func NewEditorField(p *posthouseApp, index int) *editorField {
 	return p.newEditorField(index)
 }

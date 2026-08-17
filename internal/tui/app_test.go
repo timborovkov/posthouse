@@ -371,6 +371,39 @@ func TestEditorFieldEscapeCancelsWhileFocused(t *testing.T) {
 	}
 }
 
+func TestRemapFocusedEscapeReplacesInputBlur(t *testing.T) {
+	canceled := false
+	remapped := remapFocusedEscape(tui.NewInput().KeyMap(), func(tui.KeyEvent) { canceled = true })
+	escapes := 0
+	for _, binding := range remapped {
+		if binding.Pattern.Key != tui.KeyEscape {
+			continue
+		}
+		escapes++
+		binding.Handler(tui.KeyEvent{Key: tui.KeyEscape})
+	}
+	if escapes != 1 || !canceled {
+		t.Fatalf("escape bindings=%d canceled=%v", escapes, canceled)
+	}
+}
+
+func TestEditorFieldKeepsWidgetForSameState(t *testing.T) {
+	app := testApp(t)
+	defer app.close()
+	app.beginEditor("connection", make([]string, 11))
+	field := app.newEditorField(0)
+	inner := field.input
+	field.UpdateProps(app.newEditorField(0))
+	if field.input != inner {
+		t.Fatal("same field state remounted the input")
+	}
+	app.beginEditor("mail", []string{"work", "send", "", "", "", "", "text", "", ""})
+	field.UpdateProps(app.newEditorField(0))
+	if field.input == inner {
+		t.Fatal("new editor session kept the old input")
+	}
+}
+
 func TestConnectionEditorUsesSubmissionStartTLS(t *testing.T) {
 	app := testApp(t)
 	defer app.close()
