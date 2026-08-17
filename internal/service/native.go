@@ -211,7 +211,7 @@ func executeNativeMail(ctx context.Context, connection model.Connection, kind st
 			return nil, sendErr
 		}
 		return map[string]any{"sent": true}, nil
-	case "mail.mark", "mail.move", "mail.archive", "mail.trash":
+	case "mail.mark", "mail.move", "mail.archive", "mail.trash", "mail.junk":
 		var action MailAction
 		if err := json.Unmarshal(payload, &action); err != nil {
 			return nil, err
@@ -236,6 +236,11 @@ func executeNativeMail(ctx context.Context, connection model.Connection, kind st
 				return nil, err
 			}
 			return map[string]any{"moved": true, "destination": "TRASH"}, nil
+		case "mail.junk":
+			if err := nativeJunk(ctx, connection, id); err != nil {
+				return nil, err
+			}
+			return map[string]any{"moved": true, "destination": "JUNK"}, nil
 		default:
 			if err := nativeMove(ctx, connection, id, action.Destination); err != nil {
 				return nil, err
@@ -351,6 +356,13 @@ func nativeTrash(ctx context.Context, connection model.Connection, id string) er
 		return gmail.Trash(ctx, connection, id)
 	}
 	return microsoft.Move(ctx, connection, id, "deleteditems")
+}
+
+func nativeJunk(ctx context.Context, connection model.Connection, id string) error {
+	if config.MailKind(connection.Mail) == config.MailKindGmail {
+		return gmail.Modify(ctx, connection, id, []string{"SPAM"}, []string{"INBOX"})
+	}
+	return microsoft.Move(ctx, connection, id, "junkemail")
 }
 
 func nativeMove(ctx context.Context, connection model.Connection, id, destination string) error {

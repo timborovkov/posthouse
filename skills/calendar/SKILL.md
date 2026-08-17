@@ -10,6 +10,7 @@ Local CLI for events. Mail → `posthouse-mail`. Connections → `posthouse-conn
 ## Rules
 
 - Writes need exact `--connection` and return a **prepared operation**. Show the preview; only `posthouse operation execute TOKEN` mutates CalDAV.
+- `calendar.write` policy deny fails prepare and execute (`posthouse policy show`).
 - Never log event text or tokens unless the user asked.
 
 ```sh

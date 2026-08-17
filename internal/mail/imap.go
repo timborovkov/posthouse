@@ -14,6 +14,7 @@ import (
 	"github.com/emersion/go-imap/v2/imapclient"
 	"github.com/timborovkov/posthouse/internal/config"
 	"github.com/timborovkov/posthouse/internal/model"
+	"github.com/timborovkov/posthouse/internal/netproxy"
 )
 
 type SearchOptions struct {
@@ -213,6 +214,35 @@ func resolvedMailSecret(connection model.Connection) (string, error) {
 	return config.ResolveSecret(connection.Mail.Secret)
 }
 
+// UnreadCountContext returns the IMAP STATUS UNSEEN count for folder.
+func UnreadCountContext(ctx context.Context, connection model.Connection, folder string) (int, error) {
+	client, stop, err := authenticatedIMAPContext(ctx, connection)
+	if err != nil {
+		return 0, err
+	}
+	defer stop()
+	defer client.Close()
+	defer client.Logout()
+	if folder == "" {
+		folder = defaultFolder(connection, folder)
+	}
+	data, err := client.Status(folder, &imap.StatusOptions{NumUnseen: true}).Wait()
+	if err != nil {
+		return unreadFromStatus(folder, nil, err)
+	}
+	return unreadFromStatus(folder, data.NumUnseen, nil)
+}
+
+func unreadFromStatus(folder string, unseen *uint32, err error) (int, error) {
+	if err != nil {
+		return 0, fmt.Errorf("IMAP STATUS UNSEEN for %s: %w", folder, err)
+	}
+	if unseen == nil {
+		return 0, fmt.Errorf("IMAP STATUS UNSEEN for %s returned no count", folder)
+	}
+	return int(*unseen), nil
+}
+
 func safePreviewSize(size, limit int64) bool { return size > 0 && size <= limit }
 
 func missingSortCursor(uids []imap.UID, cursorUID uint32) bool {
@@ -359,8 +389,7 @@ func dialIMAPContext(ctx context.Context, settings model.IMAPConfig) (*imapclien
 	if !settings.TLS && !settings.StartTLS && host != "localhost" && host != "127.0.0.1" && host != "::1" {
 		return nil, fmt.Errorf("refusing remote cleartext IMAP connection; enable tls or starttls")
 	}
-	dialer := &net.Dialer{Timeout: 30 * time.Second}
-	connection, err := dialer.DialContext(ctx, "tcp", settings.Address)
+	connection, err := netproxy.DialTCP(ctx, settings.Address, settings.Proxy)
 	if err != nil {
 		return nil, fmt.Errorf("connect to IMAP: %w", err)
 	}

@@ -1,19 +1,24 @@
 package config
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
 	"net/url"
 	"os"
+	"os/exec"
 	pathpkg "path"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/timborovkov/posthouse/internal/filelock"
 	"github.com/timborovkov/posthouse/internal/model"
+	"github.com/timborovkov/posthouse/internal/policy"
 	"github.com/timborovkov/posthouse/internal/safeio"
 	"github.com/zalando/go-keyring"
 )
@@ -181,6 +186,11 @@ func Normalize(cfg model.Config) (model.Config, error) {
 			cfg.Connections[index].Calendar.Collections = nil
 		}
 	}
+	normalizedPolicy, err := policy.Normalize(cfg.Policy)
+	if err != nil {
+		return model.Config{}, err
+	}
+	cfg.Policy = normalizedPolicy
 	if err := Validate(cfg); err != nil {
 		return model.Config{}, err
 	}
@@ -242,11 +252,11 @@ func migrateV1(cfg *model.Config) {
 func normalizeLegacyRefs(cfg *model.Config) {
 	for i := range cfg.Connections {
 		connection := &cfg.Connections[i]
-		if connection.Mail != nil && connection.Mail.Secret.Env == "" && connection.Mail.Secret.Keychain == "" && connection.Mail.SecretEnv != "" {
+		if connection.Mail != nil && connection.Mail.Secret.Env == "" && connection.Mail.Secret.Keychain == "" && len(connection.Mail.Secret.Command) == 0 && connection.Mail.SecretEnv != "" {
 			connection.Mail.Secret.Env = connection.Mail.SecretEnv
 			connection.Mail.SecretEnv = ""
 		}
-		if connection.Calendar != nil && connection.Calendar.URLSecret.Env == "" && connection.Calendar.URLSecret.Keychain == "" && connection.Calendar.URLSecretEnv != "" {
+		if connection.Calendar != nil && connection.Calendar.URLSecret.Env == "" && connection.Calendar.URLSecret.Keychain == "" && len(connection.Calendar.URLSecret.Command) == 0 && connection.Calendar.URLSecretEnv != "" {
 			connection.Calendar.URLSecret.Env = connection.Calendar.URLSecretEnv
 			connection.Calendar.URLSecretEnv = ""
 		}
@@ -376,8 +386,8 @@ func validateMailConfig(prefix string, mail *model.MailConfig) error {
 	default:
 		return fmt.Errorf("%s.mail.kind must be empty, gmail, or microsoft", prefix)
 	}
-	if mail.Username == "" || !(validSecretRef(mail.Secret) || (mail.SecretEnv != "" && mail.Secret.Env == "" && mail.Secret.Keychain == "")) {
-		return fmt.Errorf("%s.mail username and exactly one secret env or keychain reference are required", prefix)
+	if mail.Username == "" || !(validSecretRef(mail.Secret) || (mail.SecretEnv != "" && mail.Secret.Env == "" && mail.Secret.Keychain == "" && len(mail.Secret.Command) == 0)) {
+		return fmt.Errorf("%s.mail username and exactly one secret env, keychain, or command reference are required", prefix)
 	}
 	if mail.IMAP.Address == "" && mail.SMTP.Address == "" {
 		return fmt.Errorf("%s.mail needs an IMAP or SMTP address", prefix)
@@ -448,7 +458,7 @@ func validateCalendarConfig(prefix string, connection model.Connection) error {
 		}
 	}
 	hasURL := strings.TrimSpace(cal.URL) != ""
-	hasSecretURL := validSecretRef(cal.URLSecret) || (cal.URLSecretEnv != "" && cal.URLSecret.Env == "" && cal.URLSecret.Keychain == "")
+	hasSecretURL := validSecretRef(cal.URLSecret) || (cal.URLSecretEnv != "" && cal.URLSecret.Env == "" && cal.URLSecret.Keychain == "" && len(cal.URLSecret.Command) == 0)
 	if hasURL == hasSecretURL {
 		return fmt.Errorf("%s.calendar requires exactly one of url or url_secret", prefix)
 	}
@@ -483,13 +493,13 @@ func validateCalendarConfig(prefix string, connection model.Connection) error {
 }
 
 func optionalSecretRef(name string, ref model.SecretRef, legacyEnv string) error {
-	if ref.Env == "" && ref.Keychain == "" && legacyEnv == "" {
+	if ref.Env == "" && ref.Keychain == "" && len(ref.Command) == 0 && legacyEnv == "" {
 		return nil
 	}
-	if validSecretRef(ref) || (legacyEnv != "" && ref.Env == "" && ref.Keychain == "") {
+	if validSecretRef(ref) || (legacyEnv != "" && ref.Env == "" && ref.Keychain == "" && len(ref.Command) == 0) {
 		return nil
 	}
-	return fmt.Errorf("%s must use exactly one of env or keychain", name)
+	return fmt.Errorf("%s must use exactly one of env, keychain, or command", name)
 }
 
 func validateCalendarURL(value string) error {
@@ -531,8 +541,32 @@ func isLoopbackHostname(host string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
+func secretRefFieldCount(ref model.SecretRef) int {
+	count := 0
+	if strings.TrimSpace(ref.Env) != "" {
+		count++
+	}
+	if strings.TrimSpace(ref.Keychain) != "" {
+		count++
+	}
+	if len(ref.Command) > 0 {
+		count++
+	}
+	return count
+}
+
 func validSecretRef(ref model.SecretRef) bool {
-	return (strings.TrimSpace(ref.Env) != "") != (strings.TrimSpace(ref.Keychain) != "")
+	if secretRefFieldCount(ref) != 1 {
+		return false
+	}
+	if len(ref.Command) > 0 {
+		for _, part := range ref.Command {
+			if strings.TrimSpace(part) == "" {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func validateTransport(name, address string, implicitTLS, startTLS, insecure bool) error {
@@ -558,18 +592,75 @@ func Secret(environmentVariable string) (string, error) {
 	return value, nil
 }
 
-func ResolveSecret(ref model.SecretRef) (string, error) {
-	if ref.Env != "" {
-		return Secret(ref.Env)
+func resolveCommandSecret(command []string) (string, error) {
+	if len(command) == 0 || strings.TrimSpace(command[0]) == "" {
+		return "", fmt.Errorf("secret command is empty")
 	}
-	if ref.Keychain != "" {
-		value, err := keyringGet(keyringService, ref.Keychain)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, command[0], command[1:]...)
+	cmd.Stdin = nil
+	cmd.Env = scrubbedEnviron()
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("secret command %q failed: %w", command[0], err)
+	}
+	value := stdout.String()
+	if idx := strings.IndexByte(value, '\n'); idx >= 0 {
+		value = value[:idx]
+	}
+	value = strings.TrimRight(value, "\r")
+	if value == "" {
+		return "", fmt.Errorf("secret command %q returned an empty secret", command[0])
+	}
+	if err := rejectControlChars(value); err != nil {
+		return "", err
+	}
+	return value, nil
+}
+
+func scrubbedEnviron() []string {
+	// Only POSTHOUSE_* is stripped. Other ambient secrets remain visible to
+	// operator-configured secret commands such as `pass`.
+	env := os.Environ()
+	filtered := make([]string, 0, len(env))
+	for _, entry := range env {
+		key, _, _ := strings.Cut(entry, "=")
+		if strings.HasPrefix(key, "POSTHOUSE_") {
+			continue
+		}
+		filtered = append(filtered, entry)
+	}
+	return filtered
+}
+
+func rejectControlChars(value string) error {
+	for _, r := range value {
+		if r < 0x20 || r == 0x7f {
+			return fmt.Errorf("secret contains control characters")
+		}
+	}
+	return nil
+}
+
+func ResolveSecret(ref model.SecretRef) (string, error) {
+	var (
+		value string
+		err   error
+	)
+	switch {
+	case ref.Env != "":
+		value, err = Secret(ref.Env)
+	case ref.Keychain != "":
+		value, err = keyringGet(keyringService, ref.Keychain)
 		if err == nil && value != "" {
-			return value, nil
+			return rejectAndReturn(value)
 		}
 		fallback, fallbackErr := readFallbackSecret(ref.Keychain)
 		if fallbackErr == nil && fallback != "" {
-			return fallback, nil
+			return rejectAndReturn(fallback)
 		}
 		if err != nil {
 			return "", fmt.Errorf("resolve keychain secret %q: %w", ref.Keychain, err)
@@ -578,8 +669,22 @@ func ResolveSecret(ref model.SecretRef) (string, error) {
 			return "", fmt.Errorf("resolve keychain secret %q: %w", ref.Keychain, fallbackErr)
 		}
 		return "", fmt.Errorf("keychain secret %q is empty", ref.Keychain)
+	case len(ref.Command) > 0:
+		value, err = resolveCommandSecret(ref.Command)
+	default:
+		return "", fmt.Errorf("secret reference is not configured")
 	}
-	return "", fmt.Errorf("secret reference is not configured")
+	if err != nil {
+		return "", err
+	}
+	return rejectAndReturn(value)
+}
+
+func rejectAndReturn(value string) (string, error) {
+	if err := rejectControlChars(value); err != nil {
+		return "", err
+	}
+	return value, nil
 }
 
 func SetKeychainSecret(name, value string) error {

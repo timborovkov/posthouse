@@ -52,6 +52,14 @@ _Avoid_: Calendar account, feed
 An encrypted, opaque, short-lived record that binds one external write to its exact connection, acting identity, payload digest, preview, and provider preconditions. Preparation does not perform the provider side effect.
 _Avoid_: Draft, queued action
 
+**Policy**:
+Optional deny-list of write classes (`mail.send`, `mail.move`, `mail.mark`, `mail.trash`, `mail.junk`, `mail.draft`, `calendar.write`). Empty means allow everything. Denials apply to prepare and execute on every surface (CLI, MCP, TUI).
+_Avoid_: Permission, ACL, role
+
+**MCP profile**:
+The MCP tool surface: `full` (default, all tools) or `readonly` (read/sync/cache tools only; prepare and execute tools are omitted). Independent of policy deny classes.
+_Avoid_: Mode, sandbox, permission set
+
 **Offline cache**:
 The encrypted local SQLite state used for bounded stale reads, sync state, fetched bodies/attachments, and prepared operations. It is not a canonical mailbox or calendar database.
 _Avoid_: Archive, backup

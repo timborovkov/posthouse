@@ -80,9 +80,20 @@ Personal Outlook/Hotmail is the reliable first try.
 
 ### Fastmail, iCloud, Proton, or other IMAP
 
-Those use an **app password**, not Allow. Copy
-[examples/connection.json](./examples/connection.json), put the app password in
-the environment, then:
+Those use an **app password**, not Allow. Probe hosts from the identity email,
+or copy [examples/connection.json](./examples/connection.json):
+
+```sh
+posthouse connection probe --email you@acme.example
+export ACME_MAIL_PASSWORD='the app password'
+posthouse connection add --email you@acme.example --id acme --name "Acme work" \
+  --category work --label acme --secret-env ACME_MAIL_PASSWORD --caldav
+posthouse connection discover acme
+posthouse connection doctor acme
+```
+
+Private or loopback discovered hosts need `--allow-private` (or
+`POSTHOUSE_AUTOCONFIG_ALLOW_PRIVATE=1`). Or add from a JSON file:
 
 ```sh
 posthouse connection add --file connection.json
@@ -138,14 +149,12 @@ Local MCP — paste into the agent's MCP config, with the real path to `posthous
 }
 ```
 
-Find the binary with `command -v posthouse`.
+Find the binary with `command -v posthouse`. Optional `--profile readonly` on
+`mcp stdio` omits prepare/execute tools. `posthouse policy deny mail.send`
+blocks those writes on every surface.
 
 Codex and Claude can also run the CLI directly after the skill install. Tell
 the agent: "Use Posthouse to search my mail."
-
-### On a server (Railway, Docker, VPS)
-
-Posthouse is already running as `posthouse serve`. Give the agent:
 
 ### On a server (Railway, Docker, VPS)
 

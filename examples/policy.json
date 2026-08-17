@@ -1,0 +1,4 @@
+{
+  "deny": ["mail.send", "mail.trash"],
+  "mcp_profile": "readonly"
+}

@@ -6,6 +6,7 @@ type Config struct {
 	Version     int          `json:"version"`
 	Connections []Connection `json:"connections"`
 	Cache       CacheConfig  `json:"cache,omitempty"`
+	Policy      PolicyConfig `json:"policy,omitempty"`
 }
 
 type CacheConfig struct {
@@ -15,6 +16,15 @@ type CacheConfig struct {
 	MessageBodyDays     int    `json:"message_body_days,omitempty"`
 	EventPastDays       int    `json:"event_past_days,omitempty"`
 	EventFutureDays     int    `json:"event_future_days,omitempty"`
+}
+
+// PolicyConfig limits provider writes. Default (empty) allows everything.
+type PolicyConfig struct {
+	// Deny lists operation classes such as mail.send, mail.move, mail.trash,
+	// mail.junk, mail.mark, mail.draft, or calendar.write.
+	Deny []string `json:"deny,omitempty"`
+	// MCPProfile is the default MCP tool surface: empty/"full" or "readonly".
+	MCPProfile string `json:"mcp_profile,omitempty"`
 }
 
 type Connection struct {
@@ -49,8 +59,9 @@ type MailConfig struct {
 }
 
 type SecretRef struct {
-	Env      string `json:"env,omitempty"`
-	Keychain string `json:"keychain,omitempty"`
+	Env      string   `json:"env,omitempty"`
+	Keychain string   `json:"keychain,omitempty"`
+	Command  []string `json:"command,omitempty"` // argv that prints the secret on stdout
 }
 
 type IMAPConfig struct {
@@ -58,6 +69,7 @@ type IMAPConfig struct {
 	TLS      bool   `json:"tls"`
 	StartTLS bool   `json:"starttls,omitempty"`
 	Insecure bool   `json:"insecure,omitempty"`
+	Proxy    string `json:"proxy,omitempty"` // socks5:// or http://; else ALL_PROXY/HTTPS_PROXY/HTTP_PROXY
 }
 
 type SMTPConfig struct {
@@ -65,6 +77,7 @@ type SMTPConfig struct {
 	TLS      bool   `json:"tls"`
 	StartTLS bool   `json:"starttls,omitempty"`
 	Insecure bool   `json:"insecure,omitempty"`
+	Proxy    string `json:"proxy,omitempty"` // socks5:// or http://; else ALL_PROXY/HTTPS_PROXY/HTTP_PROXY
 }
 
 type FolderConfig struct {
@@ -189,9 +202,37 @@ type MessageDetail struct {
 	ReplyTo     []Address    `json:"reply_to,omitempty"`
 	Text        string       `json:"text,omitempty"`
 	HTML        string       `json:"html,omitempty"`
+	Markdown    string       `json:"markdown,omitempty"`
 	InReplyTo   string       `json:"in_reply_to,omitempty"`
 	References  []string     `json:"references,omitempty"`
 	Attachments []Attachment `json:"attachments,omitempty"`
+}
+
+// TriageItem is a compact message summary for agent inbox triage.
+type TriageItem struct {
+	ConnectionID   string    `json:"connection_id"`
+	Folder         string    `json:"folder"`
+	UID            uint32    `json:"uid"`
+	From           []Address `json:"from,omitempty"`
+	Subject        string    `json:"subject,omitempty"`
+	Date           time.Time `json:"date,omitempty"`
+	Unread         bool      `json:"unread"`
+	Flagged        bool      `json:"flagged,omitempty"`
+	HasAttachments bool      `json:"has_attachments,omitempty"`
+	Preview        string    `json:"preview,omitempty"`
+}
+
+type TriagePage struct {
+	Items      []TriageItem  `json:"items"`
+	NextCursor string        `json:"next_cursor,omitempty"`
+	Errors     []SourceError `json:"errors,omitempty"`
+}
+
+type UnreadSummary struct {
+	ConnectionID string `json:"connection_id"`
+	Folder       string `json:"folder"`
+	Unread       int    `json:"unread"`
+	Error        string `json:"error,omitempty"`
 }
 
 type RecurrencePeriod struct {

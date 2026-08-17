@@ -18,13 +18,14 @@ func (c *CLI) serve(ctx context.Context, args []string) error {
 	flags.SetOutput(c.stderr)
 	address := flags.String("address", "", "listen address (default 127.0.0.1:8791, or $PORT when set)")
 	allowContainerListener := flags.Bool("allow-container-listener", false, "allow cleartext non-loopback binding inside an externally loopback- or TLS-constrained container network")
+	profile := flags.String("profile", "", "MCP tool profile: full or readonly (default from config/env)")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
-	return c.runHTTP(ctx, *address, *allowContainerListener)
+	return c.runHTTP(ctx, *address, *allowContainerListener, *profile)
 }
 
-func (c *CLI) runHTTP(ctx context.Context, address string, allowContainerListener bool) error {
+func (c *CLI) runHTTP(ctx context.Context, address string, allowContainerListener bool, profile string) error {
 	key, err := httpauth.AccessKey()
 	if err != nil {
 		return err
@@ -34,7 +35,11 @@ func (c *CLI) runHTTP(ctx context.Context, address string, allowContainerListene
 		return err
 	}
 	logger := slog.New(slog.NewJSONHandler(c.stderr, nil))
-	return mcpserver.New(c.service).RunHTTP(ctx, listen, key, allowContainerListener, logger)
+	server, err := mcpserver.New(c.service, profile)
+	if err != nil {
+		return err
+	}
+	return server.RunHTTP(ctx, listen, key, allowContainerListener, logger)
 }
 
 func resolveListenAddress(address string, allowContainerListener bool) (string, bool, error) {
@@ -82,22 +87,36 @@ func truthyEnv(name string) bool {
 
 func (c *CLI) mcp(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: posthouse mcp <stdio|http>")
+		return fmt.Errorf("usage: posthouse mcp <stdio|http> [--profile full|readonly]")
 	}
-	server := mcpserver.New(c.service)
 	switch args[0] {
-	case "stdio":
-		return server.RunStdio(ctx)
-	case "http":
-		flags := flag.NewFlagSet("mcp http", flag.ContinueOnError)
-		flags.SetOutput(c.stderr)
-		address := flags.String("address", "", "listen address (default 127.0.0.1:8791, or $PORT when set)")
-		allowContainerListener := flags.Bool("allow-container-listener", false, "allow cleartext non-loopback binding inside an externally loopback- or TLS-constrained container network")
-		if err := flags.Parse(args[1:]); err != nil {
-			return err
-		}
-		return c.runHTTP(ctx, *address, *allowContainerListener)
+	case "stdio", "http":
 	default:
 		return fmt.Errorf("unknown MCP transport %q", args[0])
 	}
+	flags := flag.NewFlagSet("mcp "+args[0], flag.ContinueOnError)
+	flags.SetOutput(c.stderr)
+	profile := flags.String("profile", "", "MCP tool profile: full or readonly (default from config/env)")
+	var (
+		address                *string
+		allowContainerListener *bool
+	)
+	if args[0] == "http" {
+		address = flags.String("address", "", "listen address (default 127.0.0.1:8791, or $PORT when set)")
+		allowContainerListener = flags.Bool("allow-container-listener", false, "allow cleartext non-loopback binding inside an externally loopback- or TLS-constrained container network")
+	}
+	if err := flags.Parse(args[1:]); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return fmt.Errorf("unexpected arguments: %v", flags.Args())
+	}
+	if args[0] == "stdio" {
+		server, err := mcpserver.New(c.service, *profile)
+		if err != nil {
+			return err
+		}
+		return server.RunStdio(ctx)
+	}
+	return c.runHTTP(ctx, *address, *allowContainerListener, *profile)
 }
