@@ -531,5 +531,20 @@ docker compose up --build
         · not affiliated with Google or Microsoft
       </p>
     </footer>
+    <script>
+      (function () {
+        function openHash() {
+          var id = location.hash.slice(1);
+          if (!id) return;
+          var el = document.getElementById(id);
+          if (el && el.tagName === "DETAILS") {
+            el.open = true;
+            el.scrollIntoView({ block: "nearest" });
+          }
+        }
+        openHash();
+        window.addEventListener("hashchange", openHash);
+      })();
+    </script>
   </body>
 </html>

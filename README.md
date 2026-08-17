@@ -80,8 +80,8 @@ First connection, agents, Docker, Railway:
 Full CLI, MCP, REST, and deploy detail:
 [INSTALLATION-AND-USAGE-GUIDE.md](./INSTALLATION-AND-USAGE-GUIDE.md).
 
-Agent-oriented setup on the site: [website/#setup](./website/index.html#setup)
-(Claude, Codex, Hermes, Cursor, Railway).
+Setup guides on the site: [website/#setup](./website/index.html#setup)
+(CLI install, Claude, Codex, Hermes, Cursor, Railway, Docker).
 
 ## Develop
 
