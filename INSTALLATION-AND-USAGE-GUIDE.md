@@ -163,12 +163,17 @@ Request bodies are capped at 36 MiB.
 
 Failed bearer attempts are counted per client address; eight failures in
 fifteen minutes return `429` with `Retry-After`. Set `POSTHOUSE_TRUST_PROXY=1`
-only when a TLS reverse proxy supplies `X-Forwarded-For`.
+only when a TLS reverse proxy supplies `X-Real-IP` or `X-Forwarded-For`.
+Lockout then keys off `X-Real-IP` when present, otherwise the rightmost
+`X-Forwarded-For` hop (the leftmost hop is attacker-controlled).
 
 The direct server is restricted to loopback. Expose it remotely only through a
 TLS-terminating reverse proxy, and keep bearer auth. `--allow-container-listener`
 is for a container whose published port is already loopback- or TLS-constrained.
-Hosted platforms that inject `PORT` (Railway) listen on `0.0.0.0:$PORT`.
+Hosted platforms that inject `PORT` still need that flag (or
+`POSTHOUSE_ALLOW_CONTAINER_LISTENER=1`) before Posthouse will listen on a
+non-loopback address. To bind a specific address, set `--address` or
+`POSTHOUSE_HTTP_ADDRESS`.
 
 ## Agent skills
 
@@ -184,8 +189,11 @@ CLI, REST, and MCP contracts, including prepare-before-execute.
 ## Docker
 
 ```sh
+# Either copy the example and fill in keys:
 cp .env.example .env
-# set POSTHOUSE_CACHE_KEY and POSTHOUSE_ACCESS_KEY, or: posthouse setup --write-env .env
+# Or generate a new file (refuses to overwrite an existing .env unless you pass --force):
+# posthouse setup --write-env .env
+# Then set POSTHOUSE_CACHE_KEY and POSTHOUSE_ACCESS_KEY if you copied the example.
 docker compose up --build
 ```
 
@@ -199,8 +207,10 @@ docker compose -f docker-compose.yml -f docker-compose.private.yml up --build
 
 [railway.json](./railway.json) builds the Dockerfile, health-checks `/healthz`,
 and expects a volume at `/data`. Set `POSTHOUSE_CACHE_KEY`,
-`POSTHOUSE_ACCESS_KEY`, and provider secrets. Railway's `PORT` is picked up
-automatically. This is still a personal process, not a Posthouse-hosted service.
+`POSTHOUSE_ACCESS_KEY`, and provider secrets. Railway injects `PORT`;
+[railway.json](./railway.json) also passes `--allow-container-listener` so the
+process listens on `0.0.0.0:$PORT`. This is still a personal process, not a
+Posthouse-hosted service.
 
 ## Cache
 

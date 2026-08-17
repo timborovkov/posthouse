@@ -160,13 +160,49 @@ func TestResolveListenAddressUsesPortForHostedPlatforms(t *testing.T) {
 	t.Setenv("PORT", "8080")
 	t.Setenv("POSTHOUSE_HTTP_ADDRESS", "")
 	t.Setenv("POSTHOUSE_ALLOW_CONTAINER_LISTENER", "")
-	address, allow := resolveListenAddress("", false)
+	address, allow, err := resolveListenAddress("", true)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if address != "0.0.0.0:8080" || !allow {
 		t.Fatalf("PORT listen = %q allow=%v", address, allow)
 	}
-	address, allow = resolveListenAddress("127.0.0.1:8791", false)
+	address, allow, err = resolveListenAddress("127.0.0.1:8791", false)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if address != "127.0.0.1:8791" || allow {
 		t.Fatalf("explicit loopback = %q allow=%v", address, allow)
+	}
+}
+
+func TestResolveListenAddressKeepsLoopbackWhenPortSetWithoutContainerFlag(t *testing.T) {
+	t.Setenv("PORT", "8080")
+	t.Setenv("POSTHOUSE_HTTP_ADDRESS", "")
+	t.Setenv("POSTHOUSE_ALLOW_CONTAINER_LISTENER", "")
+	address, allow, err := resolveListenAddress("", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if address != "127.0.0.1:8080" || allow {
+		t.Fatalf("PORT without container flag listen = %q allow=%v", address, allow)
+	}
+
+	t.Setenv("POSTHOUSE_ALLOW_CONTAINER_LISTENER", "1")
+	address, allow, err = resolveListenAddress("", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if address != "0.0.0.0:8080" || !allow {
+		t.Fatalf("PORT with allow-container env listen = %q allow=%v", address, allow)
+	}
+}
+
+func TestResolveListenAddressRejectsInvalidPort(t *testing.T) {
+	t.Setenv("PORT", "not-a-port")
+	t.Setenv("POSTHOUSE_HTTP_ADDRESS", "")
+	if _, _, err := resolveListenAddress("", true); err == nil {
+		t.Fatal("expected invalid PORT error")
 	}
 }
 

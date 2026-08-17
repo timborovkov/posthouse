@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/timborovkov/posthouse/internal/httpauth"
@@ -15,7 +16,7 @@ import (
 func (c *CLI) serve(ctx context.Context, args []string) error {
 	flags := flag.NewFlagSet("serve", flag.ContinueOnError)
 	flags.SetOutput(c.stderr)
-	address := flags.String("address", "", "listen address (default 127.0.0.1:8791, or 0.0.0.0:$PORT on hosted platforms)")
+	address := flags.String("address", "", "listen address (default 127.0.0.1:8791, or $PORT when set)")
 	allowContainerListener := flags.Bool("allow-container-listener", false, "allow cleartext non-loopback binding inside an externally loopback- or TLS-constrained container network")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -28,29 +29,46 @@ func (c *CLI) runHTTP(ctx context.Context, address string, allowContainerListene
 	if err != nil {
 		return err
 	}
-	listen, allowContainerListener := resolveListenAddress(address, allowContainerListener)
+	listen, allowContainerListener, err := resolveListenAddress(address, allowContainerListener)
+	if err != nil {
+		return err
+	}
 	logger := slog.New(slog.NewJSONHandler(c.stderr, nil))
 	return mcpserver.New(c.service).RunHTTP(ctx, listen, key, allowContainerListener, logger)
 }
 
-func resolveListenAddress(address string, allowContainerListener bool) (string, bool) {
+func resolveListenAddress(address string, allowContainerListener bool) (string, bool, error) {
+	if truthyEnv("POSTHOUSE_ALLOW_CONTAINER_LISTENER") {
+		allowContainerListener = true
+	}
 	address = strings.TrimSpace(address)
 	if address == "" {
 		address = strings.TrimSpace(os.Getenv("POSTHOUSE_HTTP_ADDRESS"))
 	}
 	if address == "" {
 		if port := strings.TrimSpace(os.Getenv("PORT")); port != "" {
-			address = "0.0.0.0:" + port
-			allowContainerListener = true
+			if err := validateTCPPort(port); err != nil {
+				return "", false, err
+			}
+			host := "127.0.0.1"
+			if allowContainerListener {
+				host = "0.0.0.0"
+			}
+			address = host + ":" + port
 		}
 	}
 	if address == "" {
 		address = "127.0.0.1:8791"
 	}
-	if truthyEnv("POSTHOUSE_ALLOW_CONTAINER_LISTENER") {
-		allowContainerListener = true
+	return address, allowContainerListener, nil
+}
+
+func validateTCPPort(port string) error {
+	n, err := strconv.Atoi(port)
+	if err != nil || n < 1 || n > 65535 {
+		return fmt.Errorf("PORT must be a TCP port number between 1 and 65535")
 	}
-	return address, allowContainerListener
+	return nil
 }
 
 func truthyEnv(name string) bool {
@@ -73,7 +91,7 @@ func (c *CLI) mcp(ctx context.Context, args []string) error {
 	case "http":
 		flags := flag.NewFlagSet("mcp http", flag.ContinueOnError)
 		flags.SetOutput(c.stderr)
-		address := flags.String("address", "", "listen address (default 127.0.0.1:8791, or 0.0.0.0:$PORT on hosted platforms)")
+		address := flags.String("address", "", "listen address (default 127.0.0.1:8791, or $PORT when set)")
 		allowContainerListener := flags.Bool("allow-container-listener", false, "allow cleartext non-loopback binding inside an externally loopback- or TLS-constrained container network")
 		if err := flags.Parse(args[1:]); err != nil {
 			return err

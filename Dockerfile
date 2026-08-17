@@ -7,7 +7,7 @@ COPY . .
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/posthouse ./cmd/posthouse
 
 FROM alpine:3.22
-RUN apk add --no-cache ca-certificates \
+RUN apk add --no-cache ca-certificates wget \
     && addgroup -S posthouse \
     && adduser -S -G posthouse -u 10001 posthouse
 COPY --from=build /out/posthouse /usr/local/bin/posthouse

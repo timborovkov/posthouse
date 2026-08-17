@@ -3,9 +3,11 @@ package mcpserver
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -83,10 +85,12 @@ func (s *Server) restConnections(writer http.ResponseWriter, request *http.Reque
 		pageInput: pageInput{Cursor: query.Get("cursor")},
 	}
 	if raw := query.Get("page_size"); raw != "" {
-		if _, err := fmt.Sscanf(raw, "%d", &input.PageSize); err != nil {
-			writeError(writer, http.StatusBadRequest, fmt.Errorf("page_size: %w", err))
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 1 {
+			writeError(writer, http.StatusBadRequest, fmt.Errorf("page_size must be a positive integer"))
 			return
 		}
+		input.PageSize = n
 	}
 	page, err := s.service.ListConnections(input.selector(), input.PageSize, input.Cursor)
 	writeResult(writer, page, err)
@@ -333,8 +337,11 @@ func (s *Server) restOperationExecute(writer http.ResponseWriter, request *http.
 	}
 	result, err := s.service.ExecuteOperation(request.Context(), input.Token)
 	if err != nil {
-		payload := map[string]any{"token": result.Token, "status": result.Status, "executed_at": result.ExecutedAt, "result": result.Result, "error": err.Error()}
-		writeJSON(writer, http.StatusConflict, payload)
+		if result.Status == "failed" || result.Status == "uncertain" {
+			writeJSON(writer, http.StatusOK, result)
+			return
+		}
+		writeError(writer, http.StatusBadRequest, err)
 		return
 	}
 	writeJSON(writer, http.StatusOK, result)
@@ -343,7 +350,9 @@ func (s *Server) restOperationExecute(writer http.ResponseWriter, request *http.
 func (s *Server) restSync(writer http.ResponseWriter, request *http.Request) {
 	var input selectorInput
 	if request.Body != nil && request.ContentLength != 0 {
-		if !decodeJSON(writer, request, &input) {
+		decoder := json.NewDecoder(io.LimitReader(request.Body, maxMCPHTTPRequestBytes))
+		if err := decoder.Decode(&input); err != nil && !errors.Is(err, io.EOF) {
+			writeError(writer, http.StatusBadRequest, fmt.Errorf("decode JSON: %w", err))
 			return
 		}
 	}

@@ -66,6 +66,14 @@ func TestGuardAcceptsBearerAndHeaderKey(t *testing.T) {
 		t.Fatalf("bearer status = %d", bearer.Code)
 	}
 
+	lowercase := httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodGet, "/v1/cache", nil)
+	request.Header.Set("Authorization", "bearer test-access-key-1")
+	handler.ServeHTTP(lowercase, request)
+	if lowercase.Code != http.StatusNoContent {
+		t.Fatalf("lowercase bearer status = %d", lowercase.Code)
+	}
+
 	headerKey := httptest.NewRecorder()
 	request = httptest.NewRequest(http.MethodGet, "/v1/cache", nil)
 	request.Header.Set("X-Posthouse-Key", "test-access-key-1")
@@ -126,15 +134,69 @@ func TestGuardTrustsForwardedClientWhenEnabled(t *testing.T) {
 	if !guard.trustProxy {
 		t.Fatal("expected trust proxy")
 	}
-	request := httptest.NewRequest(http.MethodGet, "/", nil)
-	request.RemoteAddr = "127.0.0.1:1"
-	request.Header.Set("X-Forwarded-For", "198.51.100.9, 10.0.0.1")
-	if id := guard.clientID(request); id == "" {
-		t.Fatal("empty client id")
-	}
-	plain := httptest.NewRequest(http.MethodGet, "/", nil)
-	plain.RemoteAddr = "127.0.0.1:1"
-	if guard.clientID(request) == guard.clientID(plain) {
+	spoofed := httptest.NewRequest(http.MethodGet, "/", nil)
+	spoofed.RemoteAddr = "127.0.0.1:1"
+	spoofed.Header.Set("X-Forwarded-For", "198.51.100.9, 203.0.113.10")
+
+	rightmost := httptest.NewRequest(http.MethodGet, "/", nil)
+	rightmost.RemoteAddr = "203.0.113.10:1"
+
+	leftmost := httptest.NewRequest(http.MethodGet, "/", nil)
+	leftmost.RemoteAddr = "198.51.100.9:1"
+
+	proxy := httptest.NewRequest(http.MethodGet, "/", nil)
+	proxy.RemoteAddr = "127.0.0.1:1"
+
+	if guard.clientID(spoofed) == guard.clientID(proxy) {
 		t.Fatal("trusted forwarded client should not collapse onto the proxy address")
+	}
+	if guard.clientID(spoofed) != guard.clientID(rightmost) {
+		t.Fatal("trusted X-Forwarded-For should use the rightmost hop")
+	}
+	if guard.clientID(spoofed) == guard.clientID(leftmost) {
+		t.Fatal("leftmost X-Forwarded-For hop is spoofable and must not identify the client")
+	}
+
+	realIP := httptest.NewRequest(http.MethodGet, "/", nil)
+	realIP.RemoteAddr = "127.0.0.1:1"
+	realIP.Header.Set("X-Forwarded-For", "198.51.100.9")
+	realIP.Header.Set("X-Real-IP", "203.0.113.10")
+	if guard.clientID(realIP) != guard.clientID(rightmost) {
+		t.Fatal("X-Real-IP should win over X-Forwarded-For")
+	}
+}
+
+func TestGuardClearsFailuresAfterLockoutExpires(t *testing.T) {
+	guard, err := NewGuard("test-access-key-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	guard.now = func() time.Time { return now }
+	handler := guard.Middleware(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusNoContent)
+	}))
+
+	bad := httptest.NewRequest(http.MethodGet, "/v1/cache", nil)
+	bad.RemoteAddr = "192.0.2.40:1234"
+	bad.Header.Set("Authorization", "Bearer wrong-access-key")
+	for i := 0; i < maxFailures; i++ {
+		handler.ServeHTTP(httptest.NewRecorder(), bad)
+	}
+
+	now = now.Add(lockoutDuration + time.Second)
+	good := httptest.NewRequest(http.MethodGet, "/v1/cache", nil)
+	good.RemoteAddr = "192.0.2.40:1234"
+	good.Header.Set("Authorization", "Bearer test-access-key-1")
+	unlocked := httptest.NewRecorder()
+	handler.ServeHTTP(unlocked, good)
+	if unlocked.Code != http.StatusNoContent {
+		t.Fatalf("correct key after lockout expiry status = %d", unlocked.Code)
+	}
+
+	retry := httptest.NewRecorder()
+	handler.ServeHTTP(retry, bad)
+	if retry.Code != http.StatusUnauthorized {
+		t.Fatalf("one failure after lockout expiry should be 401, got %d", retry.Code)
 	}
 }

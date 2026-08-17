@@ -72,6 +72,52 @@ func TestRESTRejectsUnknownMailMode(t *testing.T) {
 	}
 }
 
+func TestRESTSyncAcceptsEmptyBody(t *testing.T) {
+	store, err := config.New(filepath.Join(t.TempDir(), "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler, err := New(service.New(store)).HTTPHandler(testAccessKey, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	empty := httptest.NewRecorder()
+	handler.ServeHTTP(empty, authorizedRequest(http.MethodPost, "/v1/sync", ""))
+	if empty.Code != http.StatusOK {
+		t.Fatalf("empty-body sync status=%d body=%s", empty.Code, empty.Body.String())
+	}
+
+	unknownLength := httptest.NewRecorder()
+	request := authorizedRequest(http.MethodPost, "/v1/sync", "")
+	request.Body = io.NopCloser(strings.NewReader(""))
+	request.ContentLength = -1
+	handler.ServeHTTP(unknownLength, request)
+	if unknownLength.Code != http.StatusOK {
+		t.Fatalf("unknown-length sync status=%d body=%s", unknownLength.Code, unknownLength.Body.String())
+	}
+}
+
+func TestRESTConnectionsRejectsInvalidPageSize(t *testing.T) {
+	handler := testHTTPHandler(t)
+	for _, raw := range []string{"nope", "-1", "1abc"} {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, authorizedRequest(http.MethodGet, "/v1/connections?page_size="+raw, ""))
+		if recorder.Code != http.StatusBadRequest {
+			t.Fatalf("page_size %q status=%d body=%s", raw, recorder.Code, recorder.Body.String())
+		}
+	}
+}
+
+func TestRESTExecuteUnknownTokenIsBadRequest(t *testing.T) {
+	handler := testHTTPHandler(t)
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, authorizedRequest(http.MethodPost, "/v1/operations/execute", `{"token":"missing"}`))
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("unknown token status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
 func testHTTPHandler(t *testing.T) http.Handler {
 	t.Helper()
 	store, err := config.New(filepath.Join(t.TempDir(), "config.json"))

@@ -99,47 +99,63 @@ func (g *Guard) Middleware(next http.Handler) http.Handler {
 }
 
 func authorized(request *http.Request, key string) bool {
-	provided := request.Header.Get("Authorization")
-	wanted := "Bearer " + key
-	if subtle.ConstantTimeCompare([]byte(provided), []byte(wanted)) == 1 {
-		return true
+	bearerOK := secretEqual(bearerToken(request.Header.Get("Authorization")), key)
+	headerOK := secretEqual(strings.TrimSpace(request.Header.Get("X-Posthouse-Key")), key)
+	return bearerOK || headerOK
+}
+
+func bearerToken(header string) string {
+	const prefix = "bearer "
+	if len(header) < len(prefix) || !strings.EqualFold(header[:len(prefix)], prefix) {
+		return ""
 	}
-	// Accept a second header so REST clients can avoid logging Authorization
-	// middleware that rewrites Bearer tokens. The value is still compared in
-	// constant time and is never logged.
-	headerKey := request.Header.Get("X-Posthouse-Key")
-	return subtle.ConstantTimeCompare([]byte(headerKey), []byte(key)) == 1
+	return strings.TrimSpace(header[len(prefix):])
+}
+
+func secretEqual(provided, wanted string) bool {
+	sumProvided := sha256.Sum256([]byte(provided))
+	sumWanted := sha256.Sum256([]byte(wanted))
+	return subtle.ConstantTimeCompare(sumProvided[:], sumWanted[:]) == 1
 }
 
 func (g *Guard) clientID(request *http.Request) string {
-	host := ""
-	if g.trustProxy {
-		if forwarded := request.Header.Get("X-Forwarded-For"); forwarded != "" {
-			host = strings.TrimSpace(strings.Split(forwarded, ",")[0])
-		}
-		if host == "" {
-			host = strings.TrimSpace(request.Header.Get("X-Real-IP"))
-		}
-	}
-	if host == "" {
-		host, _, _ = net.SplitHostPort(request.RemoteAddr)
-		if host == "" {
-			host = request.RemoteAddr
-		}
-	}
+	host := clientAddress(request, g.trustProxy)
 	sum := sha256.Sum256([]byte(host))
 	return hex.EncodeToString(sum[:8])
+}
+
+func clientAddress(request *http.Request, trustProxy bool) string {
+	if trustProxy {
+		if realIP := strings.TrimSpace(request.Header.Get("X-Real-IP")); realIP != "" {
+			return realIP
+		}
+		if forwarded := request.Header.Get("X-Forwarded-For"); forwarded != "" {
+			parts := strings.Split(forwarded, ",")
+			if host := strings.TrimSpace(parts[len(parts)-1]); host != "" {
+				return host
+			}
+		}
+	}
+	host, _, err := net.SplitHostPort(request.RemoteAddr)
+	if err != nil || host == "" {
+		return request.RemoteAddr
+	}
+	return host
 }
 
 func (g *Guard) lockout(client string) time.Duration {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	g.pruneLocked(g.now())
+	now := g.now()
+	g.pruneLocked(now)
 	state := g.clients[client]
 	if state == nil {
 		return 0
 	}
-	now := g.now()
+	if !state.lockedUntil.IsZero() && !now.Before(state.lockedUntil) {
+		delete(g.clients, client)
+		return 0
+	}
 	if now.Before(state.lockedUntil) {
 		return state.lockedUntil.Sub(now).Truncate(time.Second) + time.Second
 	}
@@ -156,12 +172,16 @@ func (g *Guard) noteFailure(client string) time.Duration {
 		if len(g.clients) >= maxTrackedClients {
 			g.evictOldest(now)
 		}
+		if len(g.clients) >= maxTrackedClients {
+			return lockoutDuration
+		}
 		state = &clientState{windowStart: now}
 		g.clients[client] = state
 	}
 	if now.Sub(state.windowStart) > failureWindow {
 		state.failures = 0
 		state.windowStart = now
+		state.lockedUntil = time.Time{}
 	}
 	state.failures++
 	state.lastSeen = now
@@ -180,7 +200,12 @@ func (g *Guard) noteSuccess(client string) {
 
 func (g *Guard) pruneLocked(now time.Time) {
 	for id, state := range g.clients {
-		if !state.lockedUntil.IsZero() && now.After(state.lockedUntil) && now.Sub(state.lastSeen) > failureWindow {
+		if now.Before(state.lockedUntil) {
+			continue
+		}
+		expiredLock := !state.lockedUntil.IsZero()
+		stale := now.Sub(state.lastSeen) > failureWindow && now.Sub(state.windowStart) > failureWindow
+		if expiredLock || stale {
 			delete(g.clients, id)
 		}
 	}
@@ -190,7 +215,7 @@ func (g *Guard) evictOldest(now time.Time) {
 	var oldest string
 	var seen time.Time
 	for id, state := range g.clients {
-		if !state.lockedUntil.IsZero() && now.Before(state.lockedUntil) {
+		if now.Before(state.lockedUntil) {
 			continue
 		}
 		if oldest == "" || state.lastSeen.Before(seen) {
