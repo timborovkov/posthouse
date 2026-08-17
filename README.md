@@ -4,11 +4,13 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 Local-first CLI, MCP server, and terminal app for multiple mail and calendar
-connections. IMAP/SMTP, CalDAV, and read-only ICS feeds. Reads can span
-connections; every write is previewed, then executed on exactly one
-connection.
+connections. Generic IMAP/SMTP, CalDAV, and read-only ICS feeds, plus native
+Gmail API and Microsoft Graph backends. Reads can span connections; every
+write is previewed, then executed on exactly one connection.
 
-v0.2. No OAuth, no native Gmail/Microsoft APIs. See [TODO.md](./TODO.md).
+v0.2 protocol surface stays. Native Gmail/Microsoft connections are additional
+backends behind the same selector, message/event shapes, and prepare-before-execute
+flow. See [TODO.md](./TODO.md).
 
 ## Install
 

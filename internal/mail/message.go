@@ -196,6 +196,10 @@ func MailboxUIDValidityContext(ctx context.Context, connection model.Connection,
 	return selected.UIDValidity, nil
 }
 
+func ParseRFC822(raw []byte) (FetchedMessage, error) {
+	return parseMessage(raw)
+}
+
 func parseMessage(raw []byte) (FetchedMessage, error) {
 	reader, err := gomail.CreateReader(bytes.NewReader(raw))
 	if err != nil && reader == nil {

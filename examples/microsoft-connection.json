@@ -1,0 +1,16 @@
+{
+  "id": "microsoft-work",
+  "name": "Microsoft work",
+  "category": "work",
+  "labels": ["microsoft", "primary"],
+  "identity": {
+    "name": "Your Name",
+    "email": "you@contoso.example"
+  },
+  "mail": {
+    "kind": "microsoft"
+  },
+  "calendar": {
+    "kind": "microsoft"
+  }
+}

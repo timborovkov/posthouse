@@ -25,6 +25,8 @@ type SearchOptions struct {
 	Limit               int
 	CursorTime          time.Time
 	CursorUID           uint32
+	CursorID            string
+	PageToken           string
 	MaxUIDExclusive     uint32
 	ExpectedUIDValidity uint32
 	Mode                string
@@ -34,6 +36,7 @@ type SearchResult struct {
 	Messages    []model.Message
 	UIDValidity uint32
 	UIDNext     uint32
+	PageToken   string
 	HasMore     bool
 }
 

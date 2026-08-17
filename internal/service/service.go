@@ -20,8 +20,11 @@ import (
 	"github.com/emersion/go-imap/v2"
 	"github.com/timborovkov/posthouse/internal/calendar"
 	"github.com/timborovkov/posthouse/internal/config"
+	"github.com/timborovkov/posthouse/internal/gmail"
 	postmail "github.com/timborovkov/posthouse/internal/mail"
+	"github.com/timborovkov/posthouse/internal/microsoft"
 	"github.com/timborovkov/posthouse/internal/model"
+	"github.com/timborovkov/posthouse/internal/oauth"
 	"github.com/timborovkov/posthouse/internal/pagination"
 	"github.com/timborovkov/posthouse/internal/selector"
 	"github.com/timborovkov/posthouse/internal/state"
@@ -47,6 +50,7 @@ type Service struct {
 	mailGetAttachment      func(context.Context, model.Connection, string, uint32, string) (model.Attachment, []byte, uint32, error)
 	mailboxUIDValidity     func(context.Context, model.Connection, string) (uint32, error)
 	calendarListCalDAV     func(context.Context, model.Connection, []string, time.Time, time.Time, string) ([]model.Event, error)
+	authorizeOAuth         func(context.Context, oauth.Config, bool) (string, error)
 	stateMu                sync.Mutex
 	state                  *state.Store
 	stateErr               error
@@ -77,11 +81,11 @@ const maxOutboundAttachmentBytes int64 = 25 << 20
 
 func New(store *config.Store) *Service {
 	return &Service{
-		store: store, calendar: calendar.NewClient(nil), mailSearchContext: postmail.SearchContext,
+		store: store, calendar: calendar.NewClient(nil), mailSearchContext: searchMailContext,
 		mailSnapshotContext: postmail.SnapshotMessageContext,
 		mailAppendContext:   postmail.AppendContext, mailMarkDeletedContext: postmail.MarkDeletedContext,
 		mailGetMessage: postmail.GetContext, mailGetAttachment: postmail.GetAttachmentContext, mailboxUIDValidity: postmail.MailboxUIDValidityContext,
-		mailBuild: postmail.BuildMessage, mailSendRawContext: postmail.SendSerializedContext, mailAppendRawContext: postmail.AppendSerializedCopyContext,
+		mailBuild: postmail.BuildMessage, mailSendRawContext: sendSerializedContext, mailAppendRawContext: postmail.AppendSerializedCopyContext,
 		now: func() time.Time { return time.Now().UTC() },
 	}
 }
@@ -326,6 +330,7 @@ func (s *Service) SearchMessagesContext(ctx context.Context, selection model.Sel
 		connectionOptions.Limit = pageSize + 1
 		connectionOptions.CursorTime = cursorState.BeforeTime
 		connectionOptions.CursorUID = cursorState.BeforeUID
+		connectionOptions.CursorID = cursorState.BeforeID
 		connectionOptions.MaxUIDExclusive = cursorState.UIDNext
 		connectionOptions.ExpectedUIDValidity = cursorState.UIDValidity
 		var result postmail.SearchResult
@@ -391,6 +396,9 @@ func (s *Service) SearchMessagesContext(ctx context.Context, selection model.Sel
 				continue
 			}
 		} else if options.Mode != "offline" {
+			if config.NativeMail(connection) && result.UIDValidity == 0 {
+				result.UIDValidity = 1
+			}
 			if requestCacheID == "" {
 				pageErrors = append(pageErrors, sourceError(connection.ID, "cache_write_skipped", fmt.Errorf("provider identity could not be resolved during read")))
 			} else if mailboxLedger == nil {
@@ -604,6 +612,13 @@ func (s *Service) ListEventsMode(ctx context.Context, selection model.Selector, 
 					} else {
 						events, err = s.calendar.ListCalDAV(ctx, connection, selection.Collections, start, end, query)
 					}
+				} else if config.NativeCalendar(connection) {
+					switch config.CalendarKind(connection.Calendar) {
+					case config.CalendarKindGmail:
+						events, err = gmail.ListEvents(ctx, connection, start, end, query)
+					default:
+						events, err = microsoft.ListEvents(ctx, connection, start, end, query)
+					}
 				} else {
 					events, err = s.calendar.List(ctx, connection, start, end, query)
 				}
@@ -752,7 +767,7 @@ func (s *Service) PrepareSend(ctx context.Context, message model.SendMessage) (m
 }
 
 func (s *Service) prepareSendWithConnection(ctx context.Context, connection model.Connection, message model.SendMessage) (model.PreparedOperation, error) {
-	if connection.Mail.SMTP.Address == "" {
+	if !config.CanSendMail(connection) {
 		return model.PreparedOperation{}, fmt.Errorf("connection %s cannot send mail", connection.ID)
 	}
 	if len(message.To)+len(message.CC)+len(message.BCC) == 0 {
@@ -881,8 +896,14 @@ func (s *Service) PrepareMailAction(ctx context.Context, connectionID, kind stri
 		}
 	case "mail.archive":
 		payload.Destination = connection.Mail.Folders.Archive
+		if config.NativeMail(connection) && payload.Destination == "" {
+			payload.Destination = "ARCHIVE"
+		}
 	case "mail.trash":
 		payload.Destination = connection.Mail.Folders.Trash
+		if config.NativeMail(connection) && payload.Destination == "" {
+			payload.Destination = "TRASH"
+		}
 	default:
 		return model.PreparedOperation{}, fmt.Errorf("unsupported mail action %q", kind)
 	}
@@ -927,6 +948,9 @@ func (s *Service) PrepareDraft(ctx context.Context, connectionID, kind string, l
 		}
 	} else if loc.Folder == "" {
 		loc.Folder = connection.Mail.Folders.Drafts
+		if loc.Folder == "" && config.NativeMail(connection) {
+			loc.Folder = "DRAFTS"
+		}
 	}
 	if loc.Folder == "" {
 		return model.PreparedOperation{}, fmt.Errorf("connection %s has no drafts folder; run connection discover", connection.ID)
@@ -969,16 +993,16 @@ func (s *Service) PrepareCalendarWrite(ctx context.Context, connectionID, kind s
 	if err != nil {
 		return model.PreparedOperation{}, fmt.Errorf("resolve calendar provider: %w", err)
 	}
-	if connection.Calendar.Kind != "caldav" {
+	if connection.Calendar.Kind != "caldav" && !config.NativeCalendar(connection) {
 		return model.PreparedOperation{}, fmt.Errorf("connection %s calendar is read-only", connection.ID)
 	}
 	if kind != "calendar.create" && kind != "calendar.update" {
 		return model.PreparedOperation{}, fmt.Errorf("unsupported calendar operation %q", kind)
 	}
-	if kind == "calendar.update" && event.ETag == "" {
+	if kind == "calendar.update" && event.ETag == "" && !config.NativeCalendar(connection) {
 		return model.PreparedOperation{}, fmt.Errorf("calendar update requires the current ETag")
 	}
-	if kind == "calendar.update" {
+	if kind == "calendar.update" && event.ETag != "" && !config.NativeCalendar(connection) {
 		if err := calendar.ValidateCalDAVETag(event.ETag); err != nil {
 			return model.PreparedOperation{}, err
 		}
@@ -989,8 +1013,10 @@ func (s *Service) PrepareCalendarWrite(ctx context.Context, connectionID, kind s
 	if kind == "calendar.update" && event.RecurrenceID == "" && event.SeriesID != "" && event.ID != event.SeriesID {
 		return model.PreparedOperation{}, fmt.Errorf("cannot replace a recurring series from an expanded occurrence; refresh and edit the series master")
 	}
-	if err := calendar.ValidateCalDAVHref(connection, event.CollectionID, event.Href); err != nil {
-		return model.PreparedOperation{}, err
+	if !config.NativeCalendar(connection) {
+		if err := calendar.ValidateCalDAVHref(connection, event.CollectionID, event.Href); err != nil {
+			return model.PreparedOperation{}, err
+		}
 	}
 	if event.RecurrenceID != "" {
 		recurrenceID, err := time.Parse(time.RFC3339, event.RecurrenceID)
@@ -1021,19 +1047,13 @@ func (s *Service) PrepareCalendarWrite(ctx context.Context, connectionID, kind s
 	return s.prepare(ctx, kind, connection, payload, map[string]any{
 		"acting_identity": connection.Identity, "calendar": event.CollectionID, "title": event.Title,
 		"start": event.Start, "end": event.End, "attendees": event.Attendees, "changed_fields": event,
-		"side_effects": []string{"write one CalDAV event"},
+		"side_effects": []string{"write one calendar event"},
 	})
 }
 
 func (s *Service) PrepareCalendarDelete(ctx context.Context, connectionID, collectionID, href, etag, recurrenceID string) (model.PreparedOperation, error) {
 	if recurrenceID != "" {
 		return model.PreparedOperation{}, fmt.Errorf("cannot delete one expanded occurrence; update it with STATUS:CANCELLED or delete the series master")
-	}
-	if etag == "" {
-		return model.PreparedOperation{}, fmt.Errorf("calendar delete requires the current ETag")
-	}
-	if err := calendar.ValidateCalDAVETag(etag); err != nil {
-		return model.PreparedOperation{}, err
 	}
 	connection, err := s.exactConnection(connectionID, "calendar.write")
 	if err != nil {
@@ -1043,15 +1063,30 @@ func (s *Service) PrepareCalendarDelete(ctx context.Context, connectionID, colle
 	if err != nil {
 		return model.PreparedOperation{}, fmt.Errorf("resolve calendar provider: %w", err)
 	}
-	if connection.Calendar.Kind != "caldav" {
+	if connection.Calendar.Kind != "caldav" && !config.NativeCalendar(connection) {
 		return model.PreparedOperation{}, fmt.Errorf("connection %s calendar is read-only", connection.ID)
+	}
+	if config.NativeCalendar(connection) {
+		if href == "" {
+			return model.PreparedOperation{}, fmt.Errorf("calendar delete requires the provider event id")
+		}
+		return s.prepare(ctx, "calendar.delete", connection, calendarDeletePayload{Href: href, ETag: etag}, map[string]any{
+			"acting_identity": connection.Identity, "href": href,
+			"side_effects": []string{"delete one calendar event"},
+		})
+	}
+	if etag == "" {
+		return model.PreparedOperation{}, fmt.Errorf("calendar delete requires the current ETag")
+	}
+	if err := calendar.ValidateCalDAVETag(etag); err != nil {
+		return model.PreparedOperation{}, err
 	}
 	if err := calendar.ValidateCalDAVHref(connection, collectionID, href); err != nil {
 		return model.PreparedOperation{}, err
 	}
 	return s.prepare(ctx, "calendar.delete", connection, calendarDeletePayload{CollectionID: collectionID, Href: href, ETag: etag}, map[string]any{
 		"acting_identity": connection.Identity, "calendar": collectionID, "href": href,
-		"side_effects": []string{"delete one CalDAV event"},
+		"side_effects": []string{"delete one calendar event"},
 	})
 }
 
@@ -1228,6 +1263,12 @@ func (s *Service) waitForOperation(ctx context.Context, ledger *state.Store, tok
 }
 
 func (s *Service) execute(ctx context.Context, connection model.Connection, kind string, payload json.RawMessage) (map[string]any, error) {
+	if config.NativeMail(connection) && strings.HasPrefix(kind, "mail.") {
+		return executeNativeMail(ctx, connection, kind, payload, s.mailBuild)
+	}
+	if config.NativeCalendar(connection) && strings.HasPrefix(kind, "calendar.") {
+		return executeNativeCalendar(ctx, connection, kind, payload)
+	}
 	switch kind {
 	case "mail.send":
 		var message model.SendMessage
@@ -1367,6 +1408,9 @@ func (s *Service) execute(ctx context.Context, connection model.Connection, kind
 }
 
 func (s *Service) snapshotMessage(ctx context.Context, connection model.Connection, folder string, uid uint32) (postmail.MessagePrecondition, error) {
+	if config.NativeMail(connection) {
+		return postmail.MessagePrecondition{}, nil
+	}
 	if s.mailSnapshot != nil {
 		return s.mailSnapshot(connection, folder, uid)
 	}
@@ -1398,6 +1442,9 @@ func (s *Service) getMessageModeWithConnection(ctx context.Context, connection m
 	loc, err = resolveMessageLocator(connection, loc)
 	if err != nil {
 		return model.MessageDetail{}, err
+	}
+	if config.NativeMail(connection) {
+		return s.getNativeMessageMode(ctx, connection, loc, mode)
 	}
 	folder, uid := loc.Folder, loc.UID
 	if mode != "offline" {
@@ -1490,6 +1537,10 @@ func (s *Service) getAttachmentModeSnapshot(ctx context.Context, connectionID st
 	loc, err = resolveMessageLocator(connection, loc)
 	if err != nil {
 		return model.Attachment{}, nil, attachmentSnapshotPosition{}, err
+	}
+	if config.NativeMail(connection) {
+		attachment, data, err := s.getNativeAttachment(ctx, connection, loc, attachmentID, mode)
+		return attachment, data, attachmentSnapshotPosition{}, err
 	}
 	folder, uid := loc.Folder, loc.UID
 	if mode != "offline" {
@@ -1851,7 +1902,7 @@ func digestResolvedConnection(connection model.Connection) (string, error) {
 		if err := writeSecret("calendar.url", connection.Calendar.ResolvedURL); err != nil {
 			return "", err
 		}
-		if connection.Calendar.Kind == "caldav" {
+		if connection.Calendar.Kind == "caldav" || config.NativeCalendar(connection) {
 			if err := writeSecret("calendar.secret", connection.Calendar.ResolvedSecret); err != nil {
 				return "", err
 			}
@@ -1913,6 +1964,29 @@ func resolveCalendarConnection(connection model.Connection) (model.Connection, e
 		return connection, nil
 	}
 	calendarConfig := *connection.Calendar
+	if config.NativeCalendar(connection) {
+		var err error
+		if calendarConfig.ResolvedSecret == "" {
+			if calendarConfig.Secret.Env != "" || calendarConfig.Secret.Keychain != "" {
+				calendarConfig.ResolvedSecret, err = config.ResolveSecret(calendarConfig.Secret)
+			} else if connection.Mail != nil {
+				resolvedMail, mailErr := resolveMailConnection(connection)
+				if mailErr != nil {
+					return connection, mailErr
+				}
+				calendarConfig.ResolvedSecret = resolvedMail.Mail.ResolvedSecret
+				connection = resolvedMail
+			}
+		}
+		if err != nil || calendarConfig.ResolvedSecret == "" {
+			if err == nil {
+				err = fmt.Errorf("secret reference is not configured")
+			}
+			return connection, err
+		}
+		connection.Calendar = &calendarConfig
+		return connection, nil
+	}
 	var err error
 	if calendarConfig.ResolvedURL == "" {
 		switch {
@@ -2096,18 +2170,26 @@ func (s *Service) DoctorConnection(ctx context.Context, id string) (model.Doctor
 		result.Checks = append(result.Checks, check)
 	}
 	if connection.Mail != nil {
-		_, secretErr := config.ResolveSecret(connection.Mail.Secret)
-		add("mail.secret", secretErr)
-		if secretErr == nil && connection.Mail.IMAP.Address != "" {
-			_, err := postmail.DiscoverContext(ctx, connection)
-			add("imap.discovery", err)
-		}
-		if secretErr == nil && connection.Mail.SMTP.Address != "" {
-			add("smtp.authentication", postmail.DoctorSMTP(ctx, connection))
+		if config.NativeMail(connection) {
+			s.doctorNative(ctx, connection, add)
+		} else {
+			_, secretErr := config.ResolveSecret(connection.Mail.Secret)
+			add("mail.secret", secretErr)
+			if secretErr == nil && connection.Mail.IMAP.Address != "" {
+				_, err := postmail.DiscoverContext(ctx, connection)
+				add("imap.discovery", err)
+			}
+			if secretErr == nil && connection.Mail.SMTP.Address != "" {
+				add("smtp.authentication", postmail.DoctorSMTP(ctx, connection))
+			}
 		}
 	}
 	if connection.Calendar != nil {
-		if connection.Calendar.Kind == "feed" {
+		if config.NativeCalendar(connection) {
+			if connection.Mail == nil || !config.NativeMail(connection) {
+				s.doctorNative(ctx, connection, add)
+			}
+		} else if connection.Calendar.Kind == "feed" {
 			_, err := resolveDoctorCalendarURL(connection)
 			if err == nil {
 				_, err = s.calendar.List(ctx, connection, s.now().Add(-24*time.Hour), s.now().Add(24*time.Hour), "")
@@ -2389,15 +2471,15 @@ func (s *Service) cachedMailResult(connectionID, folder string, scope any, optio
 
 func mergeMailResults(existing, fresh postmail.SearchResult) postmail.SearchResult {
 	combined := fresh
-	byUID := make(map[uint32]model.Message, len(existing.Messages)+len(fresh.Messages))
+	byID := make(map[string]model.Message, len(existing.Messages)+len(fresh.Messages))
 	for _, message := range existing.Messages {
-		byUID[message.UID] = message
+		byID[messageMergeKey(message)] = message
 	}
 	for _, message := range fresh.Messages {
-		byUID[message.UID] = message
+		byID[messageMergeKey(message)] = message
 	}
-	combined.Messages = make([]model.Message, 0, len(byUID))
-	for _, message := range byUID {
+	combined.Messages = make([]model.Message, 0, len(byID))
+	for _, message := range byID {
 		combined.Messages = append(combined.Messages, message)
 	}
 	slices.SortFunc(combined.Messages, func(a, b model.Message) int {
@@ -2411,6 +2493,13 @@ func mergeMailResults(existing, fresh postmail.SearchResult) postmail.SearchResu
 	})
 	combined.UIDNext = max(existing.UIDNext, fresh.UIDNext)
 	return combined
+}
+
+func messageMergeKey(message model.Message) string {
+	if message.ID != "" {
+		return message.ID
+	}
+	return fmt.Sprintf("uid:%d", message.UID)
 }
 
 func stampMessages(messages []model.Message, cachedAt time.Time) {
@@ -2837,9 +2926,11 @@ func providerConfigID(connection model.Connection) string {
 		Path string `json:"path"`
 	}
 	type mailIdentity struct {
+		Kind     string           `json:"kind"`
 		Username string           `json:"username"`
 		Secret   model.SecretRef  `json:"secret"`
 		IMAP     model.IMAPConfig `json:"imap"`
+		SMTP     model.SMTPConfig `json:"smtp"`
 	}
 	type calendarIdentity struct {
 		Kind        string               `json:"kind"`
@@ -2855,7 +2946,7 @@ func providerConfigID(connection model.Connection) string {
 		Calendar *calendarIdentity `json:"calendar,omitempty"`
 	}{}
 	if connection.Mail != nil {
-		provider.Mail = &mailIdentity{Username: connection.Mail.Username, Secret: connection.Mail.Secret, IMAP: connection.Mail.IMAP}
+		provider.Mail = &mailIdentity{Kind: connection.Mail.Kind, Username: connection.Mail.Username, Secret: connection.Mail.Secret, IMAP: connection.Mail.IMAP, SMTP: connection.Mail.SMTP}
 	}
 	if connection.Calendar != nil {
 		calendar := connection.Calendar
@@ -2916,6 +3007,9 @@ func calendarCacheID(connection model.Connection) string {
 	}
 	calendarOnly := connection
 	calendarOnly.Mail = nil
+	if config.NativeCalendar(connection) {
+		return resolvedCacheID(calendarOnly, resolved.Calendar.ResolvedSecret)
+	}
 	values := []string{resolved.Calendar.ResolvedURL}
 	if resolved.Calendar.Kind == "caldav" {
 		values = append(values, resolved.Calendar.ResolvedSecret)
@@ -3054,6 +3148,12 @@ func resolveMessageLocator(connection model.Connection, loc MessageLocator) (Mes
 	}
 	if loc.UID == 0 {
 		if loc.ID != "" {
+			if config.NativeMail(connection) {
+				if loc.Folder == "" {
+					loc.Folder = mailFolder(connection, loc.Folder)
+				}
+				return loc, nil
+			}
 			return MessageLocator{}, fmt.Errorf("message id is not valid for this IMAP connection")
 		}
 		return MessageLocator{}, fmt.Errorf("message id is required")

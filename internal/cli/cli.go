@@ -80,7 +80,7 @@ func (c *CLI) config(args []string) error {
 
 func (c *CLI) connection(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: posthouse connection <list|add|update|remove|discover|doctor|secret>")
+		return fmt.Errorf("usage: posthouse connection <list|add|update|remove|discover|doctor|auth|secret>")
 	}
 	switch args[0] {
 	case "list":
@@ -124,6 +124,29 @@ func (c *CLI) connection(ctx context.Context, args []string) error {
 			return err
 		}
 		return writeJSON(c.stdout, map[string]any{"ok": true, "connection": args[1]})
+	case "auth":
+		device := false
+		id := ""
+		for _, arg := range args[1:] {
+			switch {
+			case arg == "--device":
+				device = true
+			case strings.HasPrefix(arg, "-"):
+				return fmt.Errorf("usage: posthouse connection auth <id> [--device]")
+			case id != "":
+				return fmt.Errorf("usage: posthouse connection auth <id> [--device]")
+			default:
+				id = arg
+			}
+		}
+		if id == "" {
+			return fmt.Errorf("usage: posthouse connection auth <id> [--device]")
+		}
+		result, err := c.service.AuthorizeConnection(ctx, id, device)
+		if err != nil {
+			return err
+		}
+		return writeJSON(c.stdout, result)
 	case "discover":
 		if len(args) != 2 {
 			return fmt.Errorf("usage: posthouse connection discover <id>")
@@ -173,7 +196,7 @@ func (c *CLI) mail(ctx context.Context, args []string) error {
 	switch args[0] {
 	case "list", "search":
 		flags := newSelectorFlags("mail " + args[0])
-		folder := flags.set.String("folder", "", "IMAP folder; defaults to the connection inbox")
+		folder := flags.set.String("folder", "", "mailbox folder; defaults to the connection inbox")
 		query := flags.set.String("query", "", "message text query")
 		since := flags.set.String("since", "", "inclusive RFC3339 timestamp")
 		before := flags.set.String("before", "", "exclusive RFC3339 timestamp")
@@ -754,7 +777,7 @@ func (c *CLI) usage() {
 	_, _ = fmt.Fprintln(c.stdout, `Posthouse — one agent-friendly interface for all your mail and calendars
 
 Usage:
-  posthouse [--config PATH] connection list|add|update|remove|discover|doctor|secret
+  posthouse [--config PATH] connection list|add|update|remove|discover|doctor|auth|secret
   posthouse [--config PATH] mail list|search|get|attachment|send|reply|forward|draft|mark|move|archive|trash
   posthouse [--config PATH] calendar list|get|create|update|delete|ics
   posthouse [--config PATH] operation show|execute

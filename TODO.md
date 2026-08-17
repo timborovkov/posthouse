@@ -6,13 +6,18 @@
 - Keep GreenMail `2.1.11`, Radicale `3.7.3`, generated Go-TUI sources, migration notes, and MCP descriptions aligned with the tag.
 - Publish only when both GitHub Actions jobs pass; there is no partial v0.2 release.
 
-## Deliberately outside v0.2
+## Deliberately outside v0.2.0
 
-- OAuth and native Gmail/Microsoft APIs.
 - Live-provider certification gates for Fastmail, iCloud, Google, or Microsoft.
 - HTML composition, contacts, permanent IMAP expunge, and background-daemon sync.
 - Server-side CalDAV scheduling/free-busy and attendee-response processing.
 - Provider notifications or other external push integrations.
+- Publisher OAuth app verification and shipping verified client IDs.
+
+Native Gmail API and Microsoft Graph backends are implemented after v0.2: public
+client + PKCE, `connection auth`, and the same MCP/CLI selector. Operators set
+`POSTHOUSE_GOOGLE_CLIENT_ID` / `POSTHOUSE_MICROSOFT_CLIENT_ID` until verified IDs
+ship. Do not commit client secrets or refresh tokens.
 
 ## Later hardening
 

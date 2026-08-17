@@ -274,16 +274,22 @@ func applyDefaults(cfg *model.Config) {
 func capabilities(connection model.Connection) []string {
 	var result []string
 	if connection.Mail != nil {
-		if connection.Mail.IMAP.Address != "" {
-			result = append(result, "mail.read")
-		}
-		if connection.Mail.SMTP.Address != "" {
-			result = append(result, "mail.send")
+		switch MailKind(connection.Mail) {
+		case MailKindGmail, MailKindMicrosoft:
+			result = append(result, "mail.read", "mail.send")
+		default:
+			if connection.Mail.IMAP.Address != "" {
+				result = append(result, "mail.read")
+			}
+			if connection.Mail.SMTP.Address != "" {
+				result = append(result, "mail.send")
+			}
 		}
 	}
 	if connection.Calendar != nil {
 		result = append(result, "calendar.read")
-		if connection.Calendar.Kind == "caldav" {
+		switch CalendarKind(connection.Calendar) {
+		case CalendarKindCalDAV, CalendarKindGmail, CalendarKindMicrosoft:
 			result = append(result, "calendar.write")
 		}
 	}
@@ -325,96 +331,155 @@ func Validate(cfg model.Config) error {
 			return fmt.Errorf("%s needs at least one capability", prefix)
 		}
 		if connection.Mail != nil {
-			if connection.Mail.Username == "" || !(validSecretRef(connection.Mail.Secret) || (connection.Mail.SecretEnv != "" && connection.Mail.Secret.Env == "" && connection.Mail.Secret.Keychain == "")) {
-				return fmt.Errorf("%s.mail username and exactly one secret env or keychain reference are required", prefix)
-			}
-			if connection.Mail.IMAP.Address == "" && connection.Mail.SMTP.Address == "" {
-				return fmt.Errorf("%s.mail needs an IMAP or SMTP address", prefix)
-			}
-			if connection.Mail.IMAP.Address != "" {
-				if err := validateTransport(prefix+".mail.imap", connection.Mail.IMAP.Address, connection.Mail.IMAP.TLS, connection.Mail.IMAP.StartTLS, connection.Mail.IMAP.Insecure); err != nil {
-					return err
-				}
-				host, _, _ := net.SplitHostPort(connection.Mail.IMAP.Address)
-				if !connection.Mail.IMAP.TLS && !connection.Mail.IMAP.StartTLS && host != "localhost" && host != "127.0.0.1" && host != "::1" {
-					return fmt.Errorf("%s.mail.imap cannot authenticate over remote cleartext IMAP; enable tls or starttls", prefix)
-				}
-			}
-			if connection.Mail.SMTP.Address != "" {
-				if err := validateTransport(prefix+".mail.smtp", connection.Mail.SMTP.Address, connection.Mail.SMTP.TLS, connection.Mail.SMTP.StartTLS, connection.Mail.SMTP.Insecure); err != nil {
-					return err
-				}
-				host, _, _ := net.SplitHostPort(connection.Mail.SMTP.Address)
-				if connection.Mail.SMTP.Insecure && !connection.Mail.SMTP.TLS && !connection.Mail.SMTP.StartTLS && host != "localhost" && host != "127.0.0.1" && host != "::1" {
-					return fmt.Errorf("%s.mail.smtp cannot authenticate over remote cleartext SMTP; enable tls or starttls", prefix)
-				}
-			}
-			switch connection.Mail.SentCopy {
-			case "", "always", "never", "provider-managed":
-			default:
-				return fmt.Errorf("%s.mail.sent_copy must be always, never, or provider-managed", prefix)
-			}
-			if connection.Mail.SentCopy == "always" && strings.TrimSpace(connection.Mail.Folders.Sent) == "" {
-				return fmt.Errorf("%s.mail.folders.sent is required when sent_copy is always", prefix)
+			if err := validateMailConfig(prefix, connection.Mail); err != nil {
+				return err
 			}
 		}
 		if connection.Calendar != nil {
-			cal := connection.Calendar
-			collectionIDs := make(map[string]struct{}, len(cal.Collections))
-			for collectionIndex, collection := range cal.Collections {
-				id := strings.ToLower(strings.TrimSpace(collection.ID))
-				if id == "" {
-					return fmt.Errorf("%s.calendar.collections[%d].id is required", prefix, collectionIndex)
-				}
-				if _, exists := collectionIDs[id]; exists {
-					return fmt.Errorf("%s.calendar has duplicate collection id %q", prefix, collection.ID)
-				}
-				collectionIDs[id] = struct{}{}
-				if err := validateCalDAVCollectionPath(collection.Path); err != nil {
-					return fmt.Errorf("%s.calendar.collections[%d].path %w", prefix, collectionIndex, err)
-				}
-			}
-			hasURL := strings.TrimSpace(cal.URL) != ""
-			hasSecretURL := validSecretRef(cal.URLSecret) || (cal.URLSecretEnv != "" && cal.URLSecret.Env == "" && cal.URLSecret.Keychain == "")
-			if hasURL == hasSecretURL {
-				return fmt.Errorf("%s.calendar requires exactly one of url or url_secret", prefix)
-			}
-			if hasURL {
-				if err := validateCalendarURL(cal.URL); err != nil {
-					return fmt.Errorf("%s.calendar.url %w", prefix, err)
-				}
-			}
-			if cal.Insecure && hasSecretURL {
-				return fmt.Errorf("%s.calendar.insecure cannot be used with url_secret because loopback cannot be verified", prefix)
-			}
-			if cal.Insecure && hasURL {
-				parsed, err := url.Parse(cal.URL)
-				if err != nil || parsed.Host == "" {
-					return fmt.Errorf("%s.calendar.url is invalid", prefix)
-				}
-				if host := parsed.Hostname(); host != "localhost" && host != "127.0.0.1" && host != "::1" {
-					return fmt.Errorf("%s.calendar.insecure is allowed only for loopback development endpoints", prefix)
-				}
-			}
-			kind := cal.Kind
-			if kind == "" {
-				kind = "feed"
-			}
-			switch kind {
-			case "feed":
-				if cal.Username != "" || validSecretRef(cal.Secret) {
-					return fmt.Errorf("%s.calendar feed cannot have CalDAV credentials", prefix)
-				}
-			case "caldav":
-				if cal.Username == "" || !validSecretRef(cal.Secret) {
-					return fmt.Errorf("%s.calendar CalDAV username and secret are required", prefix)
-				}
-			default:
-				return fmt.Errorf("%s.calendar.kind must be feed or caldav", prefix)
+			if err := validateCalendarConfig(prefix, connection); err != nil {
+				return err
 			}
 		}
 	}
 	return nil
+}
+
+func validateMailConfig(prefix string, mail *model.MailConfig) error {
+	kind := MailKind(mail)
+	switch kind {
+	case MailKindGmail, MailKindMicrosoft:
+		if mail.IMAP.Address != "" || mail.SMTP.Address != "" {
+			return fmt.Errorf("%s.mail %s cannot set imap or smtp addresses", prefix, kind)
+		}
+		if err := optionalSecretRef(prefix+".mail.secret", mail.Secret, mail.SecretEnv); err != nil {
+			return err
+		}
+		switch mail.SentCopy {
+		case "", "never", "provider-managed":
+		case "always":
+			return fmt.Errorf("%s.mail.sent_copy always is not valid for %s; the provider manages sent copies", prefix, kind)
+		default:
+			return fmt.Errorf("%s.mail.sent_copy must be always, never, or provider-managed", prefix)
+		}
+		return nil
+	case MailKindIMAP:
+	default:
+		return fmt.Errorf("%s.mail.kind must be empty, gmail, or microsoft", prefix)
+	}
+	if mail.Username == "" || !(validSecretRef(mail.Secret) || (mail.SecretEnv != "" && mail.Secret.Env == "" && mail.Secret.Keychain == "")) {
+		return fmt.Errorf("%s.mail username and exactly one secret env or keychain reference are required", prefix)
+	}
+	if mail.IMAP.Address == "" && mail.SMTP.Address == "" {
+		return fmt.Errorf("%s.mail needs an IMAP or SMTP address", prefix)
+	}
+	if mail.IMAP.Address != "" {
+		if err := validateTransport(prefix+".mail.imap", mail.IMAP.Address, mail.IMAP.TLS, mail.IMAP.StartTLS, mail.IMAP.Insecure); err != nil {
+			return err
+		}
+		host, _, _ := net.SplitHostPort(mail.IMAP.Address)
+		if !mail.IMAP.TLS && !mail.IMAP.StartTLS && host != "localhost" && host != "127.0.0.1" && host != "::1" {
+			return fmt.Errorf("%s.mail.imap cannot authenticate over remote cleartext IMAP; enable tls or starttls", prefix)
+		}
+	}
+	if mail.SMTP.Address != "" {
+		if err := validateTransport(prefix+".mail.smtp", mail.SMTP.Address, mail.SMTP.TLS, mail.SMTP.StartTLS, mail.SMTP.Insecure); err != nil {
+			return err
+		}
+		host, _, _ := net.SplitHostPort(mail.SMTP.Address)
+		if mail.SMTP.Insecure && !mail.SMTP.TLS && !mail.SMTP.StartTLS && host != "localhost" && host != "127.0.0.1" && host != "::1" {
+			return fmt.Errorf("%s.mail.smtp cannot authenticate over remote cleartext SMTP; enable tls or starttls", prefix)
+		}
+	}
+	switch mail.SentCopy {
+	case "", "always", "never", "provider-managed":
+	default:
+		return fmt.Errorf("%s.mail.sent_copy must be always, never, or provider-managed", prefix)
+	}
+	if mail.SentCopy == "always" && strings.TrimSpace(mail.Folders.Sent) == "" {
+		return fmt.Errorf("%s.mail.folders.sent is required when sent_copy is always", prefix)
+	}
+	return nil
+}
+
+func validateCalendarConfig(prefix string, connection model.Connection) error {
+	cal := connection.Calendar
+	kind := CalendarKind(cal)
+	switch kind {
+	case CalendarKindGmail, CalendarKindMicrosoft:
+		if strings.TrimSpace(cal.URL) != "" || validSecretRef(cal.URLSecret) || cal.URLSecretEnv != "" {
+			return fmt.Errorf("%s.calendar %s cannot set url or url_secret", prefix, kind)
+		}
+		if len(cal.Collections) > 0 {
+			return fmt.Errorf("%s.calendar %s does not use discovered collections", prefix, kind)
+		}
+		if err := optionalSecretRef(prefix+".calendar.secret", cal.Secret, ""); err != nil {
+			return err
+		}
+		if MailKind(connection.Mail) != "" && MailKind(connection.Mail) != MailKindIMAP && MailKind(connection.Mail) != kind {
+			return fmt.Errorf("%s.calendar.kind %s does not match mail.kind %s", prefix, kind, MailKind(connection.Mail))
+		}
+		return nil
+	case CalendarKindFeed, CalendarKindCalDAV:
+	default:
+		return fmt.Errorf("%s.calendar.kind must be feed, caldav, gmail, or microsoft", prefix)
+	}
+	collectionIDs := make(map[string]struct{}, len(cal.Collections))
+	for collectionIndex, collection := range cal.Collections {
+		id := strings.ToLower(strings.TrimSpace(collection.ID))
+		if id == "" {
+			return fmt.Errorf("%s.calendar.collections[%d].id is required", prefix, collectionIndex)
+		}
+		if _, exists := collectionIDs[id]; exists {
+			return fmt.Errorf("%s.calendar has duplicate collection id %q", prefix, collection.ID)
+		}
+		collectionIDs[id] = struct{}{}
+		if err := validateCalDAVCollectionPath(collection.Path); err != nil {
+			return fmt.Errorf("%s.calendar.collections[%d].path %w", prefix, collectionIndex, err)
+		}
+	}
+	hasURL := strings.TrimSpace(cal.URL) != ""
+	hasSecretURL := validSecretRef(cal.URLSecret) || (cal.URLSecretEnv != "" && cal.URLSecret.Env == "" && cal.URLSecret.Keychain == "")
+	if hasURL == hasSecretURL {
+		return fmt.Errorf("%s.calendar requires exactly one of url or url_secret", prefix)
+	}
+	if hasURL {
+		if err := validateCalendarURL(cal.URL); err != nil {
+			return fmt.Errorf("%s.calendar.url %w", prefix, err)
+		}
+	}
+	if cal.Insecure && hasSecretURL {
+		return fmt.Errorf("%s.calendar.insecure cannot be used with url_secret because loopback cannot be verified", prefix)
+	}
+	if cal.Insecure && hasURL {
+		parsed, err := url.Parse(cal.URL)
+		if err != nil || parsed.Host == "" {
+			return fmt.Errorf("%s.calendar.url is invalid", prefix)
+		}
+		if host := parsed.Hostname(); host != "localhost" && host != "127.0.0.1" && host != "::1" {
+			return fmt.Errorf("%s.calendar.insecure is allowed only for loopback development endpoints", prefix)
+		}
+	}
+	switch kind {
+	case CalendarKindFeed:
+		if cal.Username != "" || validSecretRef(cal.Secret) {
+			return fmt.Errorf("%s.calendar feed cannot have CalDAV credentials", prefix)
+		}
+	case CalendarKindCalDAV:
+		if cal.Username == "" || !validSecretRef(cal.Secret) {
+			return fmt.Errorf("%s.calendar CalDAV username and secret are required", prefix)
+		}
+	}
+	return nil
+}
+
+func optionalSecretRef(name string, ref model.SecretRef, legacyEnv string) error {
+	if ref.Env == "" && ref.Keychain == "" && legacyEnv == "" {
+		return nil
+	}
+	if validSecretRef(ref) || (legacyEnv != "" && ref.Env == "" && ref.Keychain == "") {
+		return nil
+	}
+	return fmt.Errorf("%s must use exactly one of env or keychain", name)
 }
 
 func validateCalendarURL(value string) error {

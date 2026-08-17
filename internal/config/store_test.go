@@ -272,6 +272,29 @@ func TestValidateRejectsDuplicateCalendarCollectionIDs(t *testing.T) {
 	}
 }
 
+func TestValidateNativeMailAndCalendarConnections(t *testing.T) {
+	gmailConn := model.Connection{ID: "gmail-work", Name: "Gmail work", Identity: model.Identity{Email: "you@gmail.com"}, Mail: &model.MailConfig{Kind: "gmail"}, Calendar: &model.CalendarConfig{Kind: "gmail"}}
+	if err := Validate(model.Config{Connections: []model.Connection{gmailConn}}); err != nil {
+		t.Fatalf("Validate rejected native Gmail connection: %v", err)
+	}
+	normalized, err := Normalize(model.Config{Connections: []model.Connection{gmailConn}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(normalized.Connections[0].Capabilities, ",")
+	if got != "mail.read,mail.send,calendar.read,calendar.write" {
+		t.Fatalf("native capabilities = %q", got)
+	}
+	gmailConn.Mail.IMAP.Address = "imap.gmail.com:993"
+	if err := Validate(model.Config{Connections: []model.Connection{gmailConn}}); err == nil {
+		t.Fatal("Validate accepted Gmail IMAP hostname")
+	}
+	microsoftConn := model.Connection{ID: "ms", Name: "Microsoft", Mail: &model.MailConfig{Kind: "microsoft", Secret: model.SecretRef{Env: "MS_REFRESH"}}}
+	if err := Validate(model.Config{Connections: []model.Connection{microsoftConn}}); err != nil {
+		t.Fatalf("Validate rejected Microsoft connection: %v", err)
+	}
+}
+
 func TestValidateRejectsWhitespaceEquivalentConnectionIDs(t *testing.T) {
 	connection := model.Connection{ID: "work", Name: "Work", Mail: &model.MailConfig{Username: "work@example.test", SecretEnv: "WORK_PASSWORD", IMAP: model.IMAPConfig{Address: "imap.example.test:993", TLS: true}}}
 	spaced := connection

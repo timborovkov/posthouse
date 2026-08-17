@@ -5,7 +5,7 @@ Posthouse gives people and agents one consistent language for working across oth
 ## Language
 
 **Connection**:
-One authenticated provider endpoint that offers one or more capabilities, such as mail or calendar, and carries the user's organizational metadata.
+One authenticated provider endpoint that offers one or more capabilities, such as mail or calendar, and carries the user's organizational metadata. Mail may be generic IMAP/SMTP or a native Gmail or Microsoft backend; calendar may be an ICS feed, CalDAV, or the matching native backend. Several Gmail connections are several connections.
 _Avoid_: Account, integration, inbox
 
 **Identity**:

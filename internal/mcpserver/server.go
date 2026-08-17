@@ -310,7 +310,7 @@ func (s *Server) registerTools() {
 			return nil, page, err
 		})
 
-	mcp.AddTool(s.mcp, &mcp.Tool{Name: "messages_search", Title: "Search messages", Description: "List or search messages across selected mail connections, up to 100 per page. Each message has an opaque id plus connection_id; folder is mailbox metadata. Pass next_cursor back unchanged with identical filters. Offline full-text fallback searches available encrypted cached headers and bodies and returns an offline_search_incomplete source warning when uncached content may be omitted.", Annotations: readOnly},
+	mcp.AddTool(s.mcp, &mcp.Tool{Name: "messages_search", Title: "Search messages", Description: "List or search messages across selected mail connections, including generic IMAP and operator-authorized OAuth connections, up to 100 per page. Each message has an opaque id plus connection_id; folder is mailbox metadata. Pass next_cursor back unchanged with identical filters. Query language stays generic; do not pass provider search syntax. Offline full-text fallback searches available encrypted cached headers and bodies and returns an offline_search_incomplete source warning when uncached content may be omitted.", Annotations: readOnly},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input messageSearchInput) (*mcp.CallToolResult, model.MessagePage, error) {
 			since, err := optionalTime(input.Since)
 			if err != nil {
@@ -327,7 +327,7 @@ func (s *Server) registerTools() {
 			return nil, page, err
 		})
 
-	mcp.AddTool(s.mcp, &mcp.Tool{Name: "messages_send_prepare", Title: "Prepare message send", Description: "Prepare a plain-text email with up to 25 MiB total attachment data through exactly one SMTP connection. Returns a ten-minute opaque token and exact side-effect preview; no message is sent until operation_execute is called.", Annotations: readOnly},
+	mcp.AddTool(s.mcp, &mcp.Tool{Name: "messages_send_prepare", Title: "Prepare message send", Description: "Prepare a plain-text email with up to 25 MiB total attachment data through exactly one mail connection. Returns a ten-minute opaque token and exact side-effect preview; no message is sent until operation_execute is called.", Annotations: readOnly},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input sendMessageInput) (*mcp.CallToolResult, model.PreparedOperation, error) {
 			prepared, err := s.service.PrepareSend(ctx, model.SendMessage{ConnectionID: input.Connection, To: input.To, CC: input.CC, BCC: input.BCC, Subject: input.Subject, Text: input.Text, ReplyTo: input.ReplyTo, InReplyTo: input.InReplyTo, References: input.References, Attachments: mcpAttachments(input.Attachments)})
 			return nil, prepared, err
@@ -402,7 +402,7 @@ func (s *Server) registerTools() {
 			return nil, prepared, err
 		})
 
-	mcp.AddTool(s.mcp, &mcp.Tool{Name: "events_list", Title: "List calendar events", Description: "List and search ICS feeds and CalDAV calendar collections across selected connections in an optional time range, up to 500 per page. Live-first is the default with stale-cache fallback; mode=offline is cache-only and treats a miss as an error rather than an empty calendar; mode=refresh refuses stale fallback. Pass next_cursor back unchanged with identical filters.", Annotations: readOnly},
+	mcp.AddTool(s.mcp, &mcp.Tool{Name: "events_list", Title: "List calendar events", Description: "List and search calendar events across selected connections in an optional time range, up to 500 per page. ICS feeds, CalDAV collections, and operator-authorized OAuth calendars use the same event shape. Live-first is the default with stale-cache fallback; mode=offline is cache-only and treats a miss as an error rather than an empty calendar; mode=refresh refuses stale fallback. Pass next_cursor back unchanged with identical filters.", Annotations: readOnly},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input eventListInput) (*mcp.CallToolResult, model.EventPage, error) {
 			start, err := optionalTime(input.Start)
 			if err != nil {
@@ -453,17 +453,17 @@ func (s *Server) registerTools() {
 			return result, icsOutput{Event: event, Filename: filename, MIMEType: "text/calendar", ICS: data}, nil
 		})
 
-	mcp.AddTool(s.mcp, &mcp.Tool{Name: "event_create_prepare", Title: "Prepare event create", Description: "Prepare creation of one event in an exact CalDAV connection and collection. No event is written until operation_execute.", Annotations: readOnly},
+	mcp.AddTool(s.mcp, &mcp.Tool{Name: "event_create_prepare", Title: "Prepare event create", Description: "Prepare creation of one event in an exact calendar-write connection. No event is written until operation_execute.", Annotations: readOnly},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input eventMutationInput) (*mcp.CallToolResult, model.PreparedOperation, error) {
 			prepared, err := s.service.PrepareCalendarWrite(ctx, input.Connection, "calendar.create", input.Event)
 			return nil, prepared, err
 		})
-	mcp.AddTool(s.mcp, &mcp.Tool{Name: "event_update_prepare", Title: "Prepare event update", Description: "Prepare an ETag-guarded update to one CalDAV event. No event is written until operation_execute.", Annotations: readOnly},
+	mcp.AddTool(s.mcp, &mcp.Tool{Name: "event_update_prepare", Title: "Prepare event update", Description: "Prepare an update to one calendar event identified from events_list. No event is written until operation_execute.", Annotations: readOnly},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input eventMutationInput) (*mcp.CallToolResult, model.PreparedOperation, error) {
 			prepared, err := s.service.PrepareCalendarWrite(ctx, input.Connection, "calendar.update", input.Event)
 			return nil, prepared, err
 		})
-	mcp.AddTool(s.mcp, &mcp.Tool{Name: "event_delete_prepare", Title: "Prepare event delete", Description: "Prepare an ETag-guarded delete of one CalDAV event. No event is deleted until operation_execute.", Annotations: readOnly},
+	mcp.AddTool(s.mcp, &mcp.Tool{Name: "event_delete_prepare", Title: "Prepare event delete", Description: "Prepare a delete of one calendar event identified from events_list. No event is deleted until operation_execute.", Annotations: readOnly},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input eventDeleteInput) (*mcp.CallToolResult, model.PreparedOperation, error) {
 			prepared, err := s.service.PrepareCalendarDelete(ctx, input.Connection, input.Collection, input.Href, input.ETag, input.RecurrenceID)
 			return nil, prepared, err
@@ -480,7 +480,7 @@ func (s *Server) registerTools() {
 			return nil, result, err
 		})
 
-	mcp.AddTool(s.mcp, &mcp.Tool{Name: "connection_doctor", Title: "Doctor connection", Description: "Run non-mutating secret, TLS, authentication, IMAP/SMTP, and CalDAV discovery checks for one exact connection.", Annotations: readOnly},
+	mcp.AddTool(s.mcp, &mcp.Tool{Name: "connection_doctor", Title: "Doctor connection", Description: "Run non-mutating secret, TLS, authentication, and provider checks for one exact connection. OAuth connections refresh an access token and ping the API without returning token material.", Annotations: readOnly},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input connectionInput) (*mcp.CallToolResult, model.DoctorResult, error) {
 			result, err := s.service.DoctorConnection(ctx, input.Connection)
 			return nil, result, err

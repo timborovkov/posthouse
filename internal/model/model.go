@@ -35,11 +35,12 @@ type Identity struct {
 }
 
 type MailConfig struct {
-	Username  string       `json:"username"`
+	Kind      string       `json:"kind,omitempty"`
+	Username  string       `json:"username,omitempty"`
 	Secret    SecretRef    `json:"secret,omitempty"`
 	SecretEnv string       `json:"secret_env,omitempty"` // v1 migration only
-	IMAP      IMAPConfig   `json:"imap"`
-	SMTP      SMTPConfig   `json:"smtp"`
+	IMAP      IMAPConfig   `json:"imap,omitempty"`
+	SMTP      SMTPConfig   `json:"smtp,omitempty"`
 	Folders   FolderConfig `json:"folders,omitempty"`
 	SentCopy  string       `json:"sent_copy,omitempty"`
 	// ResolvedSecret is request-scoped provider state. It is never persisted or

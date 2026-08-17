@@ -20,8 +20,20 @@ make build
 
 **Docker** (MCP HTTP, not the TUI): see [Docker](#docker).
 
-You need IMAP/SMTP and/or CalDAV (or an ICS feed URL). Use an app password,
-not your normal login. OAuth is not in v0.2.
+You need IMAP/SMTP and/or CalDAV (or an ICS feed URL), or a native Gmail /
+Microsoft connection. Generic servers use an app password, not your normal
+login. Native Gmail and Microsoft use `posthouse connection auth` (browser
+Allow, or `--device` on a headless host). Do not register your own OAuth app
+unless you are dogfooding with env client IDs.
+
+Until verified publisher IDs ship, set:
+
+```sh
+export POSTHOUSE_GOOGLE_CLIENT_ID='...'
+export POSTHOUSE_MICROSOFT_CLIENT_ID='...'
+# Google Desktop token exchange only, never commit:
+export POSTHOUSE_GOOGLE_CLIENT_SECRET='...'
+```
 
 ## Add a connection
 
@@ -40,6 +52,20 @@ posthouse connection doctor acme
 redacted — do not feed it to `connection update`.
 
 Read-only ICS feed: [examples/feed-connection.json](./examples/feed-connection.json).
+Native Gmail: [examples/gmail-connection.json](./examples/gmail-connection.json).
+Native Microsoft: [examples/microsoft-connection.json](./examples/microsoft-connection.json).
+
+```sh
+posthouse connection add --file examples/gmail-connection.json
+posthouse connection auth gmail-work
+posthouse connection doctor gmail-work
+```
+
+`connection auth` opens a browser (or prints a device code with `--device`),
+stores the refresh token in the OS keychain, and writes a keychain secret ref
+on the connection. There is no MCP tool for this; authorize connections before
+Hermes uses them. `discover` is for generic IMAP special-use folders and CalDAV
+collections; native connections skip that path.
 
 Config path: `posthouse config path` (or `--config` / `POSTHOUSE_CONFIG`).
 State is `posthouse.db` next to it.
