@@ -31,7 +31,8 @@ make build
 **Docker** (MCP + REST HTTP, not the TUI): see [Docker](#docker).
 
 You need IMAP/SMTP and/or CalDAV (or an ICS feed URL). Use an app password,
-not your normal login. OAuth is not in v0.2.
+not your normal login. OAuth is not in v0.2; the static [website/](./website/)
+privacy page is prepared for future Google/Microsoft verification.
 
 ## Secrets
 

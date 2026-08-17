@@ -1,0 +1,682 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Posthouse — local mail &amp; calendar switchboard</title>
+    <meta
+      name="description"
+      content="Posthouse is a free, open-source, local-first CLI, MCP server, REST API, and terminal UI for multiple mail and calendar connections. Run it on your machine — not a hosted SaaS."
+    />
+    <meta name="author" content="Tim Borovkov" />
+    <meta name="robots" content="index,follow" />
+    <link rel="canonical" href="https://posthouse.timb.dev/" />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Posthouse" />
+    <meta property="og:title" content="Posthouse — local mail &amp; calendar switchboard" />
+    <meta
+      property="og:description"
+      content="One local switchboard across your mail and calendars — ready for your agents. Free and open source. You run it; nothing is hosted by Posthouse."
+    />
+    <meta property="og:url" content="https://posthouse.timb.dev/" />
+    <meta property="og:image" content="https://posthouse.timb.dev/assets/tui-inbox.png" />
+    <meta property="og:image:alt" content="Posthouse terminal UI showing a unified inbox" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Posthouse — local mail &amp; calendar switchboard" />
+    <meta
+      name="twitter:description"
+      content="Free, open-source, local-first mail and calendar tool for people and agents."
+    />
+    <meta name="twitter:image" content="https://posthouse.timb.dev/assets/tui-inbox.png" />
+    <link rel="stylesheet" href="assets/site.css" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@500;700&family=Sora:wght@400;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "SoftwareApplication",
+        "name": "Posthouse",
+        "applicationCategory": "UtilitiesApplication",
+        "operatingSystem": "Linux, macOS, Windows",
+        "offers": {
+          "@type": "Offer",
+          "price": "0",
+          "priceCurrency": "USD"
+        },
+        "license": "https://opensource.org/licenses/MIT",
+        "url": "https://posthouse.timb.dev/",
+        "codeRepository": "https://github.com/timborovkov/posthouse",
+        "description": "Personal, local-first CLI, MCP server, REST API, and terminal UI for multiple mail and calendar connections.",
+        "author": {
+          "@type": "Person",
+          "name": "Tim Borovkov",
+          "url": "https://timb.dev"
+        },
+        "isAccessibleForFree": true
+      }
+    </script>
+  </head>
+  <body>
+    <header class="wrap site-header">
+      <a class="brand" href="/">POSTHOUSE</a>
+      <nav class="nav" aria-label="Primary">
+        <a href="#features">Features</a>
+        <a href="#connect">Connect</a>
+        <a href="#setup">Setup</a>
+        <a href="#setup-railway">Deploy</a>
+        <a href="privacy.html">Privacy</a>
+        <a href="https://github.com/timborovkov/posthouse">GitHub</a>
+        <a href="https://timb.dev">timb.dev</a>
+      </nav>
+    </header>
+
+    <main>
+      <section class="wrap hero" aria-labelledby="hero-brand">
+        <p class="hero-brand" id="hero-brand">POSTHOUSE</p>
+        <h1>One local switchboard across your mail and calendars — ready for your agents.</h1>
+        <p class="lede">
+          Free and open source. Posthouse gives you — and the agents that help
+          you — one language across separate mailboxes and calendars. Search
+          across connections; every write is previewed, then run on exactly one.
+          You install it. There is no Posthouse cloud.
+        </p>
+        <div class="cta-row">
+          <a class="btn btn-primary" href="https://github.com/timborovkov/posthouse">View on GitHub</a>
+          <a class="btn btn-ghost" href="#setup-cli">Install CLI</a>
+          <a class="btn btn-ghost" href="#setup-railway">Deploy</a>
+        </div>
+        <img
+          class="shot"
+          src="assets/tui-inbox.png"
+          width="1280"
+          height="720"
+          alt="Posthouse terminal UI: unified inbox with work and personal demo messages"
+        />
+        <p class="shot-caption">
+          Optional terminal UI. CLI, MCP, and REST cover the same operations.
+        </p>
+      </section>
+
+      <section class="wrap section" id="features" aria-labelledby="features-title">
+        <h2 id="features-title">What you get</h2>
+        <p>
+          Multiple mail and calendar connections in one place, with selectors
+          for category and labels — then the same operations from CLI, TUI, MCP,
+          or REST.
+        </p>
+
+        <h3>Connections and selectors</h3>
+        <div class="table-wrap">
+          <table class="feat">
+            <thead>
+              <tr>
+                <th scope="col">Idea</th>
+                <th scope="col">What it does</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Multiple connections</td>
+                <td>Several mailboxes and calendars in one config (work + personal + …).</td>
+              </tr>
+              <tr>
+                <td>Category</td>
+                <td>One broad grouping per connection: <code>work</code> or <code>personal</code>.</td>
+              </tr>
+              <tr>
+                <td>Labels</td>
+                <td>Free markers you choose (<code>acme</code>, <code>finance</code>, <code>primary</code>) to select across connections.</td>
+              </tr>
+              <tr>
+                <td>Capabilities</td>
+                <td><code>mail.read</code>, <code>mail.send</code>, <code>calendar.read</code>, <code>calendar.write</code>.</td>
+              </tr>
+              <tr>
+                <td>Selector</td>
+                <td>Scope a read by connection IDs, category, labels, and/or capability.</td>
+              </tr>
+              <tr>
+                <td>Identity</td>
+                <td>The From name/address used when that connection acts externally.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="note">
+          Reads may fan out. Writes always target exactly one connection, with
+          prepare → preview → execute (ten-minute token).
+        </p>
+
+        <h3>Mail</h3>
+        <div class="table-wrap">
+          <table class="feat">
+            <thead>
+              <tr>
+                <th scope="col">Action</th>
+                <th scope="col">Notes</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>List / search</td>
+                <td>Unified inbox; filter by category, label, unread, query.</td>
+              </tr>
+              <tr>
+                <td>Get / attachments</td>
+                <td>Full message body; save attachments locally.</td>
+              </tr>
+              <tr>
+                <td>Send</td>
+                <td>Text or HTML; optional CC/BCC and file attachments.</td>
+              </tr>
+              <tr>
+                <td>Reply / forward</td>
+                <td>Same prepare-then-execute safety as send.</td>
+              </tr>
+              <tr>
+                <td>Drafts</td>
+                <td>Create, update, delete.</td>
+              </tr>
+              <tr>
+                <td>Mark / move / archive / trash</td>
+                <td>Folder actions on one connection.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3>Calendar</h3>
+        <div class="table-wrap">
+          <table class="feat">
+            <thead>
+              <tr>
+                <th scope="col">Action</th>
+                <th scope="col">Notes</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>List / get</td>
+                <td>Across CalDAV collections and read-only ICS feeds.</td>
+              </tr>
+              <tr>
+                <td>Create / update / delete</td>
+                <td>CalDAV writes with ETag checks; prepare-then-execute.</td>
+              </tr>
+              <tr>
+                <td>Portable ICS</td>
+                <td>Generate invitation/cancel files without a provider write.</td>
+              </tr>
+              <tr>
+                <td>Discover</td>
+                <td>Pull folders and calendar collections into config.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3>How you run it</h3>
+        <div class="table-wrap">
+          <table class="feat">
+            <thead>
+              <tr>
+                <th scope="col">Surface</th>
+                <th scope="col">Best for</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>CLI</td>
+                <td>Scripts and JSON output (<code>posthouse mail search</code>, …).</td>
+              </tr>
+              <tr>
+                <td>TUI</td>
+                <td>Keyboard-first daily loop; optional — same operations as CLI/MCP.</td>
+              </tr>
+              <tr>
+                <td>MCP</td>
+                <td>Local <code>stdio</code> or Streamable HTTP for Claude, Cursor, Codex, Hermes, …</td>
+              </tr>
+              <tr>
+                <td>REST</td>
+                <td><code>/v1</code> on a personal <code>posthouse serve</code> (access key required).</td>
+              </tr>
+              <tr>
+                <td>Agent skills</td>
+                <td><code>posthouse skill install --agent …</code> ships <code>connections</code> / <code>mail</code> / <code>calendar</code> (plus <code>mcp</code> / <code>rest</code>).</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="wrap section" id="connect" aria-labelledby="connect-title">
+        <h2 id="connect-title">How to connect</h2>
+        <p>
+          Posthouse talks to providers you already use. Credentials stay on your
+          machine (OS keychain or an environment variable you set).
+        </p>
+        <ul class="connect-list">
+          <li>
+            <h3>IMAP / SMTP</h3>
+            <p>
+              Generic mail for Fastmail, iCloud, Proton Bridge, and similar.
+              Use a provider app password, not your login password.
+            </p>
+          </li>
+          <li>
+            <h3>CalDAV &amp; ICS feeds</h3>
+            <p>
+              Mutable CalDAV calendars plus read-only iCalendar subscription
+              URLs. Discovery picks the collections you want.
+            </p>
+          </li>
+          <li>
+            <h3>Gmail &amp; Microsoft (coming)</h3>
+            <p>
+              Native OAuth sign-in in the browser on your device — no Google
+              Cloud or Entra project for you to create. Tokens stay local.
+              Required for that: this site’s
+              <a href="privacy.html">privacy policy</a>.
+            </p>
+          </li>
+        </ul>
+        <p class="note">
+          Walkthrough:
+          <a href="https://github.com/timborovkov/posthouse/blob/main/GETTING-STARTED.md"
+            >Getting started</a
+          >.
+        </p>
+      </section>
+
+      <section class="wrap section" id="setup" aria-labelledby="setup-title">
+        <h2 id="setup-title">Setup</h2>
+        <p>
+          Install the CLI on your laptop, or deploy a private HTTP server
+          (Railway, Docker, any VPS), then hand MCP/REST to an agent. Fold a
+          section open for the exact commands. Full prose:
+          <a href="https://github.com/timborovkov/posthouse/blob/main/GETTING-STARTED.md"
+            >Getting started</a
+          >.
+        </p>
+
+        <p class="setup-group">On your machine</p>
+
+        <details class="setup-block" id="setup-cli" open>
+          <summary><span class="setup-title">Install the CLI</span></summary>
+          <div class="setup-body">
+            <p>Needs Go 1.26.6+. Put <code>$(go env GOPATH)/bin</code> on your <code>PATH</code> if needed.</p>
+            <pre><code>curl -fsSL https://raw.githubusercontent.com/timborovkov/posthouse/main/scripts/install.sh | sh
+posthouse version</code></pre>
+            <p>Or with <code>go install</code>:</p>
+            <pre><code>go install github.com/timborovkov/posthouse/cmd/posthouse@latest
+posthouse version</code></pre>
+            <p>From a clone:</p>
+            <pre><code>git clone https://github.com/timborovkov/posthouse
+cd posthouse
+make build
+./bin/posthouse version</code></pre>
+          </div>
+        </details>
+
+        <details class="setup-block" id="setup-secrets" open>
+          <summary><span class="setup-title">Create local secrets</span></summary>
+          <div class="setup-body">
+            <pre><code>mkdir -p "$HOME/.config/posthouse"
+posthouse setup
+# or write a mode-0600 env file:
+posthouse setup --write-env "$HOME/.config/posthouse/env"
+chmod 600 "$HOME/.config/posthouse/env"
+set -a; . "$HOME/.config/posthouse/env"; set +a</code></pre>
+            <ul>
+              <li><code>POSTHOUSE_CACHE_KEY</code> — encrypts local state. Desktop can use the OS keychain instead; headless and Docker must set this.</li>
+              <li><code>POSTHOUSE_ACCESS_KEY</code> — protects HTTP MCP + REST (≥16 chars). Local <code>mcp stdio</code> does not need it.</li>
+            </ul>
+            <p>Do not commit env files that contain these values.</p>
+          </div>
+        </details>
+
+        <details class="setup-block" id="setup-connection" open>
+          <summary><span class="setup-title">Add a mailbox and calendar</span></summary>
+          <div class="setup-body">
+            <p>
+              Copy
+              <a href="https://github.com/timborovkov/posthouse/blob/main/examples/connection.json"
+                >examples/connection.json</a
+              >, put a <strong>provider app password</strong> (not your login password) in the environment, then:
+            </p>
+            <pre><code>export ACME_MAIL_PASSWORD='the app password'
+export ACME_CALENDAR_PASSWORD='the app password'
+posthouse connection add --file examples/connection.json
+posthouse connection discover acme
+posthouse connection doctor acme</code></pre>
+            <p>Or use the terminal UI:</p>
+            <pre><code>posthouse tui
+# Tab areas · ? help · q quit — writes still show a preview first</code></pre>
+          </div>
+        </details>
+
+        <details class="setup-block" id="setup-yourself">
+          <summary><span class="setup-title">Use it yourself (CLI / TUI)</span></summary>
+          <div class="setup-body">
+            <pre><code>posthouse mail list --category work --label primary --unread
+posthouse mail search --query renewal --page-size 25
+posthouse calendar list --start 2026-08-01T00:00:00Z --end 2026-09-01T00:00:00Z
+posthouse tui</code></pre>
+            <p>
+              Writes prepare a ten-minute token — inspect with
+              <code>operation show</code>, then <code>operation execute</code>.
+              Nothing is sent until execute.
+            </p>
+          </div>
+        </details>
+
+        <p class="setup-group">Agents</p>
+
+        <details class="setup-block" id="setup-skills">
+          <summary><span class="setup-title">Agent skills (shared pattern)</span></summary>
+          <div class="setup-body">
+            <p>
+              Skills teach CLI, MCP, and REST — including prepare-before-execute.
+              <code>--agent</code> accepts <code>claude</code>, <code>cursor</code>,
+              <code>codex</code>, or <code>hermes</code>.
+            </p>
+            <pre><code>posthouse skill install --agent claude connections mail calendar
+posthouse skill list
+# transports when needed:
+# posthouse skill install --agent claude mcp
+# posthouse skill install --agent claude --all
+# or: posthouse skill install --dir PATH connections mail calendar</code></pre>
+            <p>Pick the surface that matches how you run Posthouse:</p>
+            <ul>
+              <li>CLI on this machine → <code>connections mail calendar</code></li>
+              <li>Local MCP → <code>posthouse mcp stdio</code> + the <code>mcp</code> skill</li>
+              <li>Server URL → <code>rest</code> and/or <code>mcp</code> skills + <code>POSTHOUSE_ACCESS_KEY</code></li>
+            </ul>
+          </div>
+        </details>
+
+        <details class="setup-block" id="setup-claude">
+          <summary><span class="setup-title">Claude</span></summary>
+          <div class="setup-body">
+            <p>Install the CLI first (above), then skills:</p>
+            <pre><code>posthouse skill install --agent claude connections mail calendar</code></pre>
+            <p>Register local MCP stdio in your MCP client config (no access key):</p>
+            <pre><code>{
+  "mcpServers": {
+    "posthouse": {
+      "command": "/absolute/path/to/posthouse",
+      "args": ["mcp", "stdio"],
+      "env": {
+        "POSTHOUSE_CACHE_KEY": "...",
+        "ACME_MAIL_PASSWORD": "..."
+      }
+    }
+  }
+}</code></pre>
+            <p>Use <code>which posthouse</code> for the absolute path after install.</p>
+          </div>
+        </details>
+
+        <details class="setup-block" id="setup-codex">
+          <summary><span class="setup-title">Codex</span></summary>
+          <div class="setup-body">
+            <p>Install the Posthouse binary, then skills and the same MCP stdio config pattern as Claude:</p>
+            <pre><code>posthouse skill install --agent codex connections mail calendar</code></pre>
+            <pre><code>{
+  "mcpServers": {
+    "posthouse": {
+      "command": "/absolute/path/to/posthouse",
+      "args": ["mcp", "stdio"]
+    }
+  }
+}</code></pre>
+          </div>
+        </details>
+
+        <details class="setup-block" id="setup-hermes">
+          <summary><span class="setup-title">Hermes</span></summary>
+          <div class="setup-body">
+            <p>
+              Install the CLI, then Hermes skills. Hermes calls the same MCP tools
+              (<code>messages_search</code>, prepare/execute, and so on.
+            </p>
+            <pre><code>posthouse skill install --agent hermes connections mail calendar</code></pre>
+            <p>Local stdio (same JSON shape as Claude/Codex), or remote HTTPS:</p>
+            <pre><code># Local: posthouse mcp stdio via the MCP client config
+# Remote MCP:
+#   URL:    https://your-host/mcp
+#   Header: Authorization: Bearer &lt;POSTHOUSE_ACCESS_KEY&gt;</code></pre>
+          </div>
+        </details>
+
+        <details class="setup-block" id="setup-cursor">
+          <summary><span class="setup-title">Cursor</span></summary>
+          <div class="setup-body">
+            <p>Install the CLI, then Cursor skills and an MCP server entry:</p>
+            <pre><code>posthouse skill install --agent cursor connections mail calendar</code></pre>
+            <pre><code>{
+  "mcpServers": {
+    "posthouse": {
+      "command": "/absolute/path/to/posthouse",
+      "args": ["mcp", "stdio"]
+    }
+  }
+}</code></pre>
+            <p>
+              For a private server instead, point Cursor at
+              <code>https://your-host/mcp</code> with
+              <code>Authorization: Bearer &lt;POSTHOUSE_ACCESS_KEY&gt;</code>.
+            </p>
+          </div>
+        </details>
+
+        <p class="setup-group" id="setup-deploy">Private server</p>
+
+        <details class="setup-block" id="setup-railway" open>
+          <summary><span class="setup-title">Deploy on Railway</span></summary>
+          <div class="setup-body">
+            <p>
+              Your own Posthouse process on Railway — not a multi-tenant SaaS.
+              The repo’s <code>railway.json</code> builds the Dockerfile, starts
+              <code>posthouse serve --allow-container-listener</code>, health-checks
+              <code>/healthz</code>, and expects a volume at <code>/data</code>.
+            </p>
+            <ol>
+              <li>
+                In Railway, create a new project →
+                <strong>Deploy from GitHub</strong> → select
+                <a href="https://github.com/timborovkov/posthouse">timborovkov/posthouse</a>.
+              </li>
+              <li>
+                Attach a <strong>volume</strong> mounted at <code>/data</code>
+                (config + encrypted cache live there).
+              </li>
+              <li>
+                Generate secrets locally, then paste them into Railway Variables:
+                <pre><code>posthouse setup
+# copy the printed POSTHOUSE_CACHE_KEY and POSTHOUSE_ACCESS_KEY</code></pre>
+              </li>
+              <li>
+                Set at least:
+                <pre><code>POSTHOUSE_CACHE_KEY=…          # required (headless)
+POSTHOUSE_ACCESS_KEY=…         # ≥16 chars; required for /mcp and /v1
+POSTHOUSE_TRUST_PROXY=1        # Railway edge is your TLS proxy
+# plus every provider secret your config references, e.g.:
+ACME_MAIL_PASSWORD=…
+ACME_CALENDAR_PASSWORD=…</code></pre>
+              </li>
+              <li>
+                Deploy. Railway injects <code>PORT</code>; Posthouse listens on
+                <code>0.0.0.0:$PORT</code>. Open a public HTTPS domain on the service.
+              </li>
+              <li>
+                Put a connection config on the volume (first boot via volume file
+                or local CLI against that store). Example shape:
+                <a href="https://github.com/timborovkov/posthouse/blob/main/examples/connection.json"
+                  >examples/connection.json</a
+                >
+                as <code>/data/config.json</code>.
+              </li>
+              <li>
+                Point agents / HTTP clients at the public host.
+                <code>/healthz</code> is unauthenticated; <code>/mcp</code> and
+                <code>/v1</code> need the access key:
+                <pre><code>MCP:  https://YOUR-RAILWAY-HOST/mcp
+REST: https://YOUR-RAILWAY-HOST/v1
+Header: Authorization: Bearer &lt;POSTHOUSE_ACCESS_KEY&gt;
+
+curl -sS https://YOUR-RAILWAY-HOST/healthz
+curl -sS -H "Authorization: Bearer $POSTHOUSE_ACCESS_KEY" \
+  https://YOUR-RAILWAY-HOST/v1</code></pre>
+              </li>
+            </ol>
+            <p>
+              Keep bearer auth on. Railway’s HTTPS is the reverse proxy;
+              <code>POSTHOUSE_TRUST_PROXY=1</code> makes failed-login lockout key
+              off the real client. Do not disable the access key.
+            </p>
+          </div>
+        </details>
+
+        <details class="setup-block" id="setup-docker">
+          <summary><span class="setup-title">Docker Compose (VPS / homelab)</span></summary>
+          <div class="setup-body">
+            <p>
+              Same HTTP surface as Railway: Streamable MCP at <code>/mcp</code>,
+              REST at <code>/v1</code>, behind an access key. Default Compose binds
+              loopback only — put TLS in front for the internet.
+            </p>
+            <pre><code>git clone https://github.com/timborovkov/posthouse
+cd posthouse
+# with a local posthouse binary:
+mkdir -p "$HOME/.config/posthouse"
+posthouse setup --write-env .env
+# or without a binary yet:
+# cp .env.example .env
+# edit .env: POSTHOUSE_CACHE_KEY, POSTHOUSE_ACCESS_KEY, provider passwords
+docker compose up --build -d
+# host: 127.0.0.1:8791 → container :8791
+curl -sS http://127.0.0.1:8791/healthz
+curl -sS -H "Authorization: Bearer $POSTHOUSE_ACCESS_KEY" \
+  http://127.0.0.1:8791/v1</code></pre>
+            <p>Expose remotely only behind TLS (Caddy, nginx, Traefik, …):</p>
+            <pre><code># reverse-proxy https://mail.example.com → 127.0.0.1:8791
+# then set on the container:
+POSTHOUSE_TRUST_PROXY=1
+
+# or, only on a private network / already-TLS host port:
+docker compose -f docker-compose.yml -f docker-compose.private.yml up --build -d</code></pre>
+            <p>
+              Data persists in the <code>posthouse-data</code> volume at
+              <code>/data</code>. Full flags:
+              <a href="https://github.com/timborovkov/posthouse/blob/main/INSTALLATION-AND-USAGE-GUIDE.md"
+                >Installation guide</a
+              >.
+            </p>
+          </div>
+        </details>
+
+        <details class="setup-block" id="setup-vps">
+          <summary><span class="setup-title">Any VPS (binary + reverse proxy)</span></summary>
+          <div class="setup-body">
+            <p>
+              Install the CLI on the server, write secrets, then run
+              <code>posthouse serve</code> behind HTTPS.
+            </p>
+            <pre><code># on the VPS
+curl -fsSL https://raw.githubusercontent.com/timborovkov/posthouse/main/scripts/install.sh | sh
+sudo mkdir -p /etc/posthouse /var/lib/posthouse
+sudo chown "$USER":"$USER" /etc/posthouse /var/lib/posthouse
+posthouse setup --write-env /etc/posthouse/env
+chmod 600 /etc/posthouse/env
+# put connections in /var/lib/posthouse/config.json
+set -a; . /etc/posthouse/env; set +a
+posthouse --config /var/lib/posthouse/config.json serve --address 127.0.0.1:8791</code></pre>
+            <p>
+              Terminate TLS on Caddy/nginx to <code>127.0.0.1:8791</code>, set
+              <code>POSTHOUSE_TRUST_PROXY=1</code>, and keep
+              <code>POSTHOUSE_ACCESS_KEY</code>. Hosts that inject
+              <code>PORT</code> (PaaS containers) need
+              <code>--allow-container-listener</code> or
+              <code>POSTHOUSE_ALLOW_CONTAINER_LISTENER=1</code> — same as Railway.
+            </p>
+            <pre><code>MCP:  https://mail.example.com/mcp
+REST: https://mail.example.com/v1
+Authorization: Bearer &lt;POSTHOUSE_ACCESS_KEY&gt;
+
+curl -sS https://mail.example.com/healthz</code></pre>
+          </div>
+        </details>
+
+        <details class="setup-block" id="setup-remote-agents">
+          <summary><span class="setup-title">Point an agent at your server</span></summary>
+          <div class="setup-body">
+            <p>
+              After Railway, Docker, or a VPS is up, teach the agent the HTTP
+              skills and the URL — not local <code>stdio</code>.
+            </p>
+            <pre><code>posthouse skill install --agent claude rest mcp
+# (or cursor / codex / hermes; add connections mail calendar if the agent also runs the CLI)</code></pre>
+            <pre><code># MCP over HTTPS
+URL:     https://YOUR-HOST/mcp
+Header:  Authorization: Bearer &lt;POSTHOUSE_ACCESS_KEY&gt;
+
+# REST
+curl -sS -H "Authorization: Bearer $POSTHOUSE_ACCESS_KEY" \
+  https://YOUR-HOST/v1
+# Writes still prepare → preview → POST /v1/operations/execute</code></pre>
+          </div>
+        </details>
+      </section>
+
+      <section class="wrap section" id="about" aria-labelledby="about-title">
+        <h2 id="about-title">Local and personal</h2>
+        <p>
+          Posthouse is personal software under the
+          <a href="https://github.com/timborovkov/posthouse/blob/main/LICENSE">MIT License</a>.
+          Mail and calendar data live in a local encrypted cache you control.
+          There is no backend that receives your mailbox. See
+          <a href="privacy.html">Privacy</a> for the full statement (including
+          forward-looking Google/Microsoft OAuth verification language).
+          Host this <code>website/</code> folder on a domain you own (canonicals
+          assume <code>https://posthouse.timb.dev/</code>) before pasting those
+          URLs into a consent screen.
+        </p>
+      </section>
+    </main>
+
+    <footer class="wrap site-footer">
+      <p>
+        Built by
+        <a href="https://timb.dev">Tim Borovkov</a>
+        ·
+        <a href="https://github.com/timborovkov/posthouse">github.com/timborovkov/posthouse</a>
+        · free &amp; open source (MIT)
+      </p>
+      <p>
+        <a href="privacy.html">Privacy</a>
+        · not affiliated with Google or Microsoft
+      </p>
+    </footer>
+    <script>
+      (function () {
+        function openHash() {
+          var id = location.hash.slice(1);
+          if (!id) return;
+          var el = document.getElementById(id);
+          if (el && el.tagName === "DETAILS") {
+            el.open = true;
+            el.scrollIntoView({ block: "nearest" });
+          }
+        }
+        openHash();
+        window.addEventListener("hashchange", openHash);
+      })();
+    </script>
+  </body>
+</html>

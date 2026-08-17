@@ -19,9 +19,9 @@ You do **not** need this to create the Desktop/public clients or to dogfood as a
 
 When you do publish it:
 
-1. Two static pages on a domain you control, e.g. `https://your.domain/` and `https://your.domain/privacy`.
-2. Homepage: one paragraph that Posthouse is a local mail and calendar operator; Google/Microsoft sign-in is optional and on-device; link the privacy page.
-3. Privacy page, in plain language:
+1. Deploy the static site in [`website/`](../website/) on a domain you control (canonicals currently assume `https://posthouse.timb.dev/` and `https://posthouse.timb.dev/privacy.html` — change those URLs in the HTML if the host differs). GitHub Pages / Cloudflare Pages is fine **on your hostname**.
+2. Homepage (`website/index.html`): describes Posthouse as a local mail and calendar operator; Google/Microsoft sign-in is optional and on-device; links the privacy page, GitHub, and [timb.dev](https://timb.dev).
+3. Privacy page (`website/privacy.html`), in plain language:
    - Posthouse runs on the operator’s machine.
    - Mail and calendar data are stored only in the local encrypted cache the operator controls.
    - Posthouse has no backend and does not send mailbox content to Posthouse.

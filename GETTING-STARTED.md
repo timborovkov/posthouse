@@ -46,6 +46,7 @@ That prints two values:
 Write them to a file only you can read:
 
 ```sh
+mkdir -p "$HOME/.config/posthouse"
 posthouse setup --write-env "$HOME/.config/posthouse/env"
 chmod 600 "$HOME/.config/posthouse/env"
 ```
@@ -148,3 +149,4 @@ REST: `GET https://your-host/v1` with the same header. Writes still prepare-then
 Reads may search several connections. Sends, folder actions, and calendar mutations never do: they target one connection, return a ten-minute preview token, and change nothing until `operation execute` (CLI), `operation_execute` (MCP), or `POST /v1/operations/execute` (REST). Failed HTTP logins are locked out. Provider mail is not stored in the clear.
 
 More detail: [INSTALLATION-AND-USAGE-GUIDE.md](./INSTALLATION-AND-USAGE-GUIDE.md).
+Marketing/privacy pages for a domain you own (OAuth verification): [website/](./website/).
