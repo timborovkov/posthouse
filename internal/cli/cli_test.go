@@ -105,6 +105,25 @@ func TestCalendarListCursorRecoversDefaultRange(t *testing.T) {
 	}
 }
 
+func TestLoadComposeBodiesReadsHTMLFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "note.html")
+	if err := os.WriteFile(path, []byte("<p>Hi</p>"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	body, bodyFile, htmlBody, htmlFile := "", "", "", path
+	if err := loadComposeBodies(&body, &bodyFile, &htmlBody, &htmlFile); err != nil {
+		t.Fatal(err)
+	}
+	if htmlBody != "<p>Hi</p>" {
+		t.Fatalf("html body = %q", htmlBody)
+	}
+	bodyFile, htmlFile = "-", "-"
+	if err := loadComposeBodies(&body, &bodyFile, &htmlBody, &htmlFile); err == nil || !strings.Contains(err.Error(), "cannot both read stdin") {
+		t.Fatalf("dual stdin error = %v", err)
+	}
+}
+
 func TestCheckedUIDRejectsOverflow(t *testing.T) {
 	if _, err := checkedUID(uint64(^uint32(0)) + 1); err == nil || !strings.Contains(err.Error(), "uint32") {
 		t.Fatalf("checkedUID overflow error = %v", err)

@@ -100,7 +100,50 @@ func TestBuildSentCopyPreservesBCCWithoutChangingSerializedMessage(t *testing.T)
 	}
 }
 
-func TestSMTPHost(t *testing.T) {
+func TestBuildMessageHTMLUsesAlternativeAndPlainFallback(t *testing.T) {
+	encoded, err := buildMessage(model.Identity{Email: "tim@example.com"}, "tim@example.com", model.SendMessage{
+		To: []string{"one@example.com"}, Subject: "Hello", HTML: "<p>Hi <b>there</b></p>",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := string(encoded)
+	if !strings.Contains(data, "multipart/alternative") || !strings.Contains(data, "text/html") || !strings.Contains(data, "text/plain") {
+		t.Fatalf("HTML message missing alternative parts: %q", data)
+	}
+	if !strings.Contains(data, "Hi there") {
+		t.Fatalf("HTML message missing text fallback: %q", data)
+	}
+}
+
+func TestBuildMessageHTMLKeepsExplicitTextAndAttachments(t *testing.T) {
+	encoded, err := buildMessage(model.Identity{Email: "tim@example.com"}, "tim@example.com", model.SendMessage{
+		To: []string{"one@example.com"}, Subject: "Hello", Text: "plain version", HTML: "<p>html version</p>",
+		Attachments: []model.AttachmentInput{{Name: "note.txt", ContentType: "text/plain", Data: []byte("file")}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := string(encoded)
+	if !strings.Contains(data, "multipart/mixed") || !strings.Contains(data, "multipart/alternative") || !strings.Contains(data, "plain version") || !strings.Contains(data, "<p>html version</p>") || !strings.Contains(data, "note.txt") {
+		t.Fatalf("mixed HTML message is %#q", data)
+	}
+}
+
+func TestBuildMessageTextOnlyStaysPlain(t *testing.T) {
+	encoded, err := buildMessage(model.Identity{Email: "tim@example.com"}, "tim@example.com", model.SendMessage{
+		To: []string{"one@example.com"}, Subject: "Hello", Text: "plain only",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := string(encoded)
+	if strings.Contains(data, "multipart/alternative") || strings.Contains(data, "text/html") || !strings.Contains(data, "text/plain") || !strings.Contains(data, "plain only") {
+		t.Fatalf("text-only message is %#q", data)
+	}
+}
+
+func TestSMTPHostStripsPort(t *testing.T) {
 	got, err := smtpHost("smtp.example.com:465")
 	if err != nil || got != "smtp.example.com" {
 		t.Fatalf("smtpHost returned %q, %v", got, err)

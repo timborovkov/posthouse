@@ -22,9 +22,14 @@ var viewNames = []string{"Connections", "Inbox", "Message", "Agenda", "Operation
 
 type snapshot struct {
 	generation  uint64
+	scope       string
 	connections []model.Connection
 	messages    []model.Message
 	events      []model.Event
+	mailCursor  string
+	mailNext    string
+	eventCursor string
+	eventNext   string
 	cache       string
 	err         string
 }
@@ -41,6 +46,7 @@ type providerReadSnapshot struct {
 	doctor     model.DoctorResult
 	detail     model.MessageDetail
 	attachment model.Attachment
+	connection model.Connection
 	data       []byte
 	err        error
 }
@@ -61,18 +67,29 @@ type posthouseApp struct {
 	modal                  *tui.State[bool]
 	modalText              *tui.State[string]
 	pendingToken           *tui.State[string]
+	pendingDiscover        *tui.State[string]
 	executingToken         *tui.State[string]
 	lastOperation          *tui.State[model.OperationResult]
 	lastOperationError     *tui.State[string]
 	editor                 *tui.State[bool]
 	editorKind             *tui.State[string]
-	editorStep             *tui.State[int]
-	editorValues           *tui.State[[]string]
+	editorTick             *tui.State[int]
+	editorFields           []*tui.State[string]
+	app                    *tui.App
+	mailCursor             *tui.State[string]
+	mailNext               *tui.State[string]
+	mailHistory            *tui.State[[]string]
+	eventCursor            *tui.State[string]
+	eventNext              *tui.State[string]
+	eventHistory           *tui.State[[]string]
+	attachment             *tui.State[model.Attachment]
+	attachmentData         *tui.State[[]byte]
 	updates                chan snapshot
 	operationUpdates       chan operationSnapshot
 	providerReadUpdates    chan providerReadSnapshot
 	executeOperation       func(context.Context, string) (model.OperationResult, error)
 	doctorConnection       func(context.Context, string) (model.DoctorResult, error)
+	discoverConnection     func(context.Context, string) (model.Connection, error)
 	getMessage             func(context.Context, string, string, uint32) (model.MessageDetail, error)
 	getAttachment          func(context.Context, string, string, uint32, string) (model.Attachment, []byte, error)
 	ctx                    context.Context
@@ -94,13 +111,16 @@ func New(application *service.Service) *posthouseApp {
 		connections: tui.NewState([]model.Connection{}), messages: tui.NewState([]model.Message{}),
 		events: tui.NewState([]model.Event{}), detail: tui.NewState(model.MessageDetail{}),
 		searching: tui.NewState(false), query: tui.NewState(""), modal: tui.NewState(false),
-		modalText: tui.NewState(""), pendingToken: tui.NewState(""),
+		modalText: tui.NewState(""), pendingToken: tui.NewState(""), pendingDiscover: tui.NewState(""),
 		executingToken:     tui.NewState(""),
 		lastOperation:      tui.NewState(model.OperationResult{}),
 		lastOperationError: tui.NewState(""),
-		editor:             tui.NewState(false), editorKind: tui.NewState(""), editorStep: tui.NewState(0), editorValues: tui.NewState([]string{}),
+		editor:             tui.NewState(false), editorKind: tui.NewState(""), editorTick: tui.NewState(0),
+		mailCursor: tui.NewState(""), mailNext: tui.NewState(""), mailHistory: tui.NewState([]string{}),
+		eventCursor: tui.NewState(""), eventNext: tui.NewState(""), eventHistory: tui.NewState([]string{}),
+		attachment: tui.NewState(model.Attachment{}), attachmentData: tui.NewState([]byte{}),
 		updates: make(chan snapshot, 4), operationUpdates: make(chan operationSnapshot, 1), providerReadUpdates: make(chan providerReadSnapshot, 1),
-		executeOperation: application.ExecuteOperation, doctorConnection: application.DoctorConnection, getMessage: application.GetMessageContext, getAttachment: application.GetAttachment,
+		executeOperation: application.ExecuteOperation, doctorConnection: application.DoctorConnection, discoverConnection: application.DiscoverConnection, getMessage: application.GetMessageContext, getAttachment: application.GetAttachment,
 		ctx: ctx, cancel: cancel,
 		refreshGeneration: &atomic.Uint64{}, providerReadGeneration: &atomic.Uint64{},
 		wg: &sync.WaitGroup{},
@@ -126,30 +146,6 @@ func (p *posthouseApp) Watchers() []tui.Watcher {
 }
 
 func (p *posthouseApp) KeyMap() tui.KeyMap {
-	if p.editor.Get() {
-		return tui.KeyMap{
-			tui.OnStop(tui.AnyRune, func(ke tui.KeyEvent) { p.editValue(func(value string) string { return value + string(ke.Rune) }) }),
-			tui.OnStop(tui.KeyBackspace, func(ke tui.KeyEvent) {
-				p.editValue(func(value string) string {
-					runes := []rune(value)
-					if len(runes) > 0 {
-						return string(runes[:len(runes)-1])
-					}
-					return value
-				})
-			}),
-			tui.OnStop(tui.KeyTab, func(ke tui.KeyEvent) { p.moveEditor(1) }),
-			tui.OnStop(tui.KeyTab.Shift(), func(ke tui.KeyEvent) { p.moveEditor(-1) }),
-			tui.OnStop(tui.KeyEnter, func(ke tui.KeyEvent) {
-				if p.editorStep.Get() == len(p.editorValues.Get())-1 {
-					p.submitEditor()
-				} else {
-					p.moveEditor(1)
-				}
-			}),
-			tui.OnStop(tui.KeyEscape, func(ke tui.KeyEvent) { p.cancelEditor() }),
-		}
-	}
 	if p.searching.Get() {
 		return tui.KeyMap{
 			tui.OnStop(tui.AnyRune, func(ke tui.KeyEvent) { p.query.Set(p.query.Get() + string(ke.Rune)) }),
@@ -159,15 +155,8 @@ func (p *posthouseApp) KeyMap() tui.KeyMap {
 					p.query.Set(string(value[:len(value)-1]))
 				}
 			}),
-			tui.OnStop(tui.KeyEnter, func(ke tui.KeyEvent) { p.searching.Set(false); p.refresh() }),
+			tui.OnStop(tui.KeyEnter, func(ke tui.KeyEvent) { p.searching.Set(false); p.resetMailPaging(); p.resetEventPaging(); p.refresh() }),
 			tui.OnStop(tui.KeyEscape, func(ke tui.KeyEvent) { p.searching.Set(false); p.query.Set("") }),
-		}
-	}
-	if p.modal.Get() {
-		return tui.KeyMap{
-			tui.OnPreemptStop(tui.KeyEnter, p.confirmModal),
-			tui.OnPreemptStop(tui.KeyEscape, func(ke tui.KeyEvent) { p.cancelModal() }),
-			tui.OnPreemptStop(tui.Rune('q'), func(ke tui.KeyEvent) { p.cancel(); ke.App().Stop() }),
 		}
 	}
 	return tui.KeyMap{
@@ -182,6 +171,12 @@ func (p *posthouseApp) KeyMap() tui.KeyMap {
 		tui.On(tui.Rune('r'), func(ke tui.KeyEvent) { p.refresh() }),
 		tui.On(tui.Rune('c'), p.createAction),
 		tui.On(tui.Rune('a'), p.itemAction),
+		tui.On(tui.Rune('d'), func(ke tui.KeyEvent) { p.discoverSelected() }),
+		tui.On(tui.Rune('s'), func(ke tui.KeyEvent) { p.beginAttachmentSave() }),
+		tui.On(tui.Rune('n'), func(ke tui.KeyEvent) { p.pageList(1) }),
+		tui.On(tui.Rune('p'), func(ke tui.KeyEvent) { p.pageList(-1) }),
+		tui.On(tui.KeyPageDown, func(ke tui.KeyEvent) { p.pageList(1) }),
+		tui.On(tui.KeyPageUp, func(ke tui.KeyEvent) { p.pageList(-1) }),
 		tui.On(tui.KeyEnter, p.openSelected),
 		tui.On(tui.KeyEscape, func(ke tui.KeyEvent) {
 			if p.view.Get() == 2 {
@@ -189,13 +184,15 @@ func (p *posthouseApp) KeyMap() tui.KeyMap {
 			}
 		}),
 		tui.On(tui.Rune('?'), func(ke tui.KeyEvent) {
-			p.modalText.Set("Keyboard\n\nTab/Shift+Tab areas · j/k or arrows move · / search · r refresh\nc compose/create · a actions · Enter open/confirm · Esc back · q quit")
+			p.modalText.Set("Keyboard\n\nTab/Shift+Tab areas · j/k or arrows move · / search · r refresh\nc compose/create · a actions · d discover · s save attachment · n/p page\nEnter open/confirm · Esc back · q quit")
 			p.modal.Set(true)
 		}),
 	}
 }
 
-func (p *posthouseApp) refresh() {
+func (p *posthouseApp) refresh() { p.refreshScope("full") }
+
+func (p *posthouseApp) refreshScope(scope string) {
 	if p.refreshCancel != nil {
 		p.refreshCancel()
 	}
@@ -204,39 +201,49 @@ func (p *posthouseApp) refresh() {
 	p.loading.Set(true)
 	p.status.Set("Refreshing live sources…")
 	query := p.query.Get()
+	mailCursor := p.mailCursor.Get()
+	eventCursor := p.eventCursor.Get()
+	connections := p.connections.Get()
 	generation := p.refreshGeneration.Add(1)
 	p.wg.Add(1)
 	go func() {
 		defer p.wg.Done()
-		next := snapshot{generation: generation}
-		connections, err := p.service.Connections(model.Selector{})
-		if err != nil {
-			next.err = err.Error()
-		} else {
-			next.connections = connections
+		next := snapshot{generation: generation, scope: scope, mailCursor: mailCursor, eventCursor: eventCursor, connections: connections}
+		if scope == "full" {
+			loaded, err := p.service.Connections(model.Selector{})
+			if err != nil {
+				next.err = err.Error()
+			} else {
+				next.connections = loaded
+				connections = loaded
+			}
 		}
-		if connectionsHaveCapability(connections, "mail.read") {
-			messages, mailErr := p.service.SearchMessagesContext(ctx, model.Selector{}, mail.SearchOptions{Query: query}, 100, "")
+		if (scope == "full" || scope == "mail") && connectionsHaveCapability(connections, "mail.read") {
+			messages, mailErr := p.service.SearchMessagesContext(ctx, model.Selector{}, mail.SearchOptions{Query: query}, mailPageSize, mailCursor)
 			if mailErr == nil {
 				next.messages = messages.Messages
+				next.mailNext = messages.NextCursor
 				next.err = appendSourceErrors(next.err, messages.Errors)
 			} else {
 				next.err = appendError(next.err, mailErr)
 			}
 		}
-		if connectionsHaveCapability(connections, "calendar.read") {
-			events, calendarErr := p.service.ListEvents(ctx, model.Selector{}, time.Now().Add(-24*time.Hour), time.Now().Add(90*24*time.Hour), query, 500, "")
+		if (scope == "full" || scope == "events") && connectionsHaveCapability(connections, "calendar.read") {
+			events, calendarErr := p.service.ListEvents(ctx, model.Selector{}, time.Now().Add(-24*time.Hour), time.Now().Add(90*24*time.Hour), query, eventPageSize, eventCursor)
 			if calendarErr == nil {
 				next.events = events.Events
+				next.eventNext = events.NextCursor
 				next.err = appendSourceErrors(next.err, events.Errors)
 			} else {
 				next.err = appendError(next.err, calendarErr)
 			}
 		}
-		if cache, cacheErr := p.service.CacheStatus(ctx); cacheErr == nil {
-			next.cache = fmt.Sprintf("%d entries · %.1f MiB / %.1f MiB", cache.Entries, float64(cache.Bytes)/(1<<20), float64(cache.MaxBytes)/(1<<20))
-		} else {
-			next.cache = "cache unavailable: " + cacheErr.Error()
+		if scope == "full" {
+			if cache, cacheErr := p.service.CacheStatus(ctx); cacheErr == nil {
+				next.cache = fmt.Sprintf("%d entries · %.1f MiB / %.1f MiB", cache.Entries, float64(cache.Bytes)/(1<<20), float64(cache.MaxBytes)/(1<<20))
+			} else {
+				next.cache = "cache unavailable: " + cacheErr.Error()
+			}
 		}
 		if ctx.Err() != nil {
 			return
@@ -267,11 +274,23 @@ func (p *posthouseApp) applySnapshot(next snapshot) {
 		return
 	}
 	p.loading.Set(false)
-	p.connections.Set(next.connections)
-	p.messages.Set(next.messages)
-	p.events.Set(next.events)
-	p.errorText.Set(next.err)
-	p.status.Set(next.cache)
+	if next.scope == "full" {
+		p.connections.Set(next.connections)
+		p.status.Set(next.cache)
+	}
+	if next.scope == "full" || next.scope == "mail" {
+		p.messages.Set(next.messages)
+		p.mailCursor.Set(next.mailCursor)
+		p.mailNext.Set(next.mailNext)
+	}
+	if next.scope == "full" || next.scope == "events" {
+		p.events.Set(next.events)
+		p.eventCursor.Set(next.eventCursor)
+		p.eventNext.Set(next.eventNext)
+	}
+	if next.err != "" || next.scope == "full" {
+		p.errorText.Set(next.err)
+	}
 	p.clampSelection()
 }
 
@@ -389,18 +408,32 @@ func (p *posthouseApp) applyProviderRead(next providerReadSnapshot) {
 	case "doctor":
 		p.modalText.Set(formatDoctor(next.doctor))
 		p.modal.Set(true)
+	case "discover":
+		p.modalText.Set(formatDiscover(next.connection))
+		p.modal.Set(true)
+		p.refresh()
 	case "message":
 		p.detail.Set(next.detail)
 		p.view.Set(2)
 		p.selected.Set(0)
 		p.modal.Set(false)
 	case "attachment":
+		p.attachment.Set(next.attachment)
+		p.attachmentData.Set(next.data)
 		preview := ""
 		if strings.HasPrefix(strings.ToLower(next.attachment.ContentType), "text/") {
 			preview = string(next.data[:min(len(next.data), 16<<10)])
 		}
-		p.modalText.Set(fmt.Sprintf("Attachment loaded\n\n%s\n%s · %d bytes\n\n%s", next.attachment.Name, next.attachment.ContentType, len(next.data), preview))
+		p.modalText.Set(fmt.Sprintf("Attachment loaded\n\n%s\n%s · %d bytes\n\ns saves to disk · Esc closes\n\n%s", next.attachment.Name, next.attachment.ContentType, len(next.data), preview))
 		p.modal.Set(true)
+	case "attachment-save":
+		p.attachment.Set(next.attachment)
+		p.attachmentData.Set(next.data)
+		name := next.attachment.Name
+		if name == "" {
+			name = "attachment"
+		}
+		p.beginEditor("save", []string{name})
 	}
 }
 
@@ -415,7 +448,7 @@ func (p *posthouseApp) itemAction(ke tui.KeyEvent) {
 		p.modal.Set(true)
 		return
 	}
-	p.beginEditor("action", []string{"mark-read", "", ""})
+	p.beginEditor("action", []string{"mark-read", "", "text", ""})
 }
 
 func (p *posthouseApp) createAction(ke tui.KeyEvent) {
@@ -424,205 +457,15 @@ func (p *posthouseApp) createAction(ke tui.KeyEvent) {
 		p.beginEditor("connection", []string{"", "", "", "", "", "", "", "", "", "", ""})
 	case 1, 2:
 		connection := p.defaultConnection("mail.send")
-		p.beginEditor("mail", []string{connection, "send", "", "", "", ""})
+		p.beginEditor("mail", []string{connection, "send", "", "", "", "", "text", "", ""})
 	case 3:
 		connection, collection := p.defaultCalendarTarget()
 		now := time.Now().Add(time.Hour).Truncate(15 * time.Minute)
 		p.beginEditor("event", []string{connection, collection, "", now.Format(time.RFC3339), now.Add(time.Hour).Format(time.RFC3339)})
 	default:
-		p.modalText.Set("Create is available from Inbox (plain-text mail) or Agenda (CalDAV event).")
+		p.modalText.Set("Create is available from Inbox (mail) or Agenda (CalDAV event).")
 		p.modal.Set(true)
 	}
-}
-
-func (p *posthouseApp) beginEditor(kind string, values []string) {
-	p.editorKind.Set(kind)
-	p.editorValues.Set(values)
-	p.editorStep.Set(0)
-	p.editor.Set(true)
-	p.modal.Set(true)
-	p.pendingToken.Set("")
-	p.errorText.Set("")
-}
-
-func (p *posthouseApp) cancelEditor() {
-	p.editor.Set(false)
-	p.modal.Set(false)
-	p.editorValues.Set([]string{})
-	p.editorStep.Set(0)
-}
-
-func (p *posthouseApp) editValue(change func(string) string) {
-	values := append([]string(nil), p.editorValues.Get()...)
-	step := p.editorStep.Get()
-	values[step] = change(values[step])
-	p.editorValues.Set(values)
-}
-
-func (p *posthouseApp) moveEditor(delta int) {
-	count := len(p.editorValues.Get())
-	if count == 0 {
-		return
-	}
-	step := (p.editorStep.Get() + delta + count) % count
-	p.editorStep.Set(step)
-}
-
-func (p *posthouseApp) editorLabels() []string {
-	if p.editorKind.Get() == "connection" {
-		return []string{"ID", "Name", "Category", "Identity email", "Mail username", "Mail secret env", "IMAP TLS address", "SMTP TLS address", "CalDAV URL", "CalDAV username", "CalDAV secret env"}
-	}
-	if p.editorKind.Get() == "action" {
-		return []string{"Action", "Recipient / destination", "Body"}
-	}
-	if p.editorKind.Get() == "event-action" {
-		return []string{"Action", "Title", "Start RFC3339", "End RFC3339"}
-	}
-	if p.editorKind.Get() == "mail" {
-		return []string{"Connection", "Mode send/draft", "To", "Subject", "Body", "Attachment paths"}
-	}
-	return []string{"Connection", "Collection", "Title", "Start RFC3339", "End RFC3339"}
-}
-
-func (p *posthouseApp) editorTitle() string {
-	if p.editorKind.Get() == "connection" {
-		return "Onboard protocol connection"
-	}
-	if p.editorKind.Get() == "action" {
-		return "Message action: reply, forward, mark-read, mark-unread, flag, unflag, move, archive, trash"
-	}
-	if p.editorKind.Get() == "event-action" {
-		return "Event action: update, update-series, delete"
-	}
-	if p.editorKind.Get() == "mail" {
-		return "Compose plain-text mail or provider draft"
-	}
-	return "Create CalDAV event"
-}
-
-func (p *posthouseApp) submitEditor() {
-	values := p.editorValues.Get()
-	var prepared model.PreparedOperation
-	var err error
-	if p.editorKind.Get() == "connection" {
-		if len(values) != 11 || values[0] == "" || values[1] == "" {
-			err = fmt.Errorf("connection ID and name are required")
-		} else {
-			connection := model.Connection{ID: values[0], Name: values[1], Category: values[2], Identity: model.Identity{Email: values[3]}}
-			if values[6] != "" || values[7] != "" {
-				connection.Mail = &model.MailConfig{Username: values[4], Secret: model.SecretRef{Env: values[5]}, IMAP: model.IMAPConfig{Address: values[6], TLS: values[6] != ""}, SMTP: model.SMTPConfig{Address: values[7], TLS: values[7] != ""}, SentCopy: "provider-managed"}
-			}
-			if values[8] != "" {
-				connection.Calendar = &model.CalendarConfig{Kind: "caldav", URL: values[8], Username: values[9], Secret: model.SecretRef{Env: values[10]}}
-			}
-			err = p.service.UpsertConnection(connection, false)
-			if err == nil {
-				p.editor.Set(false)
-				p.modalText.Set("Connection saved\n\nRun Enter on the selected connection for non-mutating doctor checks. Use connection discover to persist provider folders and calendars.")
-				p.refresh()
-				return
-			}
-		}
-	} else if p.editorKind.Get() == "action" {
-		item, ok := p.selectedMessage()
-		if !ok {
-			err = fmt.Errorf("selected message is no longer available")
-		} else {
-			action := strings.ToLower(strings.TrimSpace(values[0]))
-			payload := service.MailAction{Folder: item.Folder, UID: item.UID}
-			kind := "mail." + action
-			switch action {
-			case "reply":
-				prepared, err = p.service.PrepareReply(p.ctx, item.ConnectionID, item.Folder, item.UID, values[2])
-			case "forward":
-				prepared, err = p.service.PrepareForward(p.ctx, item.ConnectionID, item.Folder, item.UID, splitValues(values[1]), values[2])
-			case "mark-read":
-				value := true
-				payload.Seen = &value
-				kind = "mail.mark"
-			case "mark-unread":
-				value := false
-				payload.Seen = &value
-				kind = "mail.mark"
-			case "flag":
-				value := true
-				payload.Flagged = &value
-				kind = "mail.mark"
-			case "unflag":
-				value := false
-				payload.Flagged = &value
-				kind = "mail.mark"
-			case "move":
-				payload.Destination = values[1]
-			case "archive", "trash":
-			default:
-				err = fmt.Errorf("unknown action %q", action)
-			}
-			if err == nil && action != "reply" && action != "forward" {
-				prepared, err = p.service.PrepareMailAction(p.ctx, item.ConnectionID, kind, payload)
-			}
-		}
-	} else if p.editorKind.Get() == "event-action" {
-		items := p.events.Get()
-		if len(items) == 0 || p.selected.Get() >= len(items) {
-			err = fmt.Errorf("selected event is no longer available")
-		} else {
-			event := items[p.selected.Get()]
-			action := strings.ToLower(strings.TrimSpace(values[0]))
-			if action == "delete" {
-				prepared, err = p.service.PrepareCalendarDelete(p.ctx, event.ConnectionID, event.CollectionID, event.Href, event.ETag, event.RecurrenceID)
-			} else if action == "update" || action == "update-series" {
-				if action == "update-series" && event.RecurrenceID != "" {
-					err = fmt.Errorf("cannot replace a recurring series from an expanded occurrence; refresh and edit the series master")
-				} else {
-					var start, end time.Time
-					if start, err = time.Parse(time.RFC3339, values[2]); err == nil {
-						if end, err = time.Parse(time.RFC3339, values[3]); err == nil {
-							event.Title = values[1]
-							event.Start = start
-							event.End = end
-							prepared, err = p.service.PrepareCalendarWrite(p.ctx, event.ConnectionID, "calendar.update", event)
-						}
-					}
-				}
-			} else {
-				err = fmt.Errorf("unknown event action %q", action)
-			}
-		}
-	} else if p.editorKind.Get() == "mail" {
-		if len(values) != 6 || values[0] == "" {
-			err = fmt.Errorf("connection is required")
-		} else {
-			message := model.SendMessage{ConnectionID: values[0], To: splitValues(values[2]), Subject: values[3], Text: values[4]}
-			for _, path := range splitValues(values[5]) {
-				message.Attachments = append(message.Attachments, model.AttachmentInput{Path: path})
-			}
-			mode := strings.ToLower(strings.TrimSpace(values[1]))
-			if mode == "draft" {
-				prepared, err = p.service.PrepareDraft(p.ctx, values[0], "mail.draft.create", "", 0, message)
-			} else if mode == "send" || mode == "" {
-				prepared, err = p.service.PrepareSend(p.ctx, message)
-			} else {
-				err = fmt.Errorf("mode must be send or draft")
-			}
-		}
-	} else {
-		var start, end time.Time
-		if len(values) != 5 || values[0] == "" || values[1] == "" || values[2] == "" {
-			err = fmt.Errorf("connection, collection, and title are required")
-		} else if start, err = time.Parse(time.RFC3339, values[3]); err == nil {
-			if end, err = time.Parse(time.RFC3339, values[4]); err == nil {
-				prepared, err = p.service.PrepareCalendarWrite(p.ctx, values[0], "calendar.create", model.Event{ID: fmt.Sprintf("posthouse-%d", time.Now().UnixNano()), CollectionID: values[1], Title: values[2], Start: start, End: end})
-			}
-		}
-	}
-	if err != nil {
-		p.errorText.Set(err.Error())
-		return
-	}
-	p.editor.Set(false)
-	p.pendingToken.Set(prepared.Token)
-	p.modalText.Set(formatPreview(prepared))
 }
 
 func (p *posthouseApp) defaultConnection(capability string) string {
@@ -682,7 +525,11 @@ func (p *posthouseApp) selectedMessage() (model.Message, bool) {
 }
 
 func (p *posthouseApp) confirmModal(ke tui.KeyEvent) {
-	if p.executingToken.Get() != "" {
+	if p.editor.Get() || p.executingToken.Get() != "" || p.providerReadCancel != nil {
+		return
+	}
+	if id := p.pendingDiscover.Get(); id != "" {
+		p.startDiscover(id)
 		return
 	}
 	token := p.pendingToken.Get()
@@ -720,6 +567,7 @@ func (p *posthouseApp) cancelModal() {
 	}
 	p.modal.Set(false)
 	p.pendingToken.Set("")
+	p.pendingDiscover.Set("")
 }
 
 func (p *posthouseApp) applyOperation(next operationSnapshot) {
@@ -904,7 +752,7 @@ func (p *posthouseApp) Render(app *tui.App) *tui.Element {
 		}
 	} else if p.view.Get() == 1 {
 		__tui_16 := tui.New(
-			tui.WithText("Unified inbox"),
+			tui.WithText(fmt.Sprintf("Unified inbox · %s", moreMarker(p.mailNext.Get(), len(p.messages.Get())))),
 			tui.WithTextStyle(tui.NewStyle().Bold()),
 		)
 		__tui_9.AddChild(__tui_16)
@@ -968,7 +816,7 @@ func (p *posthouseApp) Render(app *tui.App) *tui.Element {
 		}
 	} else if p.view.Get() == 3 {
 		__tui_28 := tui.New(
-			tui.WithText("Unified agenda / event editor"),
+			tui.WithText(fmt.Sprintf("Unified agenda · %s", moreMarker(p.eventNext.Get(), len(p.events.Get())))),
 			tui.WithTextStyle(tui.NewStyle().Bold()),
 		)
 		__tui_9.AddChild(__tui_28)
@@ -1049,12 +897,12 @@ func (p *posthouseApp) Render(app *tui.App) *tui.Element {
 		tui.WithPaddingTRBL(0, 1, 0, 1),
 	)
 	__tui_42 := tui.New(
-		tui.WithText("Tab areas · j/k move · / search · r refresh · c create · a actions"),
+		tui.WithText("Tab areas · j/k move · / search · r refresh · c create · a actions · d discover · n/p page"),
 		tui.WithTextStyle(tui.NewStyle().Dim()),
 	)
 	__tui_41.AddChild(__tui_42)
 	__tui_43 := tui.New(
-		tui.WithText("? help · q quit"),
+		tui.WithText("s save · ? help · q quit"),
 		tui.WithTextStyle(tui.NewStyle().Dim()),
 	)
 	__tui_41.AddChild(__tui_43)
@@ -1080,6 +928,8 @@ func (p *posthouseApp) Render(app *tui.App) *tui.Element {
 		return tui.NewModal(
 			tui.WithModalOpen(p.modal),
 			tui.WithModalBackdrop("dim"),
+			tui.WithModalCloseOnEscape(false),
+			tui.WithModalKeyMap(p.modalKeyMap()),
 			tui.WithModalElementOptions(tui.WithJustify(tui.JustifyCenter), tui.WithAlign(tui.AlignCenter)),
 		)
 	})
@@ -1097,7 +947,7 @@ func (p *posthouseApp) Render(app *tui.App) *tui.Element {
 		)
 		__tui_48.AddChild(__tui_49)
 		__tui_50 := tui.New(
-			tui.WithText("Tab fields · Enter advances/prepares · Esc cancels"),
+			tui.WithText(p.editorHelp()),
 			tui.WithTextStyle(tui.NewStyle().Dim()),
 		)
 		__tui_48.AddChild(__tui_50)
@@ -1108,22 +958,92 @@ func (p *posthouseApp) Render(app *tui.App) *tui.Element {
 		for index, label := range p.editorLabels() {
 			_ = index
 			__tui_52 := tui.New(
-				tui.WithText(fmt.Sprintf("%-16s %s", label, p.editorValues.Get()[index])),
+				tui.WithDisplay(tui.DisplayFlex), tui.WithDirection(tui.Row),
+				tui.WithGap(1),
+				tui.WithAlign(tui.AlignCenter),
 			)
+			__tui_53 := tui.New(
+				tui.WithText(label),
+				tui.WithWidth(20),
+				tui.WithFlexShrink(0),
+			)
+			__tui_52.AddChild(__tui_53)
+			if index < len(p.editorFields) && p.editorFieldIsBody(index) {
+				__tui_54 := app.Mount(p, tui.MountKey(1, p.editorFieldKey(index)), func() tui.Component {
+					return tui.NewTextArea(
+						tui.WithTextAreaValue(p.editorFields[index]),
+						tui.WithTextAreaWidth(42),
+						tui.WithTextAreaMaxHeight(8),
+						tui.WithTextAreaBorder(tui.BorderRounded),
+						tui.WithTextAreaSubmitKey(tui.KeyF2),
+						tui.WithTextAreaOnSubmit(p.submitEditorText),
+					)
+				})
+				__tui_52.AddChild(__tui_54)
+			} else if index < len(p.editorFields) {
+				__tui_55 := app.Mount(p, tui.MountKey(2, p.editorFieldKey(index)), func() tui.Component {
+					return tui.NewInput(
+						tui.WithInputValue(p.editorFields[index]),
+						tui.WithInputWidth(42),
+						tui.WithInputBorder(tui.BorderRounded),
+						tui.WithInputPlaceholder(p.editorPlaceholder(index)),
+						tui.WithInputOnSubmit(p.submitEditorText),
+					)
+				})
+				__tui_52.AddChild(__tui_55)
+			}
+			if p.rfc3339Mark(index) == "✓" {
+				__tui_56 := tui.New(
+					tui.WithText("✓"),
+					tui.WithTextStyle(tui.NewStyle().Foreground(tui.Green)),
+				)
+				__tui_52.AddChild(__tui_56)
+			}
+			if p.rfc3339Mark(index) == "×" {
+				__tui_57 := tui.New(
+					tui.WithText("×"),
+					tui.WithTextStyle(tui.NewStyle().Foreground(tui.Red)),
+				)
+				__tui_52.AddChild(__tui_57)
+			}
+			if p.rfc3339Error(index) != "" {
+				__tui_58 := tui.New(
+					tui.WithText(p.rfc3339Error(index)),
+					tui.WithTextStyle(tui.NewStyle().Foreground(tui.Red)),
+				)
+				__tui_52.AddChild(__tui_58)
+			}
 			__tui_48.AddChild(__tui_52)
 		}
 		if p.errorText.Get() != "" {
-			__tui_53 := tui.New(
+			__tui_59 := tui.New(
 				tui.WithText(p.errorText.Get()),
 				tui.WithTextStyle(tui.NewStyle().Foreground(tui.Red)),
 			)
-			__tui_48.AddChild(__tui_53)
+			__tui_48.AddChild(__tui_59)
 		}
 	} else {
-		__tui_54 := tui.New(
+		__tui_60 := tui.New(
 			tui.WithText(p.modalText.Get()),
 		)
-		__tui_48.AddChild(__tui_54)
+		__tui_48.AddChild(__tui_60)
+		if p.executingToken.Get() != "" || p.providerReadCancel != nil {
+			__tui_61 := tui.New(
+				tui.WithText("Esc cancels this request"),
+				tui.WithTextStyle(tui.NewStyle().Dim()),
+			)
+			__tui_48.AddChild(__tui_61)
+		} else {
+			__tui_62 := tui.New(
+				tui.WithFocusable(true),
+				tui.WithBorder(tui.BorderRounded),
+				tui.WithPaddingTRBL(0, 1, 0, 1),
+				tui.WithOnActivate(p.confirmModalAction),
+			)
+			__tui_63 := tui.New(tui.WithText("Enter confirms · Esc cancels"))
+			__tui_62.AddChild(__tui_63)
+			__tui_48.AddChild(__tui_62)
+		}
 	}
 	__tui_47.AddChild(__tui_48)
 	__tui_0.AddChild(__tui_47)
@@ -1140,6 +1060,8 @@ func (p *posthouseApp) updatePropsFields(fresh tui.Component) {
 		return
 	}
 	p.service = f.service
+	p.editorFields = f.editorFields
+	p.app = f.app
 	p.ctx = f.ctx
 	p.cancel = f.cancel
 	p.refreshCancel = f.refreshCancel
@@ -1160,6 +1082,7 @@ var _ tui.PropsUpdater = (*posthouseApp)(nil)
 // State, Events, and TextArea fields to app. When you override BindApp,
 // call this helper instead of hand-maintaining the delegation list.
 func (p *posthouseApp) bindAppFields(app *tui.App) {
+	p.app = app
 	if p.view != nil {
 		p.view.BindApp(app)
 	}
@@ -1202,6 +1125,9 @@ func (p *posthouseApp) bindAppFields(app *tui.App) {
 	if p.pendingToken != nil {
 		p.pendingToken.BindApp(app)
 	}
+	if p.pendingDiscover != nil {
+		p.pendingDiscover.BindApp(app)
+	}
 	if p.executingToken != nil {
 		p.executingToken.BindApp(app)
 	}
@@ -1217,11 +1143,32 @@ func (p *posthouseApp) bindAppFields(app *tui.App) {
 	if p.editorKind != nil {
 		p.editorKind.BindApp(app)
 	}
-	if p.editorStep != nil {
-		p.editorStep.BindApp(app)
+	if p.editorTick != nil {
+		p.editorTick.BindApp(app)
 	}
-	if p.editorValues != nil {
-		p.editorValues.BindApp(app)
+	if p.mailCursor != nil {
+		p.mailCursor.BindApp(app)
+	}
+	if p.mailNext != nil {
+		p.mailNext.BindApp(app)
+	}
+	if p.mailHistory != nil {
+		p.mailHistory.BindApp(app)
+	}
+	if p.eventCursor != nil {
+		p.eventCursor.BindApp(app)
+	}
+	if p.eventNext != nil {
+		p.eventNext.BindApp(app)
+	}
+	if p.eventHistory != nil {
+		p.eventHistory.BindApp(app)
+	}
+	if p.attachment != nil {
+		p.attachment.BindApp(app)
+	}
+	if p.attachmentData != nil {
+		p.attachmentData.BindApp(app)
 	}
 }
 

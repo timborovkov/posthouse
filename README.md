@@ -2,12 +2,13 @@
 
 Posthouse is a local-first Go CLI, MCP server, and full-screen terminal app for operating multiple generic mail and calendar connections through one safe interface. v0.2 covers IMAP/SMTP, read-only ICS feeds, mutable CalDAV calendars, encrypted offline state, and prepare-before-execute writes.
 
-> **Release target:** v0.2.0. OAuth, native provider APIs, HTML composition, permanent mail deletion, CalDAV scheduling/free-busy, and live-provider certification are intentionally outside this release.
+> **Release target:** v0.2.0. OAuth, native provider APIs, a contacts registry, a WYSIWYG HTML editor, permanent mail deletion, CalDAV scheduling/free-busy, and live-provider certification are intentionally outside this release. HTML is a sendable body type (`text` or `html`); contacts are not a feature.
 
 ## What works
 
 - Aggregate and paginate two or more mail, CalDAV, and ICS-feed connections with structured partial-source errors.
 - Fetch complete MIME messages, decoded text, sanitized HTML, threading headers, and bounded attachment chunks.
+- Send `text/plain`, `text/html` with a derived plain fallback, or `multipart/alternative` when both bodies are supplied.
 - Offline full-text search uses the encrypted headers and bodies already cached; structured `offline_search_incomplete` source warnings identify queries that may omit uncached content.
 - Attachment reads return a cursorless final chunk when the cache cannot retain them; multi-chunk reads require enough `cache.max_bytes` capacity for the encrypted attachment snapshot.
 - Prepare and execute send, reply, forward, draft, mark, flag, move, archive, and trash operations without global IMAP expunge.
@@ -89,6 +90,7 @@ posthouse mail attachment --connection work --folder INBOX --uid 42 --id 'ATTACH
 
 # Prepare, inspect, and execute a send
 posthouse mail send --connection work --to teammate@example.test --subject Status --body-file status.txt --attachment report.pdf
+posthouse mail send --connection work --to teammate@example.test --subject Status --html-file status.html
 posthouse operation show 'TOKEN_FROM_PREVIOUS_COMMAND'
 posthouse operation execute 'TOKEN_FROM_PREVIOUS_COMMAND'
 
@@ -130,7 +132,18 @@ Selectors intersect exact connection IDs/names, category, labels, capability, an
 
 ## Go-TUI
 
-The TUI has five responsive views: connection onboarding/doctor, unified inbox, message detail/attachments, unified agenda/event editor, and operations/cache. It uses `Tab`/`Shift+Tab` for areas, arrows or `j/k` to move, `/` search, `r` refresh, `c` compose/create, `a` actions, `Enter` open/confirm, `Esc` back/cancel, `?` help, and `q` quit. Mail and event editors prepare writes; a separate exact preview modal is required before execution.
+The TUI is optional. Config files plus env/keychain secrets, CLI, and MCP already cover every operation; use the TUI for by-hand setup and tweaking. Recipients are raw addresses. There is no contacts registry, nickname book, or recipient picker, and there is no WYSIWYG HTML editor.
+
+Five views: connection onboarding/doctor/discover, unified inbox, message detail/attachments, unified agenda, and operations/cache. Working keys:
+
+- `Tab` / `Shift+Tab` cycle areas (and form fields inside a modal)
+- arrows or `j`/`k` move, `/` search, `r` refresh the current page
+- `c` compose or create, `a` message/event actions, `d` discover the selected connection
+- `s` save a loaded attachment to an explicit path (0600, never overwrite)
+- `n` / `PageDown` and `p` / `PageUp` page inbox (25) and agenda (100) with opaque cursors
+- `Enter` open/confirm/prepare, `Esc` back/cancel, `?` help, `q` quit
+
+Compose fields include To, optional CC/BCC, subject, body type (`text` default, or `html`), body textarea, and attachment paths. Choosing `html` sends the textarea as HTML; paste markup, do not expect a rich editor. Agenda times are RFC3339 with a visible example and live valid/invalid markers. Mail and event editors prepare writes; a separate exact preview modal is required before execution.
 
 The `.gsx` source and generated `_gsx.go` are both committed. Run `make generate`; CI runs `make generate-check` and fails on a diff.
 
@@ -191,7 +204,7 @@ make validate          # Docker-free local gate
 make validate-all      # complete release gate
 ```
 
-The Docker suites exercise two mail identities, concurrent cross-process execution, SMTP→IMAP attachments, reply/forward/drafts/folder actions/sent copies, real MCP stdio and authenticated HTTP writes, and real CalDAV discovery, REPORT, PUT, DELETE, ETags, conflicts, invitations, recurrence, and multiple collections. TUI state tests cover navigation, cancellation, attachment access, and the exact prepared-write preview. HTTP fixtures cover feeds, malformed data, redirects, limits, timeouts, and cancellation. Every run tears down containers and volumes first and again on exit.
+The Docker suites exercise two mail identities, concurrent cross-process execution, SMTP→IMAP attachments, reply/forward/drafts/folder actions/sent copies, real MCP stdio and authenticated HTTP writes, and real CalDAV discovery, REPORT, PUT, DELETE, ETags, conflicts, invitations, recurrence, and multiple collections. TUI state tests cover navigation, form field state, cancellation, discover, attachment save, paging, RFC3339 markers, and the exact prepared-write preview. HTTP fixtures cover feeds, malformed data, redirects, limits, timeouts, and cancellation. Every run tears down containers and volumes first and again on exit.
 
 ## Cache policy and boundaries
 
