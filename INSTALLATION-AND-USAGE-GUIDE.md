@@ -91,7 +91,8 @@ SPECIAL-USE when advertised) and calendar collections. The printed JSON is
 redacted — do not feed it to `connection update`.
 
 In the TUI, press `c` on Connections, fill ID/name/email/secret, leave IMAP/SMTP
-blank to probe, then Enter to discover folders.
+blank to probe, then Enter to save and discover folders. Esc closes the form
+without creating a connection.
 
 Read-only ICS feed: [examples/feed-connection.json](./examples/feed-connection.json).
 
@@ -157,8 +158,8 @@ posthouse tui
 `/` search, `r` refresh the current page, `c` compose or create, `a` actions,
 `d` discover the selected connection, `s` save a loaded attachment (0600,
 never overwrite), `n` / `PageDown` and `p` / `PageUp` page inbox (25) and
-agenda (100) with opaque cursors, `Enter` open/confirm/prepare, `Esc` back,
-`?` help, `q` quit.
+agenda (100) with opaque cursors, `Enter` open/confirm/prepare, `Esc` back
+(closes a create form without saving), `?` help, `q` quit.
 
 Compose includes To, optional CC/BCC, subject, body type (`text` default, or
 `html`), a body textarea, and attachment paths. Choosing `html` sends the

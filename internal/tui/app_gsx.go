@@ -968,84 +968,68 @@ func (p *posthouseApp) Render(app *tui.App) *tui.Element {
 			__tui_53 := tui.New(
 				tui.WithText(label),
 				tui.WithWidth(20),
+				tui.WithMaxWidth(20),
 				tui.WithFlexShrink(0),
+				tui.WithOverflow(tui.OverflowHidden),
 			)
 			__tui_52.AddChild(__tui_53)
-			if index < len(p.editorFields) && p.editorFieldIsBody(index) {
-				__tui_54 := app.Mount(p, tui.MountKey(1, p.editorFieldKey(index)), func() tui.Component {
-					return tui.NewTextArea(
-						tui.WithTextAreaValue(p.editorFields[index]),
-						tui.WithTextAreaWidth(42),
-						tui.WithTextAreaMaxHeight(8),
-						tui.WithTextAreaBorder(tui.BorderRounded),
-						tui.WithTextAreaSubmitKey(tui.KeyF2),
-						tui.WithTextAreaOnSubmit(p.submitEditorText),
-					)
+			if index < len(p.editorFields) {
+				__tui_54 := app.Mount(p, tui.MountKey(1, index), func() tui.Component {
+					return NewEditorField(p, index)
 				})
 				__tui_52.AddChild(__tui_54)
-			} else if index < len(p.editorFields) {
-				__tui_55 := app.Mount(p, tui.MountKey(2, p.editorFieldKey(index)), func() tui.Component {
-					return tui.NewInput(
-						tui.WithInputValue(p.editorFields[index]),
-						tui.WithInputWidth(42),
-						tui.WithInputBorder(tui.BorderRounded),
-						tui.WithInputPlaceholder(p.editorPlaceholder(index)),
-						tui.WithInputOnSubmit(p.submitEditorText),
-					)
-				})
-				__tui_52.AddChild(__tui_55)
 			}
 			if p.rfc3339Mark(index) == "✓" {
-				__tui_56 := tui.New(
+				__tui_55 := tui.New(
 					tui.WithText("✓"),
 					tui.WithTextStyle(tui.NewStyle().Foreground(tui.Green)),
 				)
-				__tui_52.AddChild(__tui_56)
+				__tui_52.AddChild(__tui_55)
 			}
 			if p.rfc3339Mark(index) == "×" {
-				__tui_57 := tui.New(
+				__tui_56 := tui.New(
 					tui.WithText("×"),
+					tui.WithTextStyle(tui.NewStyle().Foreground(tui.Red)),
+				)
+				__tui_52.AddChild(__tui_56)
+			}
+			if p.rfc3339Error(index) != "" {
+				__tui_57 := tui.New(
+					tui.WithText(p.rfc3339Error(index)),
 					tui.WithTextStyle(tui.NewStyle().Foreground(tui.Red)),
 				)
 				__tui_52.AddChild(__tui_57)
 			}
-			if p.rfc3339Error(index) != "" {
-				__tui_58 := tui.New(
-					tui.WithText(p.rfc3339Error(index)),
-					tui.WithTextStyle(tui.NewStyle().Foreground(tui.Red)),
-				)
-				__tui_52.AddChild(__tui_58)
-			}
 			__tui_48.AddChild(__tui_52)
 		}
 		if p.errorText.Get() != "" {
-			__tui_59 := tui.New(
+			__tui_58 := tui.New(
 				tui.WithText(p.errorText.Get()),
 				tui.WithTextStyle(tui.NewStyle().Foreground(tui.Red)),
 			)
-			__tui_48.AddChild(__tui_59)
+			__tui_48.AddChild(__tui_58)
 		}
 	} else {
-		__tui_60 := tui.New(
+		__tui_59 := tui.New(
 			tui.WithText(p.modalText.Get()),
 		)
-		__tui_48.AddChild(__tui_60)
+		__tui_48.AddChild(__tui_59)
 		if p.executingToken.Get() != "" || p.providerReadCancel != nil {
-			__tui_61 := tui.New(
+			__tui_60 := tui.New(
 				tui.WithText("Esc cancels this request"),
 				tui.WithTextStyle(tui.NewStyle().Dim()),
 			)
-			__tui_48.AddChild(__tui_61)
+			__tui_48.AddChild(__tui_60)
 		} else {
-			__tui_62 := tui.New(
+			__tui_61 := tui.New(
 				tui.WithFocusable(true),
 				tui.WithBorder(tui.BorderRounded),
 				tui.WithPaddingTRBL(0, 1, 0, 1),
 				tui.WithOnActivate(p.confirmModalAction),
 			)
-			__tui_63 := tui.New(tui.WithText("Enter confirms · Esc cancels"))
-			__tui_62.AddChild(__tui_63)
-			__tui_48.AddChild(__tui_62)
+			__tui_62 := tui.New(tui.WithText("Enter confirms · Esc cancels"))
+			__tui_61.AddChild(__tui_62)
+			__tui_48.AddChild(__tui_61)
 		}
 	}
 	__tui_47.AddChild(__tui_48)

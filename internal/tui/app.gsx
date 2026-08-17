@@ -400,11 +400,9 @@ templ (p *posthouseApp) Render() {
 					<hr />
 					for index, label := range p.editorLabels() {
 						<div class="flex gap-1 items-center">
-							<span class="w-20 shrink-0">{label}</span>
-							if index < len(p.editorFields) && p.editorFieldIsBody(index) {
-								<textarea key={p.editorFieldKey(index)} value={p.editorFields[index]} width={42} maxHeight={8} border={tui.BorderRounded} submitKey={tui.KeyF2} onSubmit={p.submitEditorText} />
-							} else if index < len(p.editorFields) {
-								<input key={p.editorFieldKey(index)} value={p.editorFields[index]} width={42} border={tui.BorderRounded} placeholder={p.editorPlaceholder(index)} onSubmit={p.submitEditorText} />
+							<span class="w-20 max-w-20 shrink-0 overflow-hidden">{label}</span>
+							if index < len(p.editorFields) {
+								@NewEditorField(p, index)
 							}
 							if p.rfc3339Mark(index)=="✓" { <span class="text-green">✓</span> }
 							if p.rfc3339Mark(index)=="×" { <span class="text-red">×</span> }

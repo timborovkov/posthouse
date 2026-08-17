@@ -84,7 +84,7 @@ Use the TUI if you prefer not to memorize commands:
 posthouse tui
 ```
 
-`Tab` moves around, `?` is help, `q` quits. Sending mail or changing a calendar still shows an exact preview before anything is sent.
+`Tab` moves around, `?` is help, `Esc` closes a form without saving, `q` quits. Sending mail or changing a calendar still shows an exact preview before anything is sent.
 
 ## 4. Optional: run it on your own server
 
