@@ -37,7 +37,10 @@ func TestServerListsAndCallsReadOnlyConnectionTool(t *testing.T) {
 	}, false); err != nil {
 		t.Fatalf("second UpsertConnection returned error: %v", err)
 	}
-	server := New(application)
+	server, err := New(application, "")
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
 	serverSession, err := server.mcp.Connect(context.Background(), serverTransport, nil)
 	if err != nil {
@@ -72,7 +75,7 @@ func TestServerListsAndCallsReadOnlyConnectionTool(t *testing.T) {
 			attachmentTool = tool
 		}
 	}
-	for _, want := range []string{"connections_list", "messages_search", "messages_get", "messages_attachment_get", "messages_send_prepare", "messages_reply_prepare", "messages_forward_prepare", "messages_draft_prepare", "messages_action_prepare", "events_list", "event_ics_generate", "event_create_prepare", "operation_execute", "connection_doctor", "sync", "cache_status"} {
+	for _, want := range []string{"connections_list", "messages_search", "messages_triage", "messages_unread_counts", "messages_get", "messages_attachment_get", "messages_send_prepare", "messages_reply_prepare", "messages_forward_prepare", "messages_draft_prepare", "messages_action_prepare", "events_list", "event_ics_generate", "event_create_prepare", "operation_execute", "connection_doctor", "sync", "cache_status"} {
 		if !slices.Contains(names, want) {
 			t.Fatalf("tools %v do not contain %s", names, want)
 		}
@@ -175,7 +178,7 @@ func TestAuthenticate(t *testing.T) {
 }
 
 func TestRunHTTPRejectsNonLoopbackEvenWithToken(t *testing.T) {
-	server := New(nil)
+	server := &Server{}
 	err := server.RunHTTP(context.Background(), "0.0.0.0:8791", testAccessKey, false, slog.Default())
 	if err == nil || !strings.Contains(err.Error(), "must listen on loopback") {
 		t.Fatalf("RunHTTP non-loopback error = %v", err)
@@ -183,7 +186,7 @@ func TestRunHTTPRejectsNonLoopbackEvenWithToken(t *testing.T) {
 }
 
 func TestRunHTTPContainerListenerStillRequiresToken(t *testing.T) {
-	server := New(nil)
+	server := &Server{}
 	err := server.RunHTTP(context.Background(), "0.0.0.0:8791", "", true, slog.Default())
 	if err == nil || !strings.Contains(err.Error(), "at least") {
 		t.Fatalf("RunHTTP container-listener error = %v", err)
@@ -191,7 +194,7 @@ func TestRunHTTPContainerListenerStillRequiresToken(t *testing.T) {
 }
 
 func TestRunHTTPLoopbackStillRequiresToken(t *testing.T) {
-	server := New(nil)
+	server := &Server{}
 	err := server.RunHTTP(context.Background(), "127.0.0.1:8791", "", false, slog.Default())
 	if err == nil || !strings.Contains(err.Error(), "at least") {
 		t.Fatalf("RunHTTP loopback error = %v", err)
@@ -234,5 +237,53 @@ func TestHTTPShutdownWaitsForInFlightHandler(t *testing.T) {
 	close(release)
 	if err := <-finished; err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestReadonlyProfileOmitsWriteTools(t *testing.T) {
+	store, err := config.New(filepath.Join(t.TempDir(), "config.json"))
+	if err != nil {
+		t.Fatalf("config.New returned error: %v", err)
+	}
+	application := service.New(store)
+	server, err := New(application, "readonly")
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	serverSession, err := server.mcp.Connect(context.Background(), serverTransport, nil)
+	if err != nil {
+		t.Fatalf("server Connect returned error: %v", err)
+	}
+	defer serverSession.Close()
+	client := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "0.0.1"}, nil)
+	clientSession, err := client.Connect(context.Background(), clientTransport, nil)
+	if err != nil {
+		t.Fatalf("client Connect returned error: %v", err)
+	}
+	defer clientSession.Close()
+
+	listed, err := clientSession.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("ListTools returned error: %v", err)
+	}
+	names := make([]string, 0, len(listed.Tools))
+	for _, tool := range listed.Tools {
+		names = append(names, tool.Name)
+	}
+	for _, want := range []string{"connections_list", "messages_search", "messages_triage", "messages_get", "events_list", "event_ics_generate", "cache_status", "operation_show"} {
+		if !slices.Contains(names, want) {
+			t.Fatalf("readonly tools %v do not contain %s", names, want)
+		}
+	}
+	for _, blocked := range []string{"messages_send_prepare", "messages_action_prepare", "messages_draft_prepare", "event_create_prepare", "operation_execute"} {
+		if slices.Contains(names, blocked) {
+			t.Fatalf("readonly tools unexpectedly include %s", blocked)
+		}
+	}
+	for _, want := range []string{"messages_triage", "messages_unread_counts"} {
+		if !slices.Contains(names, want) {
+			t.Fatalf("readonly tools %v do not contain %s", names, want)
+		}
 	}
 }

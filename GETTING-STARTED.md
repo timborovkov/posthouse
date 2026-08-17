@@ -55,7 +55,20 @@ Then `set -a; . "$HOME/.config/posthouse/env"; set +a` in the shell that will ru
 
 ## 3. Add a mailbox and calendar
 
-Copy [examples/connection.json](./examples/connection.json). Put a **provider app password** (not your login password) in the environment, then:
+Probe IMAP/SMTP/CalDAV from an identity email, then add (app password, not your login password):
+
+```sh
+posthouse connection probe --email you@acme.example
+export ACME_MAIL_PASSWORD='the app password'
+posthouse connection add --email you@acme.example --id acme --name "Acme work" \
+  --category work --label acme --secret-env ACME_MAIL_PASSWORD --caldav
+posthouse connection discover acme
+posthouse connection doctor acme
+```
+
+Private or loopback discovered hosts need `--allow-private` (or `POSTHOUSE_AUTOCONFIG_ALLOW_PRIVATE=1`).
+
+Or copy [examples/connection.json](./examples/connection.json) and add from a file:
 
 ```sh
 export ACME_MAIL_PASSWORD='the app password'
@@ -140,13 +153,13 @@ Local MCP client snippet:
 }
 ```
 
-Remote MCP: URL `https://your-host/mcp` with `Authorization: Bearer <POSTHOUSE_ACCESS_KEY>`.
+Remote MCP: URL `https://your-host/mcp` with `Authorization: Bearer <POSTHOUSE_ACCESS_KEY>`. Optional `--profile readonly` on `mcp stdio`, `mcp http`, or `serve` omits prepare/execute tools.
 
-REST: `GET https://your-host/v1` with the same header. Writes still prepare-then-execute.
+REST: `GET https://your-host/v1` with the same header. Writes still prepare-then-execute. `posthouse policy deny mail.send` (and other classes) blocks those writes on every surface.
 
 ## Safety in one paragraph
 
-Reads may search several connections. Sends, folder actions, and calendar mutations never do: they target one connection, return a ten-minute preview token, and change nothing until `operation execute` (CLI), `operation_execute` (MCP), or `POST /v1/operations/execute` (REST). Failed HTTP logins are locked out. Provider mail is not stored in the clear.
+Reads may search several connections. Sends, folder actions, and calendar mutations never do: they target one connection, return a ten-minute preview token, and change nothing until `operation execute` (CLI), `operation_execute` (MCP), or `POST /v1/operations/execute` (REST). Failed HTTP logins are locked out. Provider mail is not stored in the clear. Optional `policy deny` and MCP `--profile readonly` further limit what an agent can prepare or even see.
 
 More detail: [INSTALLATION-AND-USAGE-GUIDE.md](./INSTALLATION-AND-USAGE-GUIDE.md).
 Marketing/privacy pages for a domain you own (OAuth verification): [website/](./website/).

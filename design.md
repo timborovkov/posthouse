@@ -4,6 +4,8 @@ Posthouse should feel like a quiet switchboard: terse, predictable, and safe und
 
 The interaction hierarchy is connection → capability → item → prepared operation → execution. Read operations may fan out across a selector and return partial source errors. Every mail or CalDAV write resolves to exactly one connection, is previewed, and is then idempotently executed. Calendar generation stays provider-independent; CalDAV mutation is a separate prepared operation.
 
+Default write policy allows every class. Operators may deny classes (`mail.send`, `mail.move`, `mail.trash`, and the rest) so prepare and execute fail closed on CLI, MCP, and TUI. MCP may also run under a `readonly` profile that omits prepare/execute tools entirely; that profile is independent of the deny-list.
+
 Terminal presentation uses a neutral monochrome base, color only for state and risk, visible focus, complete keyboard control, cancellable asynchronous loading, and no animation that delays input.
 
 Sensitive provider content is encrypted before SQLite or attachment-blob persistence. Plain indexing fields are restricted to connection IDs, opaque provider IDs, timestamps, flags, sizes, and sync state. The cache is bounded and evicts attachments before bodies. Live providers remain canonical; the cache only supports explicit offline reads and live-first stale fallback.

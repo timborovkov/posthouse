@@ -331,6 +331,20 @@ func TestCanceledRefreshSnapshotCannotReplaceCurrentState(t *testing.T) {
 	}
 }
 
+func TestConnectionEditorUsesSubmissionStartTLS(t *testing.T) {
+	app := testApp(t)
+	defer app.close()
+	app.beginEditor("connection", []string{"smtp", "SMTP", "work", "sender@example.test", "sender@example.test", "SMTP_PASSWORD", "", "smtp.example.test:587", "", "", ""})
+	app.submitEditor()
+	if app.errorText.Get() != "" {
+		t.Fatalf("SMTP 587 onboarding failed: %s", app.errorText.Get())
+	}
+	connections, err := app.service.Connections(model.Selector{})
+	if err != nil || len(connections) != 1 || connections[0].Mail == nil || !connections[0].Mail.SMTP.StartTLS || connections[0].Mail.SMTP.TLS {
+		t.Fatalf("connections=%#v err=%v", connections, err)
+	}
+}
+
 func TestConnectionEditorSupportsSMTPOnlyOnboarding(t *testing.T) {
 	app := testApp(t)
 	defer app.close()

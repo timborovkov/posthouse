@@ -11,6 +11,11 @@ does: search across connections, then preview and execute every write on
 exactly one. It is personal software you run on a machine you control — CLI,
 MCP, REST, and an optional terminal UI. Free and open source under MIT.
 
+Probe IMAP/SMTP/CalDAV from an email address (`connection probe` / TUI onboard).
+Default write policy allows everything; deny send/move/trash/etc. via
+`policy deny`, and run MCP as `--profile readonly` when agents should not see
+write tools. Recipients are raw addresses; there is no contacts registry.
+
 ![Posthouse TUI unified inbox with demo work and personal messages](docs/images/tui-inbox.png)
 
 Built by [Tim Borovkov](https://timb.dev). Landing + privacy pages:
@@ -39,12 +44,13 @@ connection, with a ten-minute prepare → preview → execute flow.
 
 | Action | Notes |
 | --- | --- |
-| List / search | Unified inbox; filter by category, label, unread, query. |
-| Get / attachments | Full message body; save attachments locally. |
+| List / search / triage | Unified inbox; filter by category, label, unread, query. `mail triage` is the agent-oriented summary. |
+| Unread counts | IMAP `STATUS UNSEEN` per selected connection (`mail unread`). |
+| Get / attachments | Full message body (includes `markdown`); save attachments locally; `--extract-text` for PDFs. |
 | Send | Text or HTML (`--html` / `--html-file`); optional CC/BCC and file attachments. |
-| Reply / forward | Prepare-then-execute; same preview safety. |
+| Reply / forward | Prepare-then-execute; `--verbatim` forward attaches original parts. |
 | Drafts | Create, update, delete. |
-| Mark / move / archive / trash | Folder actions on one connection. |
+| Mark / move / archive / trash / junk | Folder actions on one connection; `--uids` batches up to 100. |
 
 ### Calendar
 
@@ -64,6 +70,13 @@ connection, with a ten-minute prepare → preview → execute flow.
 | **MCP** | Local `stdio` or Streamable HTTP for Claude, Cursor, Codex, Hermes, … |
 | **REST** | `/v1` on a personal `posthouse serve` (access key required). |
 | **Agent skills** | `posthouse skill install --agent …` ships `connections` / `mail` / `calendar` (plus `mcp` / `rest`). |
+
+### Agent limits
+
+| Idea | What it does |
+| --- | --- |
+| **Policy** | Deny write classes (`mail.send`, `mail.move`, …) on prepare and execute. |
+| **MCP profile** | `full` (default) or `readonly` (`--profile`, `policy mcp-profile`, or `POSTHOUSE_MCP_PROFILE`). |
 
 Recipients are raw addresses (no contacts registry). The TUI is optional.
 
@@ -86,7 +99,7 @@ Add `--all` (or `mcp` / `rest`) when the agent should also use MCP or the HTTP A
 Non-technical path (first connection, agents, private server):
 [GETTING-STARTED.md](./GETTING-STARTED.md).
 
-Full CLI, MCP, REST, and deploy detail:
+Full CLI, MCP, REST, policy, and deploy detail:
 [INSTALLATION-AND-USAGE-GUIDE.md](./INSTALLATION-AND-USAGE-GUIDE.md).
 
 Setup guides: [GETTING-STARTED.md](./GETTING-STARTED.md) (authoritative commands)

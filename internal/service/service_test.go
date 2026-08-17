@@ -260,6 +260,46 @@ func TestPreparedOperationRejectsChangedConnection(t *testing.T) {
 	}
 }
 
+func TestPolicyDenyBlocksPrepareAndExecute(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	connection := mailConnection("work")
+	connection.Identity = model.Identity{Email: "work@example.test"}
+	connection.Mail.SMTP = model.SMTPConfig{Address: "localhost:3025", Insecure: true}
+	application := serviceWithConnections(t, connection)
+
+	prepared, err := application.PrepareSend(context.Background(), model.SendMessage{ConnectionID: "work", To: []string{"person@example.test"}, Subject: "subject", Text: "body"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := application.PolicyDeny([]string{"mail.send"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := application.PrepareSend(context.Background(), model.SendMessage{ConnectionID: "work", To: []string{"person@example.test"}, Subject: "again", Text: "body"}); err == nil || !strings.Contains(err.Error(), "policy denies mail.send") {
+		t.Fatalf("PrepareSend after deny error = %v", err)
+	}
+	if _, err := application.ExecuteOperation(context.Background(), prepared.Token); err == nil || !strings.Contains(err.Error(), "policy denies mail.send") {
+		t.Fatalf("ExecuteOperation after deny error = %v", err)
+	}
+	if _, err := application.PolicyAllow([]string{"mail.send"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := application.PrepareSend(context.Background(), model.SendMessage{ConnectionID: "work", To: []string{"person@example.test"}, Subject: "allowed", Text: "body"}); err != nil {
+		t.Fatalf("PrepareSend after allow = %v", err)
+	}
+}
+
+func TestPolicyEnvDenyBlocksPrepare(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	t.Setenv("POSTHOUSE_POLICY_DENY", "mail.send")
+	connection := mailConnection("work")
+	connection.Identity = model.Identity{Email: "work@example.test"}
+	connection.Mail.SMTP = model.SMTPConfig{Address: "localhost:3025", Insecure: true}
+	application := serviceWithConnections(t, connection)
+	if _, err := application.PrepareSend(context.Background(), model.SendMessage{ConnectionID: "work", To: []string{"person@example.test"}, Subject: "subject", Text: "body"}); err == nil || !strings.Contains(err.Error(), "policy denies mail.send") {
+		t.Fatalf("PrepareSend env deny error = %v", err)
+	}
+}
+
 func TestReplacingProviderAndRemovingConnectionInvalidateCachedContent(t *testing.T) {
 	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
 	work := mailConnection("work")

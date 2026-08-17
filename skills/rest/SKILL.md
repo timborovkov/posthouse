@@ -19,7 +19,7 @@ Base URL: `http://127.0.0.1:8791` or the user's HTTPS origin. Discover routes wi
 
 ## Contract
 
-JSON bodies match MCP tool inputs. Writes need exact `connection` and return a prepared operation. Only `POST /v1/operations/execute` with `{"token":"..."}` performs the side effect. Show the preview and wait for confirmation.
+JSON bodies match MCP tool inputs. Writes need exact `connection` and return a prepared operation. Only `POST /v1/operations/execute` with `{"token":"..."}` performs the side effect. Show the preview and wait for confirmation. Policy deny classes (`mail.send`, `calendar.write`, …) still apply to prepare and execute over REST.
 
 Use base64 `data` on attachments (no filesystem `path`). ≤ 25 MiB total per mail/draft operation.
 

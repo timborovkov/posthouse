@@ -1,6 +1,6 @@
 ---
 name: posthouse-connections
-description: Manage Posthouse connections via CLI (add, label, update, remove, discover, doctor). Use for IMAP/SMTP/CalDAV setup — not mail or calendar work.
+description: Manage Posthouse connections via CLI (add, label, update, remove, probe, discover, doctor). Use for IMAP/SMTP/CalDAV setup — not mail or calendar work.
 ---
 
 # Posthouse connections
@@ -25,9 +25,24 @@ posthouse connection list --category work --label primary --capability mail.read
 
 Pass `--cursor` from `next_cursor` with the same filters.
 
-## Add
+## Probe, then add
 
-1. Collect hosts, address, category, labels, and secret location (env name or keychain). Prefer an **app password**.
+Prefer probing from an identity email (RFC 6186 SRV + Thunderbird XML + CalDAV `/.well-known/caldav`) when hosts are unknown:
+
+```sh
+posthouse connection probe --email you@acme.example
+posthouse connection add --email you@acme.example --id acme --name "Acme work" \
+  --category work --label acme --label primary \
+  --secret-env ACME_MAIL_PASSWORD --caldav
+```
+
+`--secret-keychain NAME` or `--secret-command` (repeat once per argv — do not put spaces in a single flag) are alternatives to `--secret-env`. Private/loopback discovered hosts need `--allow-private` or `POSTHOUSE_AUTOCONFIG_ALLOW_PRIVATE=1`. Probe redirects are HTTPS-only.
+
+Command secrets (JSON or `--secret-command`) run an argv and take the first line; empty or control-character output is rejected. The subprocess does not inherit `POSTHOUSE_*` env keys.
+
+## Add from JSON
+
+1. Collect hosts, address, category, labels, and secret location (env name, keychain, or command argv). Prefer an **app password**.
 2. Write JSON with secrets as refs only — never embed the password:
 
 ```json
@@ -59,6 +74,8 @@ Pass `--cursor` from `next_cursor` with the same filters.
 ```
 
 ICS feed: `"calendar": {"kind": "feed", "url_secret": {"env": "HOLIDAYS_ICS_URL"}}`.
+
+Command secret: `"secret": {"command": ["pass", "show", "acme-mail"]}`.
 
 3. Export the secret (or `posthouse connection secret set NAME --file -` with `"secret": {"keychain":"NAME"}`), then:
 
