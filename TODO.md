@@ -27,6 +27,8 @@ Keep `handoffs/` until verified publisher IDs are ready to land.
 - Provider notifications or other external push integrations.
 - Publisher OAuth app verification and shipping verified client IDs.
 
+Homepage and privacy pages for Google/Microsoft verification live in [`website/`](./website/) (deploy on a domain you own; see the publisher handoff).
+
 ## Later hardening
 
 - Broaden generic-server interoperability fixtures and fuzz MIME/iCalendar parsing.

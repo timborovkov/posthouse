@@ -43,6 +43,8 @@ login — connect from a shell.
 If `connection auth` says login is not configured, this build does not include
 Posthouse's Google/Microsoft ID yet. That is on the maintainer.
 
+Landing and privacy pages for publisher verification: [website/](./website/).
+
 ## Secrets
 
 ```sh

@@ -25,6 +25,7 @@ On this computer you can skip the next command. On a server (Docker, Railway,
 VPS), create the two keys Posthouse needs and keep the file private:
 
 ```sh
+mkdir -p "$HOME/.config/posthouse"
 posthouse setup --write-env "$HOME/.config/posthouse/env"
 ```
 
@@ -146,6 +147,10 @@ the agent: "Use Posthouse to search my mail."
 
 Posthouse is already running as `posthouse serve`. Give the agent:
 
+### On a server (Railway, Docker, VPS)
+
+Posthouse is already running as `posthouse serve`. Give the agent:
+
 - URL: `https://YOUR-HOST/mcp`
 - Header: `Authorization: Bearer` plus the access key from `posthouse setup`
 
@@ -191,3 +196,4 @@ see exactly who it is from and to, then execute. That is true for CLI, TUI,
 MCP, and REST.
 
 More detail (flags, IMAP, Docker networking): [INSTALLATION-AND-USAGE-GUIDE.md](./INSTALLATION-AND-USAGE-GUIDE.md).
+Marketing/privacy pages for a domain you own (OAuth verification): [website/](./website/).
