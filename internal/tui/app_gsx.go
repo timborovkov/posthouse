@@ -68,6 +68,7 @@ type posthouseApp struct {
 	modalText              *tui.State[string]
 	pendingToken           *tui.State[string]
 	pendingDiscover        *tui.State[string]
+	pendingAuth            *tui.State[string]
 	executingToken         *tui.State[string]
 	lastOperation          *tui.State[model.OperationResult]
 	lastOperationError     *tui.State[string]
@@ -92,6 +93,7 @@ type posthouseApp struct {
 	discoverConnection     func(context.Context, string) (model.Connection, error)
 	getMessage             func(context.Context, string, service.MessageLocator) (model.MessageDetail, error)
 	getAttachment          func(context.Context, string, service.MessageLocator, string) (model.Attachment, []byte, error)
+	authorizeConnection    func(context.Context, string, bool) (map[string]any, error)
 	ctx                    context.Context
 	cancel                 context.CancelFunc
 	refreshCancel          context.CancelFunc
@@ -111,7 +113,7 @@ func New(application *service.Service) *posthouseApp {
 		connections: tui.NewState([]model.Connection{}), messages: tui.NewState([]model.Message{}),
 		events: tui.NewState([]model.Event{}), detail: tui.NewState(model.MessageDetail{}),
 		searching: tui.NewState(false), query: tui.NewState(""), modal: tui.NewState(false),
-		modalText: tui.NewState(""), pendingToken: tui.NewState(""), pendingDiscover: tui.NewState(""),
+		modalText: tui.NewState(""), pendingToken: tui.NewState(""), pendingDiscover: tui.NewState(""), pendingAuth: tui.NewState(""),
 		executingToken:     tui.NewState(""),
 		lastOperation:      tui.NewState(model.OperationResult{}),
 		lastOperationError: tui.NewState(""),
@@ -120,7 +122,7 @@ func New(application *service.Service) *posthouseApp {
 		eventCursor: tui.NewState(""), eventNext: tui.NewState(""), eventHistory: tui.NewState([]string{}),
 		attachment: tui.NewState(model.Attachment{}), attachmentData: tui.NewState([]byte{}),
 		updates: make(chan snapshot, 4), operationUpdates: make(chan operationSnapshot, 1), providerReadUpdates: make(chan providerReadSnapshot, 1),
-		executeOperation: application.ExecuteOperation, doctorConnection: application.DoctorConnection, discoverConnection: application.DiscoverConnection, getMessage: application.GetMessageContext, getAttachment: application.GetAttachment,
+		executeOperation: application.ExecuteOperation, doctorConnection: application.DoctorConnection, discoverConnection: application.DiscoverConnection, getMessage: application.GetMessageContext, getAttachment: application.GetAttachment, authorizeConnection: application.AuthorizeConnection,
 		ctx: ctx, cancel: cancel,
 		refreshGeneration: &atomic.Uint64{}, providerReadGeneration: &atomic.Uint64{},
 		wg: &sync.WaitGroup{},
@@ -172,6 +174,7 @@ func (p *posthouseApp) KeyMap() tui.KeyMap {
 		tui.On(tui.Rune('c'), p.createAction),
 		tui.On(tui.Rune('a'), p.itemAction),
 		tui.On(tui.Rune('d'), func(ke tui.KeyEvent) { p.discoverSelected() }),
+		tui.On(tui.Rune('o'), func(ke tui.KeyEvent) { p.authorizeSelected() }),
 		tui.On(tui.Rune('s'), func(ke tui.KeyEvent) { p.beginAttachmentSave() }),
 		tui.On(tui.Rune('n'), func(ke tui.KeyEvent) { p.pageList(1) }),
 		tui.On(tui.Rune('p'), func(ke tui.KeyEvent) { p.pageList(-1) }),
@@ -184,7 +187,7 @@ func (p *posthouseApp) KeyMap() tui.KeyMap {
 			}
 		}),
 		tui.On(tui.Rune('?'), func(ke tui.KeyEvent) {
-			p.modalText.Set("Keyboard\n\nTab/Shift+Tab areas · j/k or arrows move · / search · r refresh\nc compose/create · a actions · d discover · s save attachment · n/p page\nEnter open/confirm · Esc back · q quit")
+			p.modalText.Set("Keyboard\n\nTab/Shift+Tab areas · j/k or arrows move · / search · r refresh\nc compose/create · a actions · d discover · o authorize Gmail/Microsoft · s save attachment · n/p page\nEnter open/confirm · Esc back · q quit")
 			p.modal.Set(true)
 		}),
 	}
@@ -377,7 +380,11 @@ func (p *posthouseApp) startProviderRead(kind string, read func(context.Context)
 	generation := p.providerReadGeneration.Add(1)
 	p.loading.Set(true)
 	p.errorText.Set("")
-	p.modalText.Set("Loading provider data…\n\nEsc cancels this request.")
+	if kind == "auth" {
+		p.modalText.Set("Authorizing connection…\n\nComplete Allow in the browser · Esc cancels")
+	} else {
+		p.modalText.Set("Loading provider data…\n\nEsc cancels this request.")
+	}
 	p.modal.Set(true)
 	p.wg.Add(1)
 	go func() {
@@ -410,6 +417,10 @@ func (p *posthouseApp) applyProviderRead(next providerReadSnapshot) {
 		p.modal.Set(true)
 	case "discover":
 		p.modalText.Set(formatDiscover(next.connection))
+		p.modal.Set(true)
+		p.refresh()
+	case "auth":
+		p.modalText.Set(formatAuth(next.connection))
 		p.modal.Set(true)
 		p.refresh()
 	case "message":
@@ -454,7 +465,7 @@ func (p *posthouseApp) itemAction(ke tui.KeyEvent) {
 func (p *posthouseApp) createAction(ke tui.KeyEvent) {
 	switch p.view.Get() {
 	case 0:
-		p.beginEditor("connection", []string{"", "", "", "", "", "", "", "", "", "", ""})
+		p.beginEditor("connection", []string{"", "", "", "", "", "", "", "", "", "", "", ""})
 	case 1, 2:
 		connection := p.defaultConnection("mail.send")
 		p.beginEditor("mail", []string{connection, "send", "", "", "", "", "text", "", ""})
@@ -532,6 +543,10 @@ func (p *posthouseApp) confirmModal(ke tui.KeyEvent) {
 	if p.editor.Get() || p.executingToken.Get() != "" || p.providerReadCancel != nil {
 		return
 	}
+	if id := p.pendingAuth.Get(); id != "" {
+		p.startAuthorize(id)
+		return
+	}
 	if id := p.pendingDiscover.Get(); id != "" {
 		p.startDiscover(id)
 		return
@@ -575,6 +590,7 @@ func (p *posthouseApp) cancelModal() {
 	p.modal.Set(false)
 	p.pendingToken.Set("")
 	p.pendingDiscover.Set("")
+	p.pendingAuth.Set("")
 }
 
 func (p *posthouseApp) applyOperation(next operationSnapshot) {
@@ -904,7 +920,7 @@ func (p *posthouseApp) Render(app *tui.App) *tui.Element {
 		tui.WithPaddingTRBL(0, 1, 0, 1),
 	)
 	__tui_42 := tui.New(
-		tui.WithText("Tab areas · j/k move · / search · r refresh · c create · a actions · d discover · n/p page"),
+		tui.WithText("Tab areas · j/k move · / search · r refresh · c create · a actions · d discover · o auth · n/p page"),
 		tui.WithTextStyle(tui.NewStyle().Dim()),
 	)
 	__tui_41.AddChild(__tui_42)
@@ -1134,6 +1150,9 @@ func (p *posthouseApp) bindAppFields(app *tui.App) {
 	}
 	if p.pendingDiscover != nil {
 		p.pendingDiscover.BindApp(app)
+	}
+	if p.pendingAuth != nil {
+		p.pendingAuth.BindApp(app)
 	}
 	if p.executingToken != nil {
 		p.executingToken.BindApp(app)

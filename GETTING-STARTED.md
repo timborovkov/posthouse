@@ -64,13 +64,29 @@ posthouse connection discover acme
 posthouse connection doctor acme
 ```
 
+Native Gmail or Microsoft (no IMAP hostnames). Until publisher-verified client
+IDs ship, set yours in the environment, then authorize in a browser:
+
+```sh
+export POSTHOUSE_GOOGLE_CLIENT_ID='...'
+export POSTHOUSE_GOOGLE_CLIENT_SECRET='...'   # Google Desktop token exchange only
+posthouse connection add --file examples/gmail-connection.json
+posthouse connection auth gmail-work
+posthouse connection doctor gmail-work
+```
+
+Microsoft is the same with `POSTHOUSE_MICROSOFT_CLIENT_ID` and
+[examples/microsoft-connection.json](./examples/microsoft-connection.json).
+Do not register your own Cloud/Entra app unless you are dogfooding; that
+registration is the publisher checklist in `handoffs/`.
+
 Use the TUI if you prefer not to memorize commands:
 
 ```sh
 posthouse tui
 ```
 
-`Tab` moves around, `?` is help, `q` quits. Sending mail or changing a calendar still shows an exact preview before anything is sent.
+`Tab` moves around, `?` is help, `o` authorizes Gmail/Microsoft, `q` quits. Sending mail or changing a calendar still shows an exact preview before anything is sent.
 
 ## 4. Optional: run it on your own server
 

@@ -8,6 +8,7 @@ import (
 
 	tui "github.com/grindlemire/go-tui"
 
+	"github.com/timborovkov/posthouse/internal/config"
 	"github.com/timborovkov/posthouse/internal/model"
 	"github.com/timborovkov/posthouse/internal/safeio"
 	"github.com/timborovkov/posthouse/internal/service"
@@ -55,7 +56,7 @@ func (p *posthouseApp) submitEditorText(string) { p.submitEditor() }
 func (p *posthouseApp) editorLabels() []string {
 	switch p.editorKind.Get() {
 	case "connection":
-		return []string{"ID", "Name", "Category", "Identity email", "Mail username", "Mail secret env", "IMAP TLS address", "SMTP TLS address", "CalDAV URL", "CalDAV username", "CalDAV secret env"}
+		return []string{"ID", "Name", "Category", "Identity email", "Mail kind", "Mail username", "Mail secret env", "IMAP TLS address", "SMTP TLS address", "CalDAV URL", "CalDAV username", "CalDAV secret env"}
 	case "action":
 		return []string{"Action", "Recipient / destination", "Body type text/html", "Body"}
 	case "event-action":
@@ -72,7 +73,7 @@ func (p *posthouseApp) editorLabels() []string {
 func (p *posthouseApp) editorTitle() string {
 	switch p.editorKind.Get() {
 	case "connection":
-		return "Onboard protocol connection"
+		return "Onboard connection"
 	case "action":
 		return "Message action: reply, forward, mark-read, mark-unread, flag, unflag, move, archive, trash"
 	case "event-action":
@@ -134,6 +135,9 @@ func (p *posthouseApp) editorFieldIsTime(index int) bool {
 func (p *posthouseApp) editorPlaceholder(index int) string {
 	if p.editorFieldIsTime(index) {
 		return rfc3339Example
+	}
+	if p.editorKind.Get() == "connection" && index == 4 {
+		return "imap, gmail, or microsoft"
 	}
 	if p.editorKind.Get() == "mail" && index == 6 {
 		return "text"
@@ -205,6 +209,7 @@ func (p *posthouseApp) beginEditor(kind string, values []string) {
 	p.modal.Set(true)
 	p.pendingToken.Set("")
 	p.pendingDiscover.Set("")
+	p.pendingAuth.Set("")
 	p.errorText.Set("")
 	p.editorTick.Set(p.editorTick.Get() + 1)
 }
@@ -236,23 +241,39 @@ func (p *posthouseApp) submitEditor() {
 	var err error
 	switch p.editorKind.Get() {
 	case "connection":
-		if len(values) != 11 || values[0] == "" || values[1] == "" {
+		if len(values) != 12 || values[0] == "" || values[1] == "" {
 			err = fmt.Errorf("connection ID and name are required")
 		} else {
 			connection := model.Connection{ID: values[0], Name: values[1], Category: values[2], Identity: model.Identity{Email: values[3]}}
-			if values[6] != "" || values[7] != "" {
-				connection.Mail = &model.MailConfig{Username: values[4], Secret: model.SecretRef{Env: values[5]}, IMAP: model.IMAPConfig{Address: values[6], TLS: values[6] != ""}, SMTP: model.SMTPConfig{Address: values[7], TLS: values[7] != ""}, SentCopy: "provider-managed"}
+			kind := strings.ToLower(strings.TrimSpace(values[4]))
+			switch kind {
+			case "gmail", "microsoft":
+				connection.Mail = &model.MailConfig{Kind: kind}
+				connection.Calendar = &model.CalendarConfig{Kind: kind}
+			case "", "imap":
+				if values[7] != "" || values[8] != "" {
+					connection.Mail = &model.MailConfig{Username: values[5], Secret: model.SecretRef{Env: values[6]}, IMAP: model.IMAPConfig{Address: values[7], TLS: values[7] != ""}, SMTP: model.SMTPConfig{Address: values[8], TLS: values[8] != ""}, SentCopy: "provider-managed"}
+				}
+				if values[9] != "" {
+					connection.Calendar = &model.CalendarConfig{Kind: "caldav", URL: values[9], Username: values[10], Secret: model.SecretRef{Env: values[11]}}
+				}
+			default:
+				err = fmt.Errorf("mail kind must be imap, gmail, or microsoft")
 			}
-			if values[8] != "" {
-				connection.Calendar = &model.CalendarConfig{Kind: "caldav", URL: values[8], Username: values[9], Secret: model.SecretRef{Env: values[10]}}
+			if err == nil {
+				err = p.service.UpsertConnection(connection, false)
 			}
-			err = p.service.UpsertConnection(connection, false)
 			if err == nil {
 				p.editor.Set(false)
 				p.editorFields = nil
 				p.errorText.Set("")
-				p.pendingDiscover.Set(connection.ID)
-				p.modalText.Set("Connection saved\n\nEnter discovers folders and calendars · Esc skips")
+				if kind == "gmail" || kind == "microsoft" {
+					p.pendingAuth.Set(connection.ID)
+					p.modalText.Set("Connection saved\n\nEnter authorizes in a browser · Esc skips")
+				} else {
+					p.pendingDiscover.Set(connection.ID)
+					p.modalText.Set("Connection saved\n\nEnter discovers folders and calendars · Esc skips")
+				}
 				p.refresh()
 				return
 			}
@@ -418,6 +439,10 @@ func parseRequiredRFC3339(name, value string) (time.Time, error) {
 	return parsed, nil
 }
 
+func formatAuth(connection model.Connection) string {
+	return "Authorized connection " + connection.ID + "\n\nRefresh token stored in the OS keychain."
+}
+
 func formatDiscover(connection model.Connection) string {
 	lines := []string{"Discovered connection " + connection.ID}
 	if connection.Mail != nil {
@@ -511,6 +536,31 @@ func (p *posthouseApp) startDiscover(id string) {
 	p.startProviderRead("discover", func(ctx context.Context) providerReadSnapshot {
 		connection, err := p.discoverConnection(ctx, id)
 		return providerReadSnapshot{connection: connection, err: err}
+	})
+}
+
+func (p *posthouseApp) authorizeSelected() {
+	if p.view.Get() != 0 {
+		return
+	}
+	items := p.connections.Get()
+	if len(items) == 0 {
+		return
+	}
+	item := items[p.selected.Get()]
+	if !config.NativeMail(item) && !config.NativeCalendar(item) {
+		p.modalText.Set("Connection auth is for Gmail and Microsoft connections.\n\nUse d to discover IMAP/CalDAV folders.")
+		p.modal.Set(true)
+		return
+	}
+	p.startAuthorize(item.ID)
+}
+
+func (p *posthouseApp) startAuthorize(id string) {
+	p.pendingAuth.Set("")
+	p.startProviderRead("auth", func(ctx context.Context) providerReadSnapshot {
+		_, err := p.authorizeConnection(ctx, id, false)
+		return providerReadSnapshot{connection: model.Connection{ID: id}, err: err}
 	})
 }
 

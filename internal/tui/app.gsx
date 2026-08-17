@@ -66,6 +66,7 @@ type posthouseApp struct {
 	modalText *tui.State[string]
 	pendingToken *tui.State[string]
 	pendingDiscover *tui.State[string]
+	pendingAuth *tui.State[string]
 	executingToken *tui.State[string]
 	lastOperation *tui.State[model.OperationResult]
 	lastOperationError *tui.State[string]
@@ -90,6 +91,7 @@ type posthouseApp struct {
 	discoverConnection func(context.Context,string) (model.Connection,error)
 	getMessage func(context.Context,string,service.MessageLocator) (model.MessageDetail,error)
 	getAttachment func(context.Context,string,service.MessageLocator,string) (model.Attachment,[]byte,error)
+	authorizeConnection func(context.Context,string,bool) (map[string]any,error)
 	ctx context.Context
 	cancel context.CancelFunc
 	refreshCancel context.CancelFunc
@@ -109,7 +111,7 @@ func New(application *service.Service) *posthouseApp {
 		connections: tui.NewState([]model.Connection{}), messages: tui.NewState([]model.Message{}),
 		events: tui.NewState([]model.Event{}), detail: tui.NewState(model.MessageDetail{}),
 		searching: tui.NewState(false), query: tui.NewState(""), modal: tui.NewState(false),
-		modalText: tui.NewState(""), pendingToken: tui.NewState(""), pendingDiscover: tui.NewState(""),
+		modalText: tui.NewState(""), pendingToken: tui.NewState(""), pendingDiscover: tui.NewState(""), pendingAuth: tui.NewState(""),
 		executingToken: tui.NewState(""),
 		lastOperation: tui.NewState(model.OperationResult{}),
 		lastOperationError: tui.NewState(""),
@@ -118,7 +120,7 @@ func New(application *service.Service) *posthouseApp {
 		eventCursor: tui.NewState(""), eventNext: tui.NewState(""), eventHistory: tui.NewState([]string{}),
 		attachment: tui.NewState(model.Attachment{}), attachmentData: tui.NewState([]byte{}),
 		updates: make(chan snapshot, 4), operationUpdates: make(chan operationSnapshot, 1), providerReadUpdates: make(chan providerReadSnapshot, 1),
-		executeOperation: application.ExecuteOperation, doctorConnection: application.DoctorConnection, discoverConnection: application.DiscoverConnection, getMessage: application.GetMessageContext, getAttachment: application.GetAttachment,
+		executeOperation: application.ExecuteOperation, doctorConnection: application.DoctorConnection, discoverConnection: application.DiscoverConnection, getMessage: application.GetMessageContext, getAttachment: application.GetAttachment, authorizeConnection: application.AuthorizeConnection,
 		ctx: ctx, cancel: cancel,
 		refreshGeneration: &atomic.Uint64{}, providerReadGeneration: &atomic.Uint64{},
 		wg: &sync.WaitGroup{},
@@ -162,6 +164,7 @@ func (p *posthouseApp) KeyMap() tui.KeyMap {
 		tui.On(tui.Rune('c'), p.createAction),
 		tui.On(tui.Rune('a'), p.itemAction),
 		tui.On(tui.Rune('d'), func(ke tui.KeyEvent) { p.discoverSelected() }),
+		tui.On(tui.Rune('o'), func(ke tui.KeyEvent) { p.authorizeSelected() }),
 		tui.On(tui.Rune('s'), func(ke tui.KeyEvent) { p.beginAttachmentSave() }),
 		tui.On(tui.Rune('n'), func(ke tui.KeyEvent) { p.pageList(1) }),
 		tui.On(tui.Rune('p'), func(ke tui.KeyEvent) { p.pageList(-1) }),
@@ -169,7 +172,7 @@ func (p *posthouseApp) KeyMap() tui.KeyMap {
 		tui.On(tui.KeyPageUp, func(ke tui.KeyEvent) { p.pageList(-1) }),
 		tui.On(tui.KeyEnter, p.openSelected),
 		tui.On(tui.KeyEscape, func(ke tui.KeyEvent) { if p.view.Get()==2 { p.view.Set(1) } }),
-		tui.On(tui.Rune('?'), func(ke tui.KeyEvent) { p.modalText.Set("Keyboard\n\nTab/Shift+Tab areas · j/k or arrows move · / search · r refresh\nc compose/create · a actions · d discover · s save attachment · n/p page\nEnter open/confirm · Esc back · q quit"); p.modal.Set(true) }),
+		tui.On(tui.Rune('?'), func(ke tui.KeyEvent) { p.modalText.Set("Keyboard\n\nTab/Shift+Tab areas · j/k or arrows move · / search · r refresh\nc compose/create · a actions · d discover · o authorize Gmail/Microsoft · s save attachment · n/p page\nEnter open/confirm · Esc back · q quit"); p.modal.Set(true) }),
 	}
 }
 
@@ -271,7 +274,9 @@ func (p *posthouseApp) openSelected(ke tui.KeyEvent) {
 func (p *posthouseApp) startProviderRead(kind string, read func(context.Context) providerReadSnapshot) {
 	if p.providerReadCancel!=nil { p.providerReadCancel() }
 	ctx,cancel:=context.WithCancel(p.ctx); p.providerReadCancel=cancel; generation:=p.providerReadGeneration.Add(1)
-	p.loading.Set(true); p.errorText.Set(""); p.modalText.Set("Loading provider data…\n\nEsc cancels this request."); p.modal.Set(true)
+	p.loading.Set(true); p.errorText.Set("")
+	if kind == "auth" { p.modalText.Set("Authorizing connection…\n\nComplete Allow in the browser · Esc cancels") } else { p.modalText.Set("Loading provider data…\n\nEsc cancels this request.") }
+	p.modal.Set(true)
 	p.wg.Add(1)
 	go func() { defer p.wg.Done(); next:=read(ctx); next.generation=generation; next.kind=kind; select { case p.providerReadUpdates<-next: case <-ctx.Done(): } }()
 }
@@ -283,6 +288,7 @@ func (p *posthouseApp) applyProviderRead(next providerReadSnapshot) {
 	switch next.kind {
 	case "doctor": p.modalText.Set(formatDoctor(next.doctor)); p.modal.Set(true)
 	case "discover": p.modalText.Set(formatDiscover(next.connection)); p.modal.Set(true); p.refresh()
+	case "auth": p.modalText.Set(formatAuth(next.connection)); p.modal.Set(true); p.refresh()
 	case "message": p.detail.Set(next.detail); p.view.Set(2); p.selected.Set(0); p.modal.Set(false)
 	case "attachment":
 		p.attachment.Set(next.attachment); p.attachmentData.Set(next.data)
@@ -304,7 +310,7 @@ func (p *posthouseApp) itemAction(ke tui.KeyEvent) {
 func (p *posthouseApp) createAction(ke tui.KeyEvent) {
 	switch p.view.Get() {
 	case 0:
-		p.beginEditor("connection", []string{"","","","","","","","","","",""})
+		p.beginEditor("connection", []string{"","","","","","","","","","","",""})
 	case 1, 2:
 		connection := p.defaultConnection("mail.send")
 		p.beginEditor("mail", []string{connection,"send","","","","","text","",""})
@@ -327,6 +333,7 @@ func messageLocator(message model.Message) service.MessageLocator { return servi
 
 func (p *posthouseApp) confirmModal(ke tui.KeyEvent) {
 	if p.editor.Get() || p.executingToken.Get()!="" || p.providerReadCancel != nil { return }
+	if id := p.pendingAuth.Get(); id != "" { p.startAuthorize(id); return }
 	if id := p.pendingDiscover.Get(); id != "" { p.startDiscover(id); return }
 	token := p.pendingToken.Get()
 	if token=="" { p.modal.Set(false); return }
@@ -344,6 +351,7 @@ func (p *posthouseApp) cancelModal() {
 	p.modal.Set(false)
 	p.pendingToken.Set("")
 	p.pendingDiscover.Set("")
+	p.pendingAuth.Set("")
 }
 func (p *posthouseApp) applyOperation(next operationSnapshot) { if next.token!=p.executingToken.Get(){return}; p.operationCancel=nil; p.executingToken.Set(""); if next.result.Token=="" {next.result.Token=next.token}; p.lastOperation.Set(next.result); operationError:=""; if next.err!=nil {operationError=next.err.Error()}; p.lastOperationError.Set(operationError); summary:=formatOperationResult(next.result,operationError); canReplaceModal:=p.modal.Get()&&p.pendingToken.Get()==""; if next.err!=nil { p.errorText.Set(summary); if canReplaceModal {p.modalText.Set(summary)} } else if canReplaceModal { p.modalText.Set(summary) }; p.refresh() }
 
@@ -391,7 +399,7 @@ templ (p *posthouseApp) Render() {
 			</div>
 		</div>
 		if p.errorText.Get()!="" { <div class="border-rounded border-red px-1 shrink-0"><span class="text-red">{p.errorText.Get()}</span></div> }
-		<div class="flex shrink-0 px-1 justify-between"><span class="font-dim">Tab areas · j/k move · / search · r refresh · c create · a actions · d discover · n/p page</span><span class="font-dim">built by Tim Borovkov · s save · ? help · q quit</span></div>
+		<div class="flex shrink-0 px-1 justify-between"><span class="font-dim">Tab areas · j/k move · / search · r refresh · c create · a actions · d discover · o auth · n/p page</span><span class="font-dim">built by Tim Borovkov · s save · ? help · q quit</span></div>
 		if p.searching.Get() { <div class="border-rounded px-1 shrink-0"><span class="text-cyan font-bold">Search: </span><span>{p.query.Get()+"_"}</span></div> }
 		<modal open={p.modal} class="justify-center items-center" backdrop="dim" closeOnEscape={false} keyMap={p.modalKeyMap()}>
 			<div class="w-70 border-rounded p-2 flex-col gap-1">

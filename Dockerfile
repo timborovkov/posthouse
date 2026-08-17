@@ -4,7 +4,12 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/posthouse ./cmd/posthouse
+ARG POSTHOUSE_GOOGLE_CLIENT_ID=
+ARG POSTHOUSE_GOOGLE_CLIENT_SECRET=
+ARG POSTHOUSE_MICROSOFT_CLIENT_ID=
+RUN CGO_ENABLED=0 go build -trimpath \
+    -ldflags="-s -w -X github.com/timborovkov/posthouse/internal/oauth.GoogleClientID=${POSTHOUSE_GOOGLE_CLIENT_ID} -X github.com/timborovkov/posthouse/internal/oauth.GoogleClientSecret=${POSTHOUSE_GOOGLE_CLIENT_SECRET} -X github.com/timborovkov/posthouse/internal/oauth.MicrosoftClientID=${POSTHOUSE_MICROSOFT_CLIENT_ID}" \
+    -o /out/posthouse ./cmd/posthouse
 
 FROM alpine:3.22
 RUN apk add --no-cache ca-certificates wget \

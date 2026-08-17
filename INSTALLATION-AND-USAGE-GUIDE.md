@@ -127,7 +127,8 @@ posthouse tui
 
 `Tab` / `Shift+Tab` cycle areas and form fields, arrows or `j`/`k` to move,
 `/` search, `r` refresh the current page, `c` compose or create, `a` actions,
-`d` discover the selected connection, `s` save a loaded attachment (0600,
+`d` discover the selected connection, `o` authorize a Gmail or Microsoft
+connection in a browser, `s` save a loaded attachment (0600,
 never overwrite), `n` / `PageDown` and `p` / `PageUp` page inbox (25) and
 agenda (100) with opaque cursors, `Enter` open/confirm/prepare, `Esc` back,
 `?` help, `q` quit.

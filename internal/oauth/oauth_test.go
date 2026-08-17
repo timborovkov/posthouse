@@ -26,6 +26,28 @@ func TestCredentialsForRequireEnv(t *testing.T) {
 	}
 }
 
+func TestCredentialsForUseBuildTimeIDs(t *testing.T) {
+	t.Setenv(googleClientEnv, "")
+	t.Setenv(googleSecretEnv, "")
+	t.Setenv(microsoftClientEnv, "")
+	GoogleClientID, GoogleClientSecret, MicrosoftClientID = "ldflag-google", "ldflag-secret", "ldflag-ms"
+	defer func() { GoogleClientID, GoogleClientSecret, MicrosoftClientID = "", "", "" }()
+	google, err := CredentialsFor(ProviderGoogle)
+	if err != nil || google.ClientID != "ldflag-google" || google.ClientSecret != "ldflag-secret" {
+		t.Fatalf("Google ldflag credentials = %#v, %v", google, err)
+	}
+	microsoft, err := CredentialsFor(ProviderMicrosoft)
+	if err != nil || microsoft.ClientID != "ldflag-ms" {
+		t.Fatalf("Microsoft ldflag credentials = %#v, %v", microsoft, err)
+	}
+	t.Setenv(googleClientEnv, "env-google")
+	t.Setenv(googleSecretEnv, "env-secret")
+	google, err = CredentialsFor(ProviderGoogle)
+	if err != nil || google.ClientID != "env-google" || google.ClientSecret != "env-secret" {
+		t.Fatalf("env override credentials = %#v, %v", google, err)
+	}
+}
+
 func TestLoopbackStoresRefreshToken(t *testing.T) {
 	var gotForm url.Values
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
