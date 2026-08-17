@@ -28,12 +28,12 @@ func TestListAndInstallSelectedSkills(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	installed, err := Install(dir, []string{"mail", "posthouse-rest"})
+	result, err := Install(dir, []string{"mail", "posthouse-rest"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(installed) != 2 {
-		t.Fatalf("installed = %#v", installed)
+	if len(result.Installed) != 2 {
+		t.Fatalf("installed = %#v", result)
 	}
 	body, err := os.ReadFile(filepath.Join(dir, "posthouse-mail", "SKILL.md"))
 	if err != nil {
@@ -42,13 +42,14 @@ func TestListAndInstallSelectedSkills(t *testing.T) {
 	if !strings.Contains(string(body), "prepared operation") {
 		t.Fatalf("mail skill body = %s", body)
 	}
+	if !strings.Contains(string(body), `"text":`) {
+		t.Fatalf("mail skill missing draft.json example: %s", body)
+	}
 	if _, err := os.Stat(filepath.Join(dir, "posthouse-mcp", "SKILL.md")); !os.IsNotExist(err) {
 		t.Fatalf("mcp skill should not have been installed: %v", err)
 	}
-	for _, legacy := range []string{"cli", "email-inboxes", "email-send"} {
-		if _, err := os.Stat(filepath.Join(dir, "posthouse-"+legacy, "SKILL.md")); !os.IsNotExist(err) {
-			t.Fatalf("legacy skill %s should not exist: %v", legacy, err)
-		}
+	if _, err := os.Stat(filepath.Join(dir, "posthouse-calendar", "SKILL.md")); !os.IsNotExist(err) {
+		t.Fatalf("calendar skill should not have been installed: %v", err)
 	}
 
 	if _, err := Install(dir, []string{"nope"}); err == nil || !strings.Contains(err.Error(), "unknown skill") {
@@ -56,14 +57,42 @@ func TestListAndInstallSelectedSkills(t *testing.T) {
 	}
 }
 
-func TestInstallAllAndAgentDirectory(t *testing.T) {
+func TestInstallPrunesRetiredSkills(t *testing.T) {
 	dir := t.TempDir()
-	installed, err := Install(dir, []string{"all"})
+	for _, id := range retiredIDs {
+		legacy := filepath.Join(dir, "posthouse-"+id)
+		if err := os.MkdirAll(legacy, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(legacy, "SKILL.md"), []byte("stale"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	result, err := Install(dir, []string{"connections"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(installed) != len(skills.IDs) {
-		t.Fatalf("all installed = %#v", installed)
+	if len(result.Removed) != len(retiredIDs) {
+		t.Fatalf("removed = %#v", result.Removed)
+	}
+	for _, id := range retiredIDs {
+		if _, err := os.Stat(filepath.Join(dir, "posthouse-"+id)); !os.IsNotExist(err) {
+			t.Fatalf("retired skill %s still present: %v", id, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, "posthouse-connections", "SKILL.md")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestInstallAllAndAgentDirectory(t *testing.T) {
+	dir := t.TempDir()
+	result, err := Install(dir, []string{"all"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Installed) != len(skills.IDs) {
+		t.Fatalf("all installed = %#v", result)
 	}
 	for _, id := range skills.IDs {
 		if _, err := os.Stat(filepath.Join(dir, "posthouse-"+id, "SKILL.md")); err != nil {
@@ -73,6 +102,10 @@ func TestInstallAllAndAgentDirectory(t *testing.T) {
 	path, err := AgentDirectory("claude")
 	if err != nil || !strings.Contains(path, string(filepath.Separator)+".claude"+string(filepath.Separator)+"skills") {
 		t.Fatalf("claude dir = %q, %v", path, err)
+	}
+	codex, err := AgentDirectory("codex")
+	if err != nil || !strings.Contains(codex, string(filepath.Separator)+".agents"+string(filepath.Separator)+"skills") {
+		t.Fatalf("codex dir = %q, %v", codex, err)
 	}
 	if _, err := AgentDirectory("unknown"); err == nil {
 		t.Fatal("expected unknown agent error")
@@ -97,5 +130,15 @@ func TestSkillFrontmatterNamesMatchInstallDirs(t *testing.T) {
 		if name != want {
 			t.Fatalf("skill %s name = %q, want %q", id, name, want)
 		}
+	}
+	calendar, err := skills.FS.ReadFile("calendar/SKILL.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(calendar), "collection_id") {
+		t.Fatal("calendar skill must document collection_id")
+	}
+	if strings.Contains(string(calendar), `"collection"`) {
+		t.Fatal("calendar skill must not use ambiguous collection field")
 	}
 }

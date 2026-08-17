@@ -23,7 +23,7 @@ func (c *CLI) skill(args []string) error {
 		flags.SetOutput(c.stderr)
 		dir := flags.String("dir", "", "destination skill directory")
 		agent := flags.String("agent", "", "install into a known agent skill directory: claude, cursor, codex, or hermes")
-		all := flags.Bool("all", false, "install every shipped skill")
+		all := flags.Bool("all", false, "install every shipped skill, including mcp and rest")
 		if err := flags.Parse(args[1:]); err != nil {
 			return err
 		}
@@ -39,11 +39,16 @@ func (c *CLI) skill(args []string) error {
 		if *all {
 			selected = append(selected, "all")
 		}
-		installed, err := skill.Install(destination, selected)
+		result, err := skill.Install(destination, selected)
 		if err != nil {
 			return err
 		}
-		return writeJSON(c.stdout, map[string]any{"ok": true, "directory": destination, "installed": installed})
+		return writeJSON(c.stdout, map[string]any{
+			"ok":        true,
+			"directory": destination,
+			"installed": result.Installed,
+			"removed":   result.Removed,
+		})
 	default:
 		return fmt.Errorf("unknown skill command %q", args[0])
 	}

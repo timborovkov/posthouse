@@ -53,6 +53,19 @@ posthouse mail draft update --connection acme --folder Drafts --uid 9 --file dra
 posthouse mail draft delete --connection acme --folder Drafts --uid 9
 ```
 
+`draft.json` shape (same fields as send; `connection_id` optional when `--connection` is set):
+
+```json
+{
+  "to": ["a@example.test"],
+  "cc": ["b@example.test"],
+  "subject": "Draft",
+  "text": "Plain body",
+  "html": "<p>HTML body</p>",
+  "attachments": [{"path": "./file.pdf"}]
+}
+```
+
 Text-only → `text/plain`. HTML-only → `multipart/alternative` with derived plain. Both → as supplied. See `posthouse mail send -h` for cc/bcc/attachments.
 
 ## Sync

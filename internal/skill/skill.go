@@ -10,10 +10,19 @@ import (
 	"github.com/timborovkov/posthouse/skills"
 )
 
+// retiredIDs are previous skill folder names removed from the catalog. Install
+// deletes them from the destination so agents do not keep stale instructions.
+var retiredIDs = []string{"cli", "email-inboxes", "email-send"}
+
 type Info struct {
 	ID          string `json:"id"`
 	Name        string `json:"name"`
 	Description string `json:"description"`
+}
+
+type InstallResult struct {
+	Installed []string `json:"installed"`
+	Removed   []string `json:"removed,omitempty"`
 }
 
 func List() ([]Info, error) {
@@ -28,37 +37,65 @@ func List() ([]Info, error) {
 	return result, nil
 }
 
-func Install(destination string, ids []string) ([]string, error) {
+func Install(destination string, ids []string) (InstallResult, error) {
+	var result InstallResult
 	if destination == "" {
-		return nil, fmt.Errorf("skill install requires a destination directory")
+		return result, fmt.Errorf("skill install requires a destination directory")
 	}
 	if len(ids) == 0 {
-		return nil, fmt.Errorf("select at least one skill: %s, or --all", strings.Join(skills.IDs, ", "))
+		return result, fmt.Errorf("select at least one skill: %s, or --all", strings.Join(skills.IDs, ", "))
 	}
 	selected, err := normalizeIDs(ids)
 	if err != nil {
-		return nil, err
+		return result, err
 	}
 	if err := os.MkdirAll(destination, 0o755); err != nil {
-		return nil, fmt.Errorf("create skill directory: %w", err)
+		return result, fmt.Errorf("create skill directory: %w", err)
 	}
-	installed := make([]string, 0, len(selected))
+	result.Installed = make([]string, 0, len(selected))
 	for _, id := range selected {
 		body, err := skills.FS.ReadFile(id + "/SKILL.md")
 		if err != nil {
-			return nil, err
+			return result, err
 		}
 		dir := filepath.Join(destination, "posthouse-"+id)
 		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return nil, err
+			return result, err
 		}
 		path := filepath.Join(dir, "SKILL.md")
 		if err := os.WriteFile(path, body, 0o644); err != nil {
-			return nil, fmt.Errorf("write %s: %w", path, err)
+			return result, fmt.Errorf("write %s: %w", path, err)
 		}
-		installed = append(installed, path)
+		result.Installed = append(result.Installed, path)
 	}
-	return installed, nil
+	removed, err := pruneRetired(destination)
+	if err != nil {
+		return result, err
+	}
+	result.Removed = removed
+	return result, nil
+}
+
+func pruneRetired(destination string) ([]string, error) {
+	var removed []string
+	for _, id := range retiredIDs {
+		dir := filepath.Join(destination, "posthouse-"+id)
+		info, err := os.Stat(dir)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return removed, fmt.Errorf("stat retired skill %s: %w", dir, err)
+		}
+		if !info.IsDir() {
+			continue
+		}
+		if err := os.RemoveAll(dir); err != nil {
+			return removed, fmt.Errorf("remove retired skill %s: %w", dir, err)
+		}
+		removed = append(removed, dir)
+	}
+	return removed, nil
 }
 
 func AgentDirectory(agent string) (string, error) {
@@ -72,7 +109,9 @@ func AgentDirectory(agent string) (string, error) {
 	case "cursor":
 		return filepath.Join(home, ".cursor", "skills"), nil
 	case "codex":
-		return filepath.Join(home, ".codex", "skills"), nil
+		// Current Codex discovery path (USER scope). Older builds also scanned
+		// ~/.codex/skills; pass --dir there if needed.
+		return filepath.Join(home, ".agents", "skills"), nil
 	case "hermes":
 		return filepath.Join(home, ".hermes", "skills"), nil
 	case "":

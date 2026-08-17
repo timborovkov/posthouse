@@ -198,11 +198,12 @@ non-loopback address. To bind a specific address, set `--address` or
 
 ```sh
 posthouse skill list
+posthouse skill install --agent claude connections mail calendar
 posthouse skill install --agent claude --all
 posthouse skill install --dir ./.agents/skills connections mail calendar
 ```
 
-`--agent` accepts `claude`, `cursor`, `codex`, or `hermes`. Five skills, one job each: connection management, mail, calendar, REST, and MCP. Writes always prepare, then execute after confirmation.
+`--agent` accepts `claude`, `cursor`, `codex`, or `hermes`. Codex uses `~/.agents/skills`. Prefer the CLI trio locally; add `mcp` / `rest` (or `--all`) only when the agent uses those transports. Re-running install refreshes files and removes retired skill folders. Writes always prepare, then execute after confirmation.
 
 ## Docker
 
