@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"runtime"
@@ -122,7 +123,7 @@ func Loopback(ctx context.Context, cfg Config) (string, error) {
 	}
 	defer listener.Close()
 	addr, ok := listener.Addr().(*net.TCPAddr)
-	if !ok {
+	if !ok || addr.IP == nil || !addr.IP.IsLoopback() {
 		return "", fmt.Errorf("OAuth loopback did not bind 127.0.0.1")
 	}
 	redirect := fmt.Sprintf("http://127.0.0.1:%d%s", addr.Port, cfg.RedirectPath)
@@ -179,6 +180,9 @@ func Loopback(ctx context.Context, cfg Config) (string, error) {
 		defer cancel()
 		_ = server.Shutdown(shutdownCtx)
 	}()
+	if err := checkBrowserURL(authURL); err != nil {
+		return "", err
+	}
 	open := cfg.OpenBrowser
 	if open == nil {
 		open = openBrowser
@@ -205,6 +209,9 @@ func Loopback(ctx context.Context, cfg Config) (string, error) {
 }
 
 func Device(ctx context.Context, cfg Config) (string, error) {
+	if strings.EqualFold(cfg.Provider, ProviderGoogle) {
+		_, _ = fmt.Fprintln(os.Stderr, "Note: Google Desktop apps often reject device-code. If this fails, run connection auth without --device on a computer with a browser. Microsoft --device is the supported server path.")
+	}
 	oauthCfg := cfg.oauth2()
 	response, err := oauthCfg.DeviceAuth(contextClient(ctx, cfg.HTTPClient))
 	if err != nil {
@@ -264,12 +271,10 @@ func Scopes(provider string, mail, calendar bool) []string {
 	default:
 		var scopes []string
 		if mail {
-			scopes = append(scopes,
-				"https://www.googleapis.com/auth/gmail.readonly",
-				"https://www.googleapis.com/auth/gmail.send",
-				"https://www.googleapis.com/auth/gmail.compose",
-				"https://www.googleapis.com/auth/gmail.modify",
-			)
+			// gmail.modify is restricted and covers read, send, drafts, archive, and
+			// trash. Do not also request gmail.readonly / gmail.send / gmail.compose —
+			// those stack extra restricted/sensitive scopes on the consent screen.
+			scopes = append(scopes, "https://www.googleapis.com/auth/gmail.modify")
 		}
 		if calendar {
 			scopes = append(scopes, "https://www.googleapis.com/auth/calendar.readonly", "https://www.googleapis.com/auth/calendar.events")
@@ -282,15 +287,29 @@ func MailScopes(provider string, withCalendar bool) []string {
 	return Scopes(provider, true, withCalendar)
 }
 
-func openBrowser(url string) error {
+func checkBrowserURL(raw string) error {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("authorization URL: %w", err)
+	}
+	if parsed.Scheme != "https" && parsed.Scheme != "http" {
+		return fmt.Errorf("refusing to open non-http authorization URL")
+	}
+	return nil
+}
+
+func openBrowser(rawURL string) error {
+	if err := checkBrowserURL(rawURL); err != nil {
+		return err
+	}
 	var command *exec.Cmd
 	switch runtime.GOOS {
 	case "darwin":
-		command = exec.Command("open", url)
+		command = exec.Command("open", rawURL)
 	case "windows":
-		command = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
+		command = exec.Command("rundll32", "url.dll,FileProtocolHandler", rawURL)
 	default:
-		command = exec.Command("xdg-open", url)
+		command = exec.Command("xdg-open", rawURL)
 	}
 	return command.Start()
 }

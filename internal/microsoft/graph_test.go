@@ -37,6 +37,11 @@ func TestSearchGetSendAndLabelAgainstFixture(t *testing.T) {
 			}}})
 		case request.Method == http.MethodGet && strings.HasSuffix(request.URL.Path, "/$value"):
 			_, _ = writer.Write([]byte(raw))
+		case request.Method == http.MethodGet && strings.Contains(request.URL.Path, "/messages/"):
+			_ = json.NewEncoder(writer).Encode(map[string]any{
+				"id": "AAMkAG", "parentFolderId": "", "isRead": false,
+				"receivedDateTime": "2026-08-17T12:00:00Z", "internetMessageId": "<hello@example.test>",
+			})
 		case request.Method == http.MethodPost && strings.HasSuffix(request.URL.Path, "/sendMail"):
 			sent = true
 			body, _ := io.ReadAll(request.Body)
@@ -61,11 +66,11 @@ func TestSearchGetSendAndLabelAgainstFixture(t *testing.T) {
 	defer func() { APIBase, TokenURL = origBase, origToken }()
 	connection := model.Connection{ID: "ms", Mail: &model.MailConfig{Kind: "microsoft", ResolvedSecret: "refresh-ms"}}
 	result, err := Search(context.Background(), connection, postmail.SearchOptions{Query: "", Limit: 10})
-	if err != nil || len(result.Messages) != 1 || result.Messages[0].ID != "AAMkAG" || !result.Messages[0].Unread {
+	if err != nil || len(result.Messages) != 1 || result.Messages[0].ID != "AAMkAG" || !result.Messages[0].Unread || result.Messages[0].Folder != "INBOX" {
 		t.Fatalf("Search = %#v, %v", result, err)
 	}
 	fetched, err := Get(context.Background(), connection, "AAMkAG")
-	if err != nil || fetched.Detail.Subject != "Hello" {
+	if err != nil || fetched.Detail.Subject != "Hello" || fetched.Detail.Folder != "INBOX" || !fetched.Detail.Unread {
 		t.Fatalf("Get = %#v, %v", fetched, err)
 	}
 	if err := Send(context.Background(), connection, []byte(raw)); err != nil || !sent {
@@ -120,5 +125,68 @@ func TestListAndPutCalendarEvents(t *testing.T) {
 	written, err := PutEvent(context.Background(), connection, model.Event{Title: "New", Start: events[0].Start, End: events[0].End}, true)
 	if err != nil || !created || written.Href != "evt-2" {
 		t.Fatalf("PutEvent = %#v, %v created=%v", written, err, created)
+	}
+}
+
+func TestGetReportsFolderFromParentFolderId(t *testing.T) {
+	raw := "From: a@example.test\r\nTo: b@example.test\r\nSubject: Sent\r\n\r\nBody"
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/token" {
+			writer.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(writer).Encode(map[string]any{"access_token": "graph-access", "token_type": "Bearer", "expires_in": 3600})
+			return
+		}
+		switch {
+		case request.Method == http.MethodGet && strings.HasSuffix(request.URL.Path, "/$value"):
+			_, _ = writer.Write([]byte(raw))
+		case request.Method == http.MethodGet && strings.Contains(request.URL.Path, "/messages/"):
+			_ = json.NewEncoder(writer).Encode(map[string]any{
+				"id": "sent-1", "parentFolderId": "folder-sent", "isRead": true,
+				"receivedDateTime": "2026-08-17T12:00:00Z",
+			})
+		case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/me/mailFolders/"):
+			ids := map[string]string{"inbox": "folder-inbox", "sentitems": "folder-sent", "drafts": "folder-drafts", "deleteditems": "folder-trash", "archive": "folder-archive"}
+			name := strings.TrimPrefix(request.URL.Path, "/me/mailFolders/")
+			_ = json.NewEncoder(writer).Encode(map[string]any{"id": ids[name]})
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+	t.Setenv("POSTHOUSE_MICROSOFT_CLIENT_ID", "public-client")
+	origBase, origToken := APIBase, TokenURL
+	APIBase, TokenURL = server.URL, server.URL+"/token"
+	defer func() { APIBase, TokenURL = origBase, origToken }()
+	connection := model.Connection{ID: "ms-sent", Mail: &model.MailConfig{Kind: "microsoft", ResolvedSecret: "refresh-ms"}}
+	fetched, err := Get(context.Background(), connection, "sent-1")
+	if err != nil || fetched.Detail.Folder != "SENT" || fetched.Detail.Unread {
+		t.Fatalf("Get = %#v, %v", fetched, err)
+	}
+}
+
+func TestSearchSentFolderKeepsSentLabel(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/token" {
+			writer.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(writer).Encode(map[string]any{"access_token": "graph-access", "token_type": "Bearer", "expires_in": 3600})
+			return
+		}
+		if request.Method == http.MethodGet && strings.Contains(request.URL.Path, "/mailFolders/sentitems/messages") {
+			_ = json.NewEncoder(writer).Encode(map[string]any{"value": []map[string]any{{
+				"id": "AAMkSent", "subject": "Sent", "receivedDateTime": "2026-08-17T12:00:00Z", "isRead": true,
+			}}})
+			return
+		}
+		http.NotFound(writer, request)
+	}))
+	defer server.Close()
+	t.Setenv("POSTHOUSE_MICROSOFT_CLIENT_ID", "public-client")
+	origBase, origToken := APIBase, TokenURL
+	APIBase, TokenURL = server.URL, server.URL+"/token"
+	defer func() { APIBase, TokenURL = origBase, origToken }()
+	connection := model.Connection{ID: "ms-sent-list", Mail: &model.MailConfig{Kind: "microsoft", ResolvedSecret: "refresh-ms"}}
+	result, err := Search(context.Background(), connection, postmail.SearchOptions{Folder: "SENT", Limit: 10})
+	if err != nil || len(result.Messages) != 1 || result.Messages[0].Folder != "SENT" {
+		t.Fatalf("Search SENT = %#v, %v", result, err)
 	}
 }

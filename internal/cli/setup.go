@@ -71,8 +71,8 @@ func setupNextSteps() []string {
 	return []string{
 		"Read GETTING-STARTED.md — connect Gmail or Microsoft, then point Hermes or Codex at Posthouse",
 		"This computer: posthouse connection add --kind gmail --email you@gmail.com && posthouse connection auth gmail-work",
-		"Then: posthouse skill install --agent hermes --all   (or codex / claude / cursor) and posthouse mcp stdio",
-		"Server: posthouse serve, then connection auth ... --device (link + code on your phone)",
+		"Then: posthouse skill install --agent hermes connections mail calendar   (or codex / claude / cursor) and posthouse mcp stdio",
+		"Server: posthouse serve, then Microsoft connection auth ... --device (link + code on your phone). Gmail needs a browser on that machine.",
 	}
 }
 

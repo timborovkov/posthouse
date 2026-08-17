@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	postmail "github.com/timborovkov/posthouse/internal/mail"
@@ -21,6 +22,8 @@ var APIBase = "https://graph.microsoft.com/v1.0"
 var TokenURL string
 
 const nativeUIDValidity uint32 = 1
+
+var wellKnownFolders sync.Map
 
 type graphMessage struct {
 	ID                string      `json:"id"`
@@ -110,8 +113,13 @@ func Search(ctx context.Context, connection model.Connection, options postmail.S
 		return postmail.SearchResult{}, err
 	}
 	messages := make([]model.Message, 0, len(listed.Value))
+	listedFolder := canonicalMailFolder(options.Folder)
 	for _, item := range listed.Value {
-		message := item.model(connection.ID)
+		folder := listedFolder
+		if options.Query != "" {
+			folder = folderFromParent(ctx, client, connection.ID, item.ParentFolderID)
+		}
+		message := item.model(connection.ID, folder)
 		if options.Query != "" {
 			if options.Unread && !message.Unread {
 				continue
@@ -139,6 +147,10 @@ func Get(ctx context.Context, connection model.Connection, id string) (postmail.
 	if err != nil {
 		return postmail.FetchedMessage{}, err
 	}
+	var meta graphMessage
+	if err := doJSON(ctx, client, http.MethodGet, APIBase+"/me/messages/"+url.PathEscape(id)+"?$select=id,parentFolderId,isRead,flag,receivedDateTime,internetMessageId", nil, &meta); err != nil {
+		return postmail.FetchedMessage{}, err
+	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, APIBase+"/me/messages/"+url.PathEscape(id)+"/$value", nil)
 	if err != nil {
 		return postmail.FetchedMessage{}, err
@@ -161,7 +173,13 @@ func Get(ctx context.Context, connection model.Connection, id string) (postmail.
 	}
 	fetched.Detail.ConnectionID = connection.ID
 	fetched.Detail.ID = id
-	fetched.Detail.Folder = "INBOX"
+	fetched.Detail.Folder = folderFromParent(ctx, client, connection.ID, meta.ParentFolderID)
+	fetched.Detail.Unread = !meta.IsRead
+	fetched.Detail.Flagged = meta.Flag != nil && meta.Flag.FlagStatus == "flagged"
+	fetched.Detail.MessageID = meta.InternetMessageID
+	if parsed, err := time.Parse(time.RFC3339, meta.ReceivedDateTime); err == nil {
+		fetched.Detail.ReceivedAt = parsed.UTC()
+	}
 	return fetched, nil
 }
 
@@ -341,8 +359,11 @@ func DeleteEvent(ctx context.Context, connection model.Connection, id string) er
 	return doJSON(ctx, client, http.MethodDelete, APIBase+"/me/events/"+url.PathEscape(id), nil, nil)
 }
 
-func (item graphMessage) model(connectionID string) model.Message {
-	message := model.Message{ConnectionID: connectionID, ID: item.ID, Folder: "INBOX", Subject: item.Subject, Preview: item.BodyPreview, Unread: !item.IsRead, HasAttachments: item.HasAttachments, MessageID: item.InternetMessageID}
+func (item graphMessage) model(connectionID, folder string) model.Message {
+	if folder == "" {
+		folder = "INBOX"
+	}
+	message := model.Message{ConnectionID: connectionID, ID: item.ID, Folder: folder, Subject: item.Subject, Preview: item.BodyPreview, Unread: !item.IsRead, HasAttachments: item.HasAttachments, MessageID: item.InternetMessageID}
 	if item.Flag != nil {
 		message.Flagged = item.Flag.FlagStatus == "flagged"
 	}
@@ -398,6 +419,64 @@ func afterCursor(message model.Message, options postmail.SearchOptions) bool {
 		}
 	}
 	return message.ID != options.CursorID
+}
+
+func canonicalMailFolder(folder string) string {
+	switch strings.ToUpper(strings.TrimSpace(folder)) {
+	case "", "INBOX":
+		return "INBOX"
+	case "SENT", "SENT ITEMS", "SENTITEMS":
+		return "SENT"
+	case "DRAFTS", "DRAFT":
+		return "DRAFTS"
+	case "TRASH", "DELETEDITEMS", "DELETED ITEMS":
+		return "TRASH"
+	case "ARCHIVE":
+		return "ARCHIVE"
+	default:
+		return folder
+	}
+}
+
+func folderFromParent(ctx context.Context, client *http.Client, connectionID, parentID string) string {
+	if strings.TrimSpace(parentID) == "" {
+		return "INBOX"
+	}
+	names, err := loadWellKnownFolders(ctx, client, connectionID)
+	if err != nil {
+		return "INBOX"
+	}
+	if name, ok := names[parentID]; ok {
+		return name
+	}
+	return "INBOX"
+}
+
+func loadWellKnownFolders(ctx context.Context, client *http.Client, connectionID string) (map[string]string, error) {
+	key := APIBase + "\x00" + connectionID
+	if cached, ok := wellKnownFolders.Load(key); ok {
+		return cached.(map[string]string), nil
+	}
+	names := map[string]string{}
+	for _, item := range []struct{ path, name string }{
+		{"inbox", "INBOX"},
+		{"sentitems", "SENT"},
+		{"drafts", "DRAFTS"},
+		{"deleteditems", "TRASH"},
+		{"archive", "ARCHIVE"},
+	} {
+		var folder struct {
+			ID string `json:"id"`
+		}
+		if err := doJSON(ctx, client, http.MethodGet, APIBase+"/me/mailFolders/"+item.path+"?$select=id", nil, &folder); err != nil {
+			continue
+		}
+		if folder.ID != "" {
+			names[folder.ID] = item.name
+		}
+	}
+	wellKnownFolders.Store(key, names)
+	return names, nil
 }
 
 func mailFolderPath(folder string) string {

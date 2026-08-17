@@ -22,6 +22,6 @@ Posthouse is a personal, local-first Go CLI, MCP server, REST API, and full-scre
 
 ## Release boundary
 
-OAuth, native Gmail/Microsoft APIs, live-provider certification, a contacts registry, a WYSIWYG HTML editor, permanent IMAP expunge, CalDAV scheduling/free-busy, background-daemon sync, and external notifications remain deliberately outside v0.2. HTML is a sendable body type. Contacts are not planned.
+Native Gmail API and Microsoft Graph backends are additional connection kinds behind the same v0.2 protocol surface. Publisher OAuth app verification, verified client IDs, live-provider certification, a contacts registry, a WYSIWYG HTML editor, permanent IMAP expunge, CalDAV scheduling/free-busy, background-daemon sync, and external notifications remain deliberately outside v0.2. HTML is a sendable body type. Contacts are not planned.
 
 The module and installation path are `github.com/timborovkov/posthouse`.

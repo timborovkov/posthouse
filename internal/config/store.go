@@ -592,6 +592,8 @@ func SetKeychainSecret(name, value string) error {
 	if err := keyringSet(keyringService, name, value); err == nil {
 		return nil
 	} else if err := writeFallbackSecret(name, value); err != nil {
+		// Prefer the OS keychain. The file fallback is plaintext mode 0600 next
+		// to config — a local secret file, not encrypted cache.
 		return fmt.Errorf("store keychain secret %q: %w", name, err)
 	}
 	return nil
@@ -646,6 +648,8 @@ func fallbackSecretPath(name string) string {
 	return filepath.Join(secretsDir(), name)
 }
 
+// writeFallbackSecret stores a secret as a mode-0600 file next to the config.
+// This is a local file, not a vault: it is not encrypted with POSTHOUSE_CACHE_KEY.
 func writeFallbackSecret(name, value string) error {
 	dir := secretsDir()
 	if dir == "" {

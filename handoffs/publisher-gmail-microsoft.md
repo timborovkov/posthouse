@@ -1,13 +1,18 @@
 # Publisher checklist — Gmail API and Microsoft Graph
 
-Temporary. Delete this file and `handoffs/` when native Gmail and Microsoft connections ship.
+Temporary. Native Gmail API and Microsoft Graph backends are already in the
+binary. This file is remaining maintainer work: publisher-owned OAuth apps,
+privacy pages, verification, and verified client IDs. Delete `handoffs/` when
+those IDs ship in release ldflags.
 
-This is maintainer work for adding native Gmail and Microsoft connections after v0.2. Operators never create Google Cloud or Entra projects. They click Allow in a browser. Posthouse is not a SaaS: there is no backend and no hosted OAuth callback.
+Operators never create Google Cloud or Entra projects. They click Allow in a
+browser (or Microsoft device-code on a server). Posthouse is not a SaaS: there
+is no backend and no hosted OAuth callback.
 
 ## You already have
 
-- A local-first CLI/MCP/TUI that must stay local-first.
-- A plan to inject client IDs via env (dogfood) then release ldflags (after verification).
+- Native Gmail/Graph backends, PKCE loopback, Microsoft device-code, and ldflag plumbing.
+- Env overrides: `POSTHOUSE_GOOGLE_CLIENT_ID` / `POSTHOUSE_MICROSOFT_CLIENT_ID` (env wins).
 
 ## A. Domain and policy (for verification, not for dogfood)
 
@@ -42,19 +47,16 @@ When you do publish it:
    - Developer contact: yours.
    - Homepage and privacy policy URLs from A are required for **verification**, not for creating the client or Testing-mode dogfood. Leave them blank until those pages exist.
 5. Add test users: your Gmail addresses (unverified apps are capped at 100 users total, lifetime).
-6. Scopes, start narrow:
-   - `gmail.readonly`
-   - `gmail.send`
-   - `gmail.compose` if drafts need it
-   - Calendar: `calendar.readonly` then `calendar.events` / `calendar` when writes land
-   - Add `gmail.modify` only if archive/trash cannot work without it
+6. Scopes (must match `internal/oauth.Scopes`):
+   - Mail: **only** `https://www.googleapis.com/auth/gmail.modify` — it covers read, send, drafts, archive, and trash. Do **not** also add `gmail.readonly` / `gmail.send` / `gmail.compose` (those stack extra restricted/sensitive scopes on the consent screen).
+   - Calendar: `calendar.readonly` and `calendar.events`
    - Do **not** add `https://mail.google.com/`
-7. Create credentials → OAuth client ID → application type **Desktop app**. Name it `posthouse-desktop`.
+7. Create credentials → OAuth client ID → application type **Desktop app**. Name it `posthouse-desktop`. Device-code is not the Gmail path for this client type; loopback is.
 8. **Download the JSON immediately.** Google may not show the client secret again. Store in your password manager:
    - `POSTHOUSE_GOOGLE_CLIENT_ID`
    - `POSTHOUSE_GOOGLE_CLIENT_SECRET`
 9. Put those two values in your shell env for dogfood. Later, GitHub Actions secrets with the same names for release ldflags. Never commit the JSON or the secret.
-10. Stay in Testing until the code can demo sign-in + list + send. Then submit brand + sensitive-scope verification (demo video of TUI/CLI OAuth and mail, not “we dump Gmail into an LLM”). Restricted-scope / CASA only if you must keep `gmail.modify` and Google requires assessment.
+10. Stay in Testing until the code can demo sign-in + list + send. Then submit brand + **restricted-scope** verification. `gmail.modify` is restricted; Google may require CASA. Demo video of TUI/CLI OAuth and mail, not “we dump Gmail into an LLM”.
 
 Docs:
 

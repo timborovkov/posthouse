@@ -1,15 +1,13 @@
 ---
 name: posthouse-mcp
-description: Call Posthouse MCP for mail and calendar. Local stdio or HTTP to the user's own server. The user must already have connected Gmail/Microsoft; do not run OAuth or accept refresh tokens.
+description: Configure Posthouse MCP over stdio or HTTP /mcp. Use when the agent calls MCP tools instead of the local CLI. Do not run OAuth or accept refresh tokens.
 ---
 
 # Posthouse MCP
 
-Posthouse exposes typed MCP tools. It is not a hosted SaaS.
+Typed MCP tools for mail and calendar. Prefer CLI skills (`posthouse-connections`, `posthouse-mail`, `posthouse-calendar`) when `posthouse` runs on the same machine.
 
-If `connections_list` is empty, stop and tell the user to connect a mailbox in Posthouse first (`GETTING-STARTED.md`: `connection add --kind gmail` then `connection auth`). Never ask for a Google password, refresh token, or Cloud project.
-
-## Local (this computer)
+If `connections_list` is empty, stop and tell the user to connect a mailbox in a **shell** on the Posthouse host (`GETTING-STARTED.md`: `connection add --kind gmail` then `connection auth` in a browser, or Microsoft `connection auth --device` on a server). Never ask for a Google password, refresh token, or Cloud project. There is no MCP auth tool and no device-code UI over MCP.
 
 ```json
 {
@@ -22,23 +20,24 @@ If `connections_list` is empty, stop and tell the user to connect a mailbox in P
 }
 ```
 
-Stdio is local-process auth. Headless/Docker must set `POSTHOUSE_CACHE_KEY`.
+Headless/Docker must set `POSTHOUSE_CACHE_KEY`. Desktop may use the OS keychain. Refresh tokens are not MCP arguments; they stay in the keychain or mode-`0600` files next to config (local files, not a vault).
 
-## Server (Railway, Docker, VPS)
+## HTTP
 
-URL `https://YOUR-HOST/mcp` with `Authorization: Bearer $POSTHOUSE_ACCESS_KEY`. Failed auth is rate-limited. `/healthz` is liveness; `/readyz` is config readiness.
+`POSTHOUSE_ACCESS_KEY` (alias `POSTHOUSE_MCP_TOKEN`) required. Endpoint `/mcp`. `Authorization: Bearer <key>`.
+
+```sh
+posthouse serve --address 127.0.0.1:8791
+```
+
+Failed auth is rate-limited. `/healthz` = liveness; `/readyz` = config/cache key, not providers.
 
 ## Tools
 
-Read-only: `connections_list`, `connection_doctor`, `messages_search`, `messages_get`, `messages_attachment_get`, `events_list`, `event_ics_generate`, `operation_show`, `cache_status`.
+Read: `connections_list`, `connection_doctor`, `messages_search`, `messages_get`, `messages_attachment_get`, `events_list`, `event_ics_generate`, `operation_show`, `cache_status`.
 
-Prepare-only: `messages_send_prepare`, `messages_reply_prepare`, `messages_forward_prepare`, `messages_draft_prepare`, `messages_action_prepare`, `event_create_prepare`, `event_update_prepare`, `event_delete_prepare`. Optional `html` alongside `text` on send/reply/forward/draft.
+Prepare (no side effect): `messages_send_prepare`, `messages_reply_prepare`, `messages_forward_prepare`, `messages_draft_prepare`, `messages_action_prepare`, `event_create_prepare`, `event_update_prepare`, `event_delete_prepare`. Optional `html` alongside `text` on send/reply/forward/draft.
 
-Then `operation_execute` after the user confirms the preview. `sync` refreshes the encrypted local cache.
+Execute: `operation_execute`. Cache refresh: `sync`.
 
-## Rules
-
-- Writes use exactly one connection.
-- Show the prepare preview (connection, identity, recipients or calendar) and wait.
-- Pass `next_cursor` back unchanged with identical filters.
-- There is no MCP tool that opens a browser or stores a refresh token.
+Writes resolve to one connection. Prepare → show preview → execute after confirmation. Pass `next_cursor` unchanged with identical filters.

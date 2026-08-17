@@ -34,8 +34,11 @@ make build
 You need a connected mailbox: Gmail, Microsoft, or generic IMAP/SMTP (and
 optional CalDAV or an ICS feed). Gmail and Microsoft: `posthouse connection add
 --kind gmail --email you@gmail.com` then `posthouse connection auth gmail-work`
-(add `--device` on a server). You click Allow. You do not create a Google Cloud
-or Microsoft app. Generic servers use an app password, not your normal login.
+(browser on this computer). Microsoft on a server: add `--device` so a phone can
+click Allow. Gmail `--device` is not the supported path (Google Desktop apps
+often refuse it). You do not create a Google Cloud or Microsoft app. Generic
+servers use an app password, not your normal login. There is no REST or MCP
+login — connect from a shell.
 
 If `connection auth` says login is not configured, this build does not include
 Posthouse's Google/Microsoft ID yet. That is on the maintainer.
@@ -48,14 +51,20 @@ posthouse setup
 
 Prints two values (or pass `--write-env PATH` for a mode-`0600` file):
 
-- `POSTHOUSE_CACHE_KEY` encrypts local Posthouse state. Desktop use can skip
-  this and let Posthouse store a key in the OS keychain; headless and Docker
-  **must** set it.
+- `POSTHOUSE_CACHE_KEY` encrypts local Posthouse state (the SQLite cache).
+  Desktop use can skip this and let Posthouse store a key in the OS keychain;
+  headless and Docker **must** set it. It does **not** encrypt OAuth refresh
+  tokens.
 - `POSTHOUSE_ACCESS_KEY` protects HTTP (MCP + REST). Stdio MCP on your machine
   does not need it. `POSTHOUSE_MCP_TOKEN` is accepted as an alias; if both are
   set they must match. The access key must be at least 16 characters.
 
-Do not commit env files that contain these values.
+OAuth refresh tokens go in the OS keychain. If this machine has no keychain
+(typical in Docker/Railway), Posthouse writes mode-`0600` files next to the
+config (`<configDir>/secrets/<name>`). Those are local files, not a vault —
+same class as IMAP passwords in `.env`, weaker than the encrypted cache.
+
+Do not commit env files or `secrets/` files that contain these values.
 
 ## Add a connection
 
@@ -81,9 +90,15 @@ posthouse connection add --kind gmail --email you@gmail.com
 posthouse connection auth gmail-work
 ```
 
-On a server, add `--device` so a phone can click Allow. Connect mailboxes
-before Hermes or Codex uses them; there is no MCP login tool. `discover` is
-only for generic IMAP folders and CalDAV collections.
+On a server, Microsoft `--device` prints a link and code for a phone to click
+Allow. Gmail needs a browser on that machine. Connect mailboxes before Hermes
+or Codex uses them; there is no MCP or REST login tool. `discover` is only for
+generic IMAP folders and CalDAV collections.
+
+Gmail archive and trash request the restricted Google scope `gmail.modify`
+(one restricted mail scope). Until the maintainer finishes publisher
+verification, Google may show an unverified-app warning. That is not a prompt
+to create your own Cloud project.
 
 Config path: `posthouse config path` (or `--config` / `POSTHOUSE_CONFIG`).
 State is `posthouse.db` next to it.
@@ -216,12 +231,12 @@ non-loopback address. To bind a specific address, set `--address` or
 
 ```sh
 posthouse skill list
+posthouse skill install --agent claude connections mail calendar
 posthouse skill install --agent claude --all
-posthouse skill install --dir ./.agents/skills cli rest
+posthouse skill install --dir ./.agents/skills connections mail calendar
 ```
 
-`--agent` accepts `claude`, `cursor`, `codex`, or `hermes`. Skills teach the
-CLI, REST, and MCP contracts, including prepare-before-execute.
+`--agent` accepts `claude`, `cursor`, `codex`, or `hermes`. `--agent codex` installs into `~/.agents/skills` and also refreshes `~/.codex/skills`. Prefer the CLI trio locally; add `mcp` / `rest` (or `--all`) only when the agent uses those transports. Re-running install refreshes files and removes retired skill folders. Writes always prepare, then execute after confirmation.
 
 ## Docker
 

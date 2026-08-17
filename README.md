@@ -15,7 +15,7 @@ Recipients are raw addresses; there is no contacts registry.
 
 v0.2 protocol surface stays. Native Gmail/Microsoft connections are additional
 backends behind the same selector, message/event shapes, and prepare-before-execute
-flow. See [TODO.md](./TODO.md).
+flow. Verified publisher client IDs are still maintainer work; see [TODO.md](./TODO.md).
 
 Built by [Tim Borovkov](https://timb.dev). Free to use under the
 [MIT License](LICENSE).
@@ -26,6 +26,15 @@ Built by [Tim Borovkov](https://timb.dev). Free to use under the
 go install github.com/timborovkov/posthouse/cmd/posthouse@latest
 posthouse tui
 ```
+
+Teach a local agent the CLI skills (Codex, Claude, Cursor, Hermes):
+
+```sh
+posthouse skill install --agent codex connections mail calendar
+posthouse skill list
+```
+
+Add `--all` (or `mcp` / `rest`) when the agent should also use MCP or the HTTP API. Re-running install refreshes files and removes retired skill folders (`cli`, `email-inboxes`, `email-send`). `--agent codex` installs into `~/.agents/skills` and also refreshes `~/.codex/skills` for older Codex builds.
 
 Non-technical path (Gmail, Microsoft, Hermes, Codex, your own server):
 [GETTING-STARTED.md](./GETTING-STARTED.md).

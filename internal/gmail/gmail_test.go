@@ -82,6 +82,43 @@ func TestSearchGetSendAndLabelAgainstFixture(t *testing.T) {
 	}
 }
 
+func TestSearchBatchesMetadataForMultipleIDs(t *testing.T) {
+	var batchHits, metaHits int
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/token" {
+			writer.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(writer).Encode(map[string]any{"access_token": "ya29.access", "token_type": "Bearer", "expires_in": 3600})
+			return
+		}
+		switch {
+		case request.Method == http.MethodGet && request.URL.Path == "/gmail/v1/users/me/messages":
+			_ = json.NewEncoder(writer).Encode(map[string]any{"messages": []map[string]string{{"id": "msg-1"}, {"id": "msg-2"}}})
+		case request.Method == http.MethodPost && request.URL.Path == "/batch/gmail/v1":
+			batchHits++
+			writer.Header().Set("Content-Type", "multipart/mixed; boundary=batch_fix")
+			_, _ = writer.Write([]byte("--batch_fix\r\nContent-Type: application/http\r\nContent-ID: <0>\r\n\r\nHTTP/1.1 200 OK\r\n\r\n{\"id\":\"msg-1\",\"internalDate\":\"1152194645000\",\"labelIds\":[\"INBOX\"],\"payload\":{\"headers\":[{\"name\":\"Subject\",\"value\":\"One\"}]}}\r\n--batch_fix\r\nContent-Type: application/http\r\nContent-ID: <1>\r\n\r\nHTTP/1.1 200 OK\r\n\r\n{\"id\":\"msg-2\",\"internalDate\":\"1152194645000\",\"labelIds\":[\"SENT\"],\"payload\":{\"headers\":[{\"name\":\"Subject\",\"value\":\"Two\"}]}}\r\n--batch_fix--\r\n"))
+		case request.Method == http.MethodGet && strings.Contains(request.URL.Path, "/messages/") && request.URL.Query().Get("format") == "metadata":
+			metaHits++
+			http.Error(writer, "search must batch metadata", http.StatusTeapot)
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+	t.Setenv("POSTHOUSE_GOOGLE_CLIENT_ID", "desktop.apps.googleusercontent.com")
+	origBase, origToken := APIBase, TokenURL
+	APIBase, TokenURL = server.URL+"/gmail/v1", server.URL+"/token"
+	defer func() { APIBase, TokenURL = origBase, origToken }()
+	connection := model.Connection{ID: "gmail-work", Mail: &model.MailConfig{Kind: "gmail", ResolvedSecret: "refresh-secret"}}
+	result, err := Search(context.Background(), connection, postmail.SearchOptions{Limit: 10})
+	if err != nil || len(result.Messages) != 2 || result.Messages[0].Subject != "One" || result.Messages[1].Folder != "SENT" {
+		t.Fatalf("Search = %#v, %v", result, err)
+	}
+	if batchHits != 1 || metaHits != 0 {
+		t.Fatalf("batchHits=%d metaHits=%d", batchHits, metaHits)
+	}
+}
+
 func TestListAndPutCalendarEvents(t *testing.T) {
 	var created bool
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {

@@ -130,6 +130,45 @@ func TestDeviceStoresRefreshToken(t *testing.T) {
 	}
 }
 
+func TestGmailMailScopesAreSingleRestrictedModify(t *testing.T) {
+	scopes := Scopes(ProviderGoogle, true, false)
+	if len(scopes) != 1 || scopes[0] != "https://www.googleapis.com/auth/gmail.modify" {
+		t.Fatalf("gmail mail scopes = %#v", scopes)
+	}
+	withCalendar := Scopes(ProviderGoogle, true, true)
+	if len(withCalendar) != 3 || withCalendar[0] != "https://www.googleapis.com/auth/gmail.modify" {
+		t.Fatalf("gmail mail+calendar scopes = %#v", withCalendar)
+	}
+}
+
+func TestCheckBrowserURLRejectsNonHTTP(t *testing.T) {
+	if err := checkBrowserURL("javascript:alert(1)"); err == nil {
+		t.Fatal("expected non-http URL to be rejected")
+	}
+	if err := checkBrowserURL("https://accounts.google.com/o/oauth2/v2/auth"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLoopbackRejectsNonLoopbackBind(t *testing.T) {
+	ln, err := net.Listen("tcp", "0.0.0.0:0")
+	if err != nil {
+		t.Skip(err)
+	}
+	defer ln.Close()
+	cfg := Config{
+		Provider:     ProviderGoogle,
+		Credentials:  Credentials{ClientID: "desktop.apps.googleusercontent.com"},
+		Listen:       func(context.Context) (net.Listener, error) { return ln, nil },
+		RedirectPath: "/",
+		OpenBrowser:  func(string) error { return fmt.Errorf("should not open") },
+	}
+	_, err = Loopback(context.Background(), cfg)
+	if err == nil || !strings.Contains(err.Error(), "127.0.0.1") {
+		t.Fatalf("Loopback non-loopback = %v", err)
+	}
+}
+
 func TestRefreshDoesNotLogToken(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		writer.Header().Set("Content-Type", "application/json")

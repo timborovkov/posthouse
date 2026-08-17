@@ -1,12 +1,16 @@
 package gmail
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime"
+	"mime/multipart"
 	"net/http"
+	"net/textproto"
 	"net/url"
 	"strconv"
 	"strings"
@@ -22,6 +26,8 @@ var CalendarAPIBase = "https://www.googleapis.com/calendar/v3"
 var TokenURL string
 
 const nativeUIDValidity uint32 = 1
+const gmailBatchLimit = 50
+const metadataQuery = "format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Subject&metadataHeaders=Date&metadataHeaders=Message-Id"
 
 type listResponse struct {
 	Messages []struct {
@@ -67,11 +73,15 @@ func Search(ctx context.Context, connection model.Connection, options postmail.S
 		if err := doJSON(ctx, client, http.MethodGet, APIBase+"/users/me/messages?"+query.Encode(), nil, &listed); err != nil {
 			return postmail.SearchResult{}, err
 		}
+		ids := make([]string, 0, len(listed.Messages))
 		for _, item := range listed.Messages {
-			message, err := metadata(ctx, client, connection.ID, item.ID)
-			if err != nil {
-				return postmail.SearchResult{}, err
-			}
+			ids = append(ids, item.ID)
+		}
+		page, err := metadataMany(ctx, client, connection.ID, ids)
+		if err != nil {
+			return postmail.SearchResult{}, err
+		}
+		for _, message := range page {
 			if !afterCursor(message, options) {
 				continue
 			}
@@ -297,11 +307,148 @@ func parseCalendarTime(value calendarTime) time.Time {
 	return time.Time{}
 }
 
+func metadataMany(ctx context.Context, client *http.Client, connectionID string, ids []string) ([]model.Message, error) {
+	out := make([]model.Message, 0, len(ids))
+	for start := 0; start < len(ids); start += gmailBatchLimit {
+		end := start + gmailBatchLimit
+		if end > len(ids) {
+			end = len(ids)
+		}
+		chunk := ids[start:end]
+		if len(chunk) == 1 {
+			message, err := metadata(ctx, client, connectionID, chunk[0])
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, message)
+			continue
+		}
+		page, err := metadataBatch(ctx, client, connectionID, chunk)
+		if err != nil {
+			for _, id := range chunk {
+				message, metaErr := metadata(ctx, client, connectionID, id)
+				if metaErr != nil {
+					return nil, metaErr
+				}
+				out = append(out, message)
+			}
+			continue
+		}
+		out = append(out, page...)
+	}
+	return out, nil
+}
+
+func batchEndpoint() string {
+	return strings.TrimSuffix(APIBase, "/gmail/v1") + "/batch/gmail/v1"
+}
+
+func metadataBatch(ctx context.Context, client *http.Client, connectionID string, ids []string) ([]model.Message, error) {
+	const boundary = "batch_posthouse"
+	var body bytes.Buffer
+	for index, id := range ids {
+		fmt.Fprintf(&body, "--%s\r\nContent-Type: application/http\r\nContent-ID: <%d>\r\n\r\nGET /gmail/v1/users/me/messages/%s?%s\r\n\r\n", boundary, index, url.PathEscape(id), metadataQuery)
+	}
+	fmt.Fprintf(&body, "--%s--\r\n", boundary)
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, batchEndpoint(), &body)
+	if err != nil {
+		return nil, err
+	}
+	request.Header.Set("Content-Type", "multipart/mixed; boundary="+boundary)
+	response, err := client.Do(request)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	payload, err := io.ReadAll(io.LimitReader(response.Body, 8<<20))
+	if err != nil {
+		return nil, err
+	}
+	if response.StatusCode >= 300 {
+		return nil, fmt.Errorf("gmail batch %s: %s", response.Status, strings.TrimSpace(string(payload)))
+	}
+	_, params, err := mime.ParseMediaType(response.Header.Get("Content-Type"))
+	if err != nil || params["boundary"] == "" {
+		return nil, fmt.Errorf("gmail batch response missing multipart boundary")
+	}
+	reader := multipart.NewReader(bytes.NewReader(payload), params["boundary"])
+	byIndex := map[int]model.Message{}
+	order := 0
+	for {
+		part, err := reader.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("gmail batch part: %w", err)
+		}
+		raw, err := io.ReadAll(io.LimitReader(part, 1<<20))
+		if err != nil {
+			return nil, err
+		}
+		status, jsonBody, err := decodeApplicationHTTP(raw)
+		if err != nil {
+			return nil, err
+		}
+		if status >= 300 {
+			return nil, fmt.Errorf("gmail batch item %s: %s", strings.TrimSpace(string(jsonBody)), strings.TrimSpace(string(jsonBody)))
+		}
+		var payload rawMessage
+		if err := json.Unmarshal(jsonBody, &payload); err != nil {
+			return nil, fmt.Errorf("gmail batch item: %w", err)
+		}
+		message := messageFromRaw(connectionID, payload)
+		index := batchIndex(part.Header, order)
+		byIndex[index] = message
+		order++
+	}
+	messages := make([]model.Message, 0, len(ids))
+	for index := range ids {
+		message, ok := byIndex[index]
+		if !ok {
+			return nil, fmt.Errorf("gmail batch missing item %d", index)
+		}
+		messages = append(messages, message)
+	}
+	return messages, nil
+}
+
+func batchIndex(header textproto.MIMEHeader, fallback int) int {
+	id := strings.Trim(header.Get("Content-ID"), " <>")
+	id = strings.TrimPrefix(id, "response-")
+	if n, err := strconv.Atoi(id); err == nil {
+		return n
+	}
+	return fallback
+}
+
+func decodeApplicationHTTP(payload []byte) (int, []byte, error) {
+	payload = bytes.ReplaceAll(payload, []byte("\r\n"), []byte("\n"))
+	header, body, ok := bytes.Cut(payload, []byte("\n\n"))
+	if !ok {
+		return 0, nil, fmt.Errorf("gmail batch part missing body")
+	}
+	first, _, _ := strings.Cut(string(header), "\n")
+	fields := strings.Fields(first)
+	if len(fields) < 2 {
+		return 0, nil, fmt.Errorf("gmail batch part status %q", first)
+	}
+	status, err := strconv.Atoi(fields[1])
+	if err != nil {
+		return 0, nil, fmt.Errorf("gmail batch part status %q", first)
+	}
+	return status, bytes.TrimSpace(body), nil
+}
+
 func metadata(ctx context.Context, client *http.Client, connectionID, id string) (model.Message, error) {
 	var payload rawMessage
-	if err := doJSON(ctx, client, http.MethodGet, APIBase+"/users/me/messages/"+url.PathEscape(id)+"?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Subject&metadataHeaders=Date&metadataHeaders=Message-Id", nil, &payload); err != nil {
+	if err := doJSON(ctx, client, http.MethodGet, APIBase+"/users/me/messages/"+url.PathEscape(id)+"?"+metadataQuery, nil, &payload); err != nil {
 		return model.Message{}, err
 	}
+	return messageFromRaw(connectionID, payload), nil
+}
+
+func messageFromRaw(connectionID string, payload rawMessage) model.Message {
 	message := model.Message{ConnectionID: connectionID, ID: payload.ID, Folder: folderFromLabels(payload.LabelIDs), Unread: containsLabel(payload.LabelIDs, "UNREAD"), Flagged: containsLabel(payload.LabelIDs, "STARRED")}
 	if ms, err := strconv.ParseInt(payload.InternalDate, 10, 64); err == nil {
 		message.ReceivedAt = time.UnixMilli(ms).UTC()
@@ -324,7 +471,7 @@ func metadata(ctx context.Context, client *http.Client, connectionID, id string)
 			}
 		}
 	}
-	return message, nil
+	return message
 }
 
 func searchQuery(options postmail.SearchOptions) string {

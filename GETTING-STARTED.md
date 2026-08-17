@@ -30,6 +30,11 @@ posthouse setup --write-env "$HOME/.config/posthouse/env"
 
 Then load it in the shell that will run Posthouse: `set -a; . "$HOME/.config/posthouse/env"; set +a`
 
+`POSTHOUSE_CACHE_KEY` encrypts the local cache. It does **not** encrypt OAuth
+refresh tokens. Those live in the OS keychain, or — if this machine has no
+keychain — as mode-`0600` files next to the config (`secrets/`). Those files are
+local secrets, not a vault. Prefer the keychain on a laptop.
+
 ## 2. Connect a mailbox
 
 ### Gmail
@@ -41,15 +46,13 @@ posthouse connection auth gmail-work
 
 A browser opens. Click **Allow**. Done.
 
-On a server (no browser on that machine), add `--device`:
+Gmail needs a browser **on this machine**. `--device` (phone Allow) is the
+Microsoft server path. Google Desktop apps often refuse device-code; do not use
+`--device` for Gmail unless you already know this client allows it.
 
-```sh
-posthouse connection add --kind gmail --email you@gmail.com
-posthouse connection auth gmail-work --device
-```
-
-Posthouse prints a link and a short code. Open the link **on your phone**, type
-the code, click Allow. You never copy tokens.
+Google may show an “unverified app” warning until the maintainer finishes
+publisher verification. Archive and trash need the restricted `gmail.modify`
+scope; that is expected, not a prompt to create your own Cloud project.
 
 ### Microsoft (Outlook, Hotmail, Microsoft 365)
 
@@ -58,7 +61,18 @@ posthouse connection add --kind microsoft --email you@outlook.com
 posthouse connection auth microsoft-work
 ```
 
-Same Allow screen. On a server, add `--device` as above.
+Same Allow screen on this computer.
+
+On a server (no browser on that machine), add `--device`:
+
+```sh
+posthouse connection add --kind microsoft --email you@outlook.com
+posthouse connection auth microsoft-work --device
+```
+
+Posthouse prints a link and a short code. Open the link **on your phone**, type
+the code, click Allow. You never copy tokens. There is no login page on the
+REST or MCP server — connect from a shell.
 
 Work Microsoft 365 sometimes blocks apps that are not yet publisher-verified.
 Personal Outlook/Hotmail is the reliable first try.
@@ -82,7 +96,8 @@ You can connect several mailboxes. Search looks across all of them.
 posthouse tui
 ```
 
-`?` is help. `o` connects Gmail or Microsoft the same way as `connection auth`.
+`?` is help. `o` connects Gmail or Microsoft the same way as `connection auth`
+(browser on this computer).
 
 If `connection auth` says Google or Microsoft login is not configured, this
 build does not include Posthouse's login yet. That is on the maintainer. You
@@ -93,14 +108,19 @@ should not create a Google Cloud or Microsoft app.
 The agent never logs into Gmail for you. You connected the mailbox above. Now
 you only point the agent at Posthouse.
 
-Install the how-to files Hermes, Codex, Claude, and Cursor read:
+Five skills, one job each: `connections`, `mail`, `calendar`, plus `mcp` / `rest`
+for remote transports.
 
 ```sh
-posthouse skill install --agent hermes --all
-posthouse skill install --agent codex --all
+posthouse skill install --agent hermes connections mail calendar
+posthouse skill install --agent codex connections mail calendar
 ```
 
-`--agent` can also be `claude` or `cursor`.
+`--agent` can also be `claude` or `cursor`. Add `mcp` or `rest` when the agent
+should use those transports, or `--all` for every skill. Re-running install
+refreshes files and removes retired folders (`posthouse-cli`,
+`posthouse-email-inboxes`, `posthouse-email-send`). `--agent codex` installs into
+`~/.agents/skills` and also refreshes `~/.codex/skills`.
 
 ### On this computer (Hermes, Codex, Claude, Cursor)
 
@@ -131,23 +151,38 @@ Posthouse is already running as `posthouse serve`. Give the agent:
 
 Same URL with `/v1` is the REST API if the agent prefers HTTP JSON.
 
-Connect Gmail **on that server** with `--device` (section 2) before the agent
-tries to read mail. The agent cannot click Allow for you.
+Connect the mailbox **in a shell on that server** before the agent tries to
+read mail. The agent cannot click Allow for you, and there is no REST/MCP
+OAuth endpoint.
+
+Microsoft on a server:
+
+```sh
+docker compose exec posthouse posthouse --config /data/config.json connection add --kind microsoft --email you@outlook.com
+docker compose exec posthouse posthouse --config /data/config.json connection auth microsoft-work --device
+```
+
+Gmail on a server needs a browser attached to that machine (`connection auth`
+without `--device`). Do not paste refresh tokens into env files or REST bodies.
 
 Docker Compose, from the project directory:
 
 ```sh
 posthouse setup --write-env .env
 docker compose up --build
-docker compose exec posthouse posthouse --config /data/config.json connection add --kind gmail --email you@gmail.com
-docker compose exec posthouse posthouse --config /data/config.json connection auth gmail-work --device
 ```
+
+Then run the `connection` commands above with `--config /data/config.json`.
 
 Railway: create a service from this repo, attach a volume at `/data`, set
 `POSTHOUSE_CACHE_KEY`, `POSTHOUSE_ACCESS_KEY`, and `POSTHOUSE_TRUST_PROXY=1`.
-Open a shell on the service and run the same two `connection` commands with
+Open a shell on the service and run the same `connection` commands with
 `--config /data/config.json`. Then put `https://YOUR-RAILWAY-HOST/mcp` and the
 access key into Hermes or Codex.
+
+Set `POSTHOUSE_TRUST_PROXY=1` when a reverse proxy on a private or loopback hop
+supplies `X-Real-IP` or `X-Forwarded-For`, so brute-force lockout keys off the
+real client rather than the proxy.
 
 ## What sending looks like
 

@@ -1,13 +1,13 @@
 ---
 name: posthouse-rest
-description: Call the user's self-hosted Posthouse REST API. Use when posthouse serve is running. The user must already have connected their mailbox; do not collect OAuth tokens over HTTP.
+description: Call a self-hosted Posthouse REST /v1 API. Use when posthouse serve is up and the agent should use HTTP instead of the CLI. Do not collect OAuth tokens over HTTP.
 ---
 
 # Posthouse REST API
 
-Personal deployment. REST at `/v1`, MCP at `/mcp`. Not a multi-tenant SaaS.
+Personal `posthouse serve` deployment: REST at `/v1`, MCP at `/mcp`. Prefer CLI skills when `posthouse` is local.
 
-If `GET /v1/connections` is empty, tell the user to connect Gmail or Microsoft in Posthouse (`connection auth`, with `--device` on a server). Do not accept refresh tokens in REST bodies.
+If `GET /v1/connections` is empty, tell the user to connect the mailbox in a **shell** on that host (`connection auth` in a browser, or Microsoft `connection auth --device`). There is no REST OAuth or device-code endpoint. Do not accept refresh tokens in REST bodies.
 
 ## Auth
 
@@ -15,17 +15,21 @@ If `GET /v1/connections` is empty, tell the user to connect Gmail or Microsoft i
 Authorization: Bearer $POSTHOUSE_ACCESS_KEY
 ```
 
-`X-Posthouse-Key` is equivalent. After several failures the server returns 429. `/healthz` and `/readyz` need no key.
+`X-Posthouse-Key` is equivalent. `/healthz` and `/readyz` are unauthenticated. Failed auth returns 429 with `Retry-After` after several attempts — do not brute-force.
 
-## Base URL
+Base URL: `http://127.0.0.1:8791` or the user's HTTPS origin. Discover routes with `GET /v1`.
 
-- This machine: `http://127.0.0.1:8791`
-- Their server: `https://YOUR-HOST` (Railway or reverse proxy). Never disable TLS on a public address.
+## Contract
 
-`GET /v1` lists routes. JSON bodies match MCP tool inputs. Writes return a prepared token. Only `POST /v1/operations/execute` with `{"token":"..."}` sends mail. Show the preview first.
+JSON bodies match MCP tool inputs. Writes need exact `connection` and return a prepared operation. Only `POST /v1/operations/execute` with `{"token":"..."}` performs the side effect. Show the preview and wait for confirmation.
 
-Use base64 `data` for attachments, not filesystem `path`. 25 MiB total per mail/draft.
+Use base64 `data` on attachments (no filesystem `path`). ≤ 25 MiB total per mail/draft operation. Message identity is `connection` plus opaque `id` (not IMAP folder+UID).
 
 ```sh
 curl -sS -H "Authorization: Bearer $POSTHOUSE_ACCESS_KEY" "$POSTHOUSE_URL/v1/connections"
+curl -sS -H "Authorization: Bearer $POSTHOUSE_ACCESS_KEY" -H "Content-Type: application/json" \
+  -d '{"connection":"work","to":["teammate@example.test"],"subject":"Status","text":"Update"}' \
+  "$POSTHOUSE_URL/v1/mail/send"
 ```
+
+Useful routes: `POST /v1/mail/search`, `/mail/get`, `/mail/send`, `/calendar/events`, `/calendar/create`, `/operations/show`, `/operations/execute`, `/sync`, `GET /v1/cache`.
