@@ -2,7 +2,4 @@ blank_issues_enabled: true
 contact_links:
   - name: Security report
     url: https://github.com/timborovkov/posthouse/security/advisories/new
-    about: Report a vulnerability privately. Do not open a public issue for security reports.
-  - name: Installation and usage guide
-    url: https://github.com/timborovkov/posthouse/blob/main/INSTALLATION-AND-USAGE-GUIDE.md
-    about: Install, first connection, TUI, CLI, MCP, and Docker.
+    about: Private vulnerability reports only.
