@@ -164,6 +164,21 @@ func TestGuardTrustsForwardedClientWhenEnabled(t *testing.T) {
 	if guard.clientID(realIP) != guard.clientID(rightmost) {
 		t.Fatal("X-Real-IP should win over X-Forwarded-For")
 	}
+
+	private := httptest.NewRequest(http.MethodGet, "/", nil)
+	private.RemoteAddr = "10.0.0.2:443"
+	private.Header.Set("X-Forwarded-For", "198.51.100.9, 203.0.113.10")
+	if guard.clientID(private) != guard.clientID(rightmost) {
+		t.Fatal("private proxy hop should honor forwarded headers")
+	}
+
+	public := httptest.NewRequest(http.MethodGet, "/", nil)
+	public.RemoteAddr = "198.51.100.20:443"
+	public.Header.Set("X-Real-IP", "203.0.113.10")
+	public.Header.Set("X-Forwarded-For", "203.0.113.10")
+	if guard.clientID(public) == guard.clientID(rightmost) {
+		t.Fatal("forwarded headers from a public peer must not identify the client")
+	}
 }
 
 func TestGuardClearsFailuresAfterLockoutExpires(t *testing.T) {

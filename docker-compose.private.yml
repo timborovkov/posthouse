@@ -1,4 +1,4 @@
 services:
   posthouse:
-    ports:
+    ports: !override
       - "8791:8791"

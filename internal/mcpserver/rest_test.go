@@ -2,6 +2,7 @@ package mcpserver
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -16,6 +17,8 @@ import (
 )
 
 const testAccessKey = "test-access-key-1"
+
+var errExecute = errors.New("provider execute")
 
 func TestRESTRequiresAuthAndServesCatalog(t *testing.T) {
 	handler := testHTTPHandler(t)
@@ -115,6 +118,21 @@ func TestRESTExecuteUnknownTokenIsBadRequest(t *testing.T) {
 	handler.ServeHTTP(recorder, authorizedRequest(http.MethodPost, "/v1/operations/execute", `{"token":"missing"}`))
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("unknown token status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestRESTExecuteStatusKeepsProviderFailuresAsOK(t *testing.T) {
+	if restExecuteStatus(model.OperationResult{Status: "succeeded"}, nil) != http.StatusOK {
+		t.Fatal("succeeded execute should be 200")
+	}
+	if restExecuteStatus(model.OperationResult{Status: "failed"}, errExecute) != http.StatusOK {
+		t.Fatal("failed execute should be 200 with the result body")
+	}
+	if restExecuteStatus(model.OperationResult{Status: "uncertain"}, errExecute) != http.StatusOK {
+		t.Fatal("uncertain execute should be 200 with the result body")
+	}
+	if restExecuteStatus(model.OperationResult{}, errExecute) != http.StatusBadRequest {
+		t.Fatal("missing/expired token should be 400")
 	}
 }
 

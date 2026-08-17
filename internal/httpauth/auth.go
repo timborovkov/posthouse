@@ -125,7 +125,7 @@ func (g *Guard) clientID(request *http.Request) string {
 }
 
 func clientAddress(request *http.Request, trustProxy bool) string {
-	if trustProxy {
+	if trustProxy && trustedForwardingPeer(request.RemoteAddr) {
 		if realIP := strings.TrimSpace(request.Header.Get("X-Real-IP")); realIP != "" {
 			return realIP
 		}
@@ -141,6 +141,15 @@ func clientAddress(request *http.Request, trustProxy bool) string {
 		return request.RemoteAddr
 	}
 	return host
+}
+
+func trustedForwardingPeer(remoteAddr string) bool {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil || host == "" {
+		host = remoteAddr
+	}
+	ip := net.ParseIP(strings.Trim(host, "[]"))
+	return ip != nil && (ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast())
 }
 
 func (g *Guard) lockout(client string) time.Duration {
@@ -173,7 +182,7 @@ func (g *Guard) noteFailure(client string) time.Duration {
 			g.evictOldest(now)
 		}
 		if len(g.clients) >= maxTrackedClients {
-			return lockoutDuration
+			return 0
 		}
 		state = &clientState{windowStart: now}
 		g.clients[client] = state

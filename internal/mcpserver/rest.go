@@ -336,11 +336,7 @@ func (s *Server) restOperationExecute(writer http.ResponseWriter, request *http.
 		return
 	}
 	result, err := s.service.ExecuteOperation(request.Context(), input.Token)
-	if err != nil {
-		if result.Status == "failed" || result.Status == "uncertain" {
-			writeJSON(writer, http.StatusOK, result)
-			return
-		}
+	if err != nil && restExecuteStatus(result, err) != http.StatusOK {
 		writeError(writer, http.StatusBadRequest, err)
 		return
 	}
@@ -363,6 +359,13 @@ func (s *Server) restSync(writer http.ResponseWriter, request *http.Request) {
 func (s *Server) restCacheStatus(writer http.ResponseWriter, request *http.Request) {
 	status, err := s.service.CacheStatus(request.Context())
 	writeResult(writer, status, err)
+}
+
+func restExecuteStatus(result model.OperationResult, err error) int {
+	if err == nil || result.Status == "failed" || result.Status == "uncertain" {
+		return http.StatusOK
+	}
+	return http.StatusBadRequest
 }
 
 func decodeJSON(writer http.ResponseWriter, request *http.Request, dest any) bool {

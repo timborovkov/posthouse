@@ -163,9 +163,10 @@ Request bodies are capped at 36 MiB.
 
 Failed bearer attempts are counted per client address; eight failures in
 fifteen minutes return `429` with `Retry-After`. Set `POSTHOUSE_TRUST_PROXY=1`
-only when a TLS reverse proxy supplies `X-Real-IP` or `X-Forwarded-For`.
-Lockout then keys off `X-Real-IP` when present, otherwise the rightmost
-`X-Forwarded-For` hop (the leftmost hop is attacker-controlled).
+only when a TLS reverse proxy is the connecting peer (loopback or private
+network) and supplies `X-Real-IP` or `X-Forwarded-For`. Lockout then keys off
+`X-Real-IP` when present, otherwise the rightmost `X-Forwarded-For` hop.
+Forwarded headers from a public connecting address are ignored.
 
 The direct server is restricted to loopback. Expose it remotely only through a
 TLS-terminating reverse proxy, and keep bearer auth. `--allow-container-listener`
@@ -207,10 +208,10 @@ docker compose -f docker-compose.yml -f docker-compose.private.yml up --build
 
 [railway.json](./railway.json) builds the Dockerfile, health-checks `/healthz`,
 and expects a volume at `/data`. Set `POSTHOUSE_CACHE_KEY`,
-`POSTHOUSE_ACCESS_KEY`, and provider secrets. Railway injects `PORT`;
-[railway.json](./railway.json) also passes `--allow-container-listener` so the
-process listens on `0.0.0.0:$PORT`. This is still a personal process, not a
-Posthouse-hosted service.
+`POSTHOUSE_ACCESS_KEY`, `POSTHOUSE_TRUST_PROXY=1`, and provider secrets.
+Railway injects `PORT`; [railway.json](./railway.json) also passes
+`--allow-container-listener` so the process listens on `0.0.0.0:$PORT`. This is
+still a personal process, not a Posthouse-hosted service.
 
 ## Cache
 

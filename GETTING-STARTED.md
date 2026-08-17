@@ -92,13 +92,13 @@ The default Compose file publishes `127.0.0.1:8791` on the host. Put Caddy, ngin
 docker compose -f docker-compose.yml -f docker-compose.private.yml up --build
 ```
 
-Set `POSTHOUSE_TRUST_PROXY=1` when a reverse proxy supplies `X-Real-IP` or `X-Forwarded-For`, so brute-force lockout keys off the real client rather than the proxy.
+Set `POSTHOUSE_TRUST_PROXY=1` when a reverse proxy on a private or loopback hop supplies `X-Real-IP` or `X-Forwarded-For`, so brute-force lockout keys off the real client rather than the proxy.
 
 ### Railway
 
 1. Create a service from this repository. `railway.json` builds the Dockerfile and health-checks `/healthz`.
 2. Attach a volume at `/data`.
-3. Set `POSTHOUSE_CACHE_KEY`, `POSTHOUSE_ACCESS_KEY`, and your provider secret variables. Railway injects `PORT`; `railway.json` passes `--allow-container-listener` so Posthouse listens on `0.0.0.0:$PORT`.
+3. Set `POSTHOUSE_CACHE_KEY`, `POSTHOUSE_ACCESS_KEY`, `POSTHOUSE_TRUST_PROXY=1`, and your provider secret variables. Railway injects `PORT`; `railway.json` passes `--allow-container-listener` so Posthouse listens on `0.0.0.0:$PORT`.
 4. Put the generated HTTPS URL plus the access key into your MCP client or REST calls.
 
 The container still requires the access key. Railway's edge TLS is the reverse proxy; do not turn off bearer auth.
