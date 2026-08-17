@@ -331,6 +331,79 @@ func TestCanceledRefreshSnapshotCannotReplaceCurrentState(t *testing.T) {
 	}
 }
 
+func TestEditorLabelsFitReservedColumn(t *testing.T) {
+	app := testApp(t)
+	defer app.close()
+	for _, kind := range []string{"connection", "action", "event-action", "mail", "save", "event"} {
+		app.editorKind.Set(kind)
+		for _, label := range app.editorLabels() {
+			if n := len([]rune(label)); n > editorLabelCells {
+				t.Errorf("kind %s label %q is %d cells, want <= %d so the form stays inside the modal", kind, label, n, editorLabelCells)
+			}
+		}
+	}
+}
+
+func TestConnectionEditorHelpAndProbePlaceholders(t *testing.T) {
+	app := testApp(t)
+	defer app.close()
+	app.editorKind.Set("connection")
+	if !strings.Contains(app.editorHelp(), "Esc cancels") || !strings.Contains(app.editorHelp(), "Enter saves") || !strings.Contains(app.editorHelp(), "probe") {
+		t.Fatalf("connection help=%q", app.editorHelp())
+	}
+	if app.editorPlaceholder(6) != "blank to probe" || app.editorPlaceholder(7) != "blank to probe" || app.editorPlaceholder(8) != "blank to probe" {
+		t.Fatalf("probe placeholders imap=%q smtp=%q caldav=%q", app.editorPlaceholder(6), app.editorPlaceholder(7), app.editorPlaceholder(8))
+	}
+}
+
+func TestEditorFieldEscapeCancelsWhileFocused(t *testing.T) {
+	app := testApp(t)
+	defer app.close()
+	app.beginEditor("connection", []string{"id", "name", "", "", "", "", "", "", "", "", ""})
+	field := app.newEditorField(0)
+	dispatch(field.KeyMap(), tui.KeyEvent{Key: tui.KeyEscape})
+	if app.editor.Get() || app.modal.Get() {
+		t.Fatal("escape from a focused editor field did not cancel without saving")
+	}
+	connections, err := app.service.Connections(model.Selector{})
+	if err != nil || len(connections) != 0 {
+		t.Fatalf("cancel created a connection: %#v err=%v", connections, err)
+	}
+}
+
+func TestRemapFocusedEscapeReplacesInputBlur(t *testing.T) {
+	canceled := false
+	remapped := remapFocusedEscape(tui.NewInput().KeyMap(), func(tui.KeyEvent) { canceled = true })
+	escapes := 0
+	for _, binding := range remapped {
+		if binding.Pattern.Key != tui.KeyEscape {
+			continue
+		}
+		escapes++
+		binding.Handler(tui.KeyEvent{Key: tui.KeyEscape})
+	}
+	if escapes != 1 || !canceled {
+		t.Fatalf("escape bindings=%d canceled=%v", escapes, canceled)
+	}
+}
+
+func TestEditorFieldKeepsWidgetForSameState(t *testing.T) {
+	app := testApp(t)
+	defer app.close()
+	app.beginEditor("connection", make([]string, 11))
+	field := app.newEditorField(0)
+	inner := field.input
+	field.UpdateProps(app.newEditorField(0))
+	if field.input != inner {
+		t.Fatal("same field state remounted the input")
+	}
+	app.beginEditor("mail", []string{"work", "send", "", "", "", "", "text", "", ""})
+	field.UpdateProps(app.newEditorField(0))
+	if field.input == inner {
+		t.Fatal("new editor session kept the old input")
+	}
+}
+
 func TestConnectionEditorUsesSubmissionStartTLS(t *testing.T) {
 	app := testApp(t)
 	defer app.close()

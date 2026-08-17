@@ -73,7 +73,6 @@ type posthouseApp struct {
 	lastOperationError     *tui.State[string]
 	editor                 *tui.State[bool]
 	editorKind             *tui.State[string]
-	editorTick             *tui.State[int]
 	editorFields           []*tui.State[string]
 	app                    *tui.App
 	mailCursor             *tui.State[string]
@@ -115,7 +114,7 @@ func New(application *service.Service) *posthouseApp {
 		executingToken:     tui.NewState(""),
 		lastOperation:      tui.NewState(model.OperationResult{}),
 		lastOperationError: tui.NewState(""),
-		editor:             tui.NewState(false), editorKind: tui.NewState(""), editorTick: tui.NewState(0),
+		editor:             tui.NewState(false), editorKind: tui.NewState(""),
 		mailCursor: tui.NewState(""), mailNext: tui.NewState(""), mailHistory: tui.NewState([]string{}),
 		eventCursor: tui.NewState(""), eventNext: tui.NewState(""), eventHistory: tui.NewState([]string{}),
 		attachment: tui.NewState(model.Attachment{}), attachmentData: tui.NewState([]byte{}),
@@ -184,7 +183,7 @@ func (p *posthouseApp) KeyMap() tui.KeyMap {
 			}
 		}),
 		tui.On(tui.Rune('?'), func(ke tui.KeyEvent) {
-			p.modalText.Set("Keyboard\n\nTab/Shift+Tab areas · j/k or arrows move · / search · r refresh\nc compose/create · a actions · d discover · s save attachment · n/p page\nEnter open/confirm · Esc back · q quit")
+			p.modalText.Set("Keyboard\n\nTab/Shift+Tab areas · j/k or arrows move · / search · r refresh\nc compose/create · a actions · d discover · s save attachment · n/p page\nEnter open/confirm · Esc back or cancel form · q quit")
 			p.modal.Set(true)
 		}),
 	}
@@ -968,84 +967,68 @@ func (p *posthouseApp) Render(app *tui.App) *tui.Element {
 			__tui_53 := tui.New(
 				tui.WithText(label),
 				tui.WithWidth(20),
+				tui.WithMaxWidth(20),
 				tui.WithFlexShrink(0),
+				tui.WithOverflow(tui.OverflowHidden),
 			)
 			__tui_52.AddChild(__tui_53)
-			if index < len(p.editorFields) && p.editorFieldIsBody(index) {
-				__tui_54 := app.Mount(p, tui.MountKey(1, p.editorFieldKey(index)), func() tui.Component {
-					return tui.NewTextArea(
-						tui.WithTextAreaValue(p.editorFields[index]),
-						tui.WithTextAreaWidth(42),
-						tui.WithTextAreaMaxHeight(8),
-						tui.WithTextAreaBorder(tui.BorderRounded),
-						tui.WithTextAreaSubmitKey(tui.KeyF2),
-						tui.WithTextAreaOnSubmit(p.submitEditorText),
-					)
+			if index < len(p.editorFields) {
+				__tui_54 := app.Mount(p, tui.MountKey(1, fmt.Sprintf("%s-%d", p.editorKind.Get(), index)), func() tui.Component {
+					return NewEditorField(p, index)
 				})
 				__tui_52.AddChild(__tui_54)
-			} else if index < len(p.editorFields) {
-				__tui_55 := app.Mount(p, tui.MountKey(2, p.editorFieldKey(index)), func() tui.Component {
-					return tui.NewInput(
-						tui.WithInputValue(p.editorFields[index]),
-						tui.WithInputWidth(42),
-						tui.WithInputBorder(tui.BorderRounded),
-						tui.WithInputPlaceholder(p.editorPlaceholder(index)),
-						tui.WithInputOnSubmit(p.submitEditorText),
-					)
-				})
-				__tui_52.AddChild(__tui_55)
 			}
 			if p.rfc3339Mark(index) == "✓" {
-				__tui_56 := tui.New(
+				__tui_55 := tui.New(
 					tui.WithText("✓"),
 					tui.WithTextStyle(tui.NewStyle().Foreground(tui.Green)),
 				)
-				__tui_52.AddChild(__tui_56)
+				__tui_52.AddChild(__tui_55)
 			}
 			if p.rfc3339Mark(index) == "×" {
-				__tui_57 := tui.New(
+				__tui_56 := tui.New(
 					tui.WithText("×"),
+					tui.WithTextStyle(tui.NewStyle().Foreground(tui.Red)),
+				)
+				__tui_52.AddChild(__tui_56)
+			}
+			if p.rfc3339Error(index) != "" {
+				__tui_57 := tui.New(
+					tui.WithText(p.rfc3339Error(index)),
 					tui.WithTextStyle(tui.NewStyle().Foreground(tui.Red)),
 				)
 				__tui_52.AddChild(__tui_57)
 			}
-			if p.rfc3339Error(index) != "" {
-				__tui_58 := tui.New(
-					tui.WithText(p.rfc3339Error(index)),
-					tui.WithTextStyle(tui.NewStyle().Foreground(tui.Red)),
-				)
-				__tui_52.AddChild(__tui_58)
-			}
 			__tui_48.AddChild(__tui_52)
 		}
 		if p.errorText.Get() != "" {
-			__tui_59 := tui.New(
+			__tui_58 := tui.New(
 				tui.WithText(p.errorText.Get()),
 				tui.WithTextStyle(tui.NewStyle().Foreground(tui.Red)),
 			)
-			__tui_48.AddChild(__tui_59)
+			__tui_48.AddChild(__tui_58)
 		}
 	} else {
-		__tui_60 := tui.New(
+		__tui_59 := tui.New(
 			tui.WithText(p.modalText.Get()),
 		)
-		__tui_48.AddChild(__tui_60)
+		__tui_48.AddChild(__tui_59)
 		if p.executingToken.Get() != "" || p.providerReadCancel != nil {
-			__tui_61 := tui.New(
+			__tui_60 := tui.New(
 				tui.WithText("Esc cancels this request"),
 				tui.WithTextStyle(tui.NewStyle().Dim()),
 			)
-			__tui_48.AddChild(__tui_61)
+			__tui_48.AddChild(__tui_60)
 		} else {
-			__tui_62 := tui.New(
+			__tui_61 := tui.New(
 				tui.WithFocusable(true),
 				tui.WithBorder(tui.BorderRounded),
 				tui.WithPaddingTRBL(0, 1, 0, 1),
 				tui.WithOnActivate(p.confirmModalAction),
 			)
-			__tui_63 := tui.New(tui.WithText("Enter confirms · Esc cancels"))
-			__tui_62.AddChild(__tui_63)
-			__tui_48.AddChild(__tui_62)
+			__tui_62 := tui.New(tui.WithText("Enter confirms · Esc cancels"))
+			__tui_61.AddChild(__tui_62)
+			__tui_48.AddChild(__tui_61)
 		}
 	}
 	__tui_47.AddChild(__tui_48)
@@ -1145,9 +1128,6 @@ func (p *posthouseApp) bindAppFields(app *tui.App) {
 	}
 	if p.editorKind != nil {
 		p.editorKind.BindApp(app)
-	}
-	if p.editorTick != nil {
-		p.editorTick.BindApp(app)
 	}
 	if p.mailCursor != nil {
 		p.mailCursor.BindApp(app)

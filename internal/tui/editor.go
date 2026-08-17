@@ -14,9 +14,11 @@ import (
 )
 
 const (
-	mailPageSize   = 25
-	eventPageSize  = 100
-	rfc3339Example = "2026-08-17T09:00:00Z"
+	mailPageSize     = 25
+	eventPageSize    = 100
+	rfc3339Example   = "2026-08-17T09:00:00Z"
+	editorLabelCells = 20
+	editorInputWidth = 42
 )
 
 func (p *posthouseApp) modalKeyMap() tui.KeyMap {
@@ -55,9 +57,9 @@ func (p *posthouseApp) submitEditorText(string) { p.submitEditor() }
 func (p *posthouseApp) editorLabels() []string {
 	switch p.editorKind.Get() {
 	case "connection":
-		return []string{"ID", "Name", "Category", "Identity email", "Mail username", "Mail secret env", "IMAP TLS address (blank to probe)", "SMTP TLS address (blank to probe)", "CalDAV URL (blank to probe)", "CalDAV username", "CalDAV secret env"}
+		return []string{"ID", "Name", "Category", "Identity email", "Mail username", "Mail secret env", "IMAP TLS address", "SMTP TLS address", "CalDAV URL", "CalDAV username", "CalDAV secret env"}
 	case "action":
-		return []string{"Action", "Recipient / destination", "Body type text/html", "Body"}
+		return []string{"Action", "To / destination", "Body type text/html", "Body"}
 	case "event-action":
 		return []string{"Action", "Title", "Start RFC3339", "End RFC3339"}
 	case "mail":
@@ -87,8 +89,11 @@ func (p *posthouseApp) editorTitle() string {
 }
 
 func (p *posthouseApp) editorHelp() string {
-	if p.editorKind.Get() == "save" {
+	switch p.editorKind.Get() {
+	case "save":
 		return "Tab fields · Enter saves · Esc cancels"
+	case "connection":
+		return "Tab fields · Enter saves · Esc cancels · blank hosts probe"
 	}
 	if p.editorHasTimeFields() {
 		return "Tab fields · Enter prepares · Ctrl+S prepares · Esc cancels · RFC3339 e.g. " + rfc3339Example
@@ -132,6 +137,9 @@ func (p *posthouseApp) editorFieldIsTime(index int) bool {
 }
 
 func (p *posthouseApp) editorPlaceholder(index int) string {
+	if p.editorKind.Get() == "connection" && (index == 6 || index == 7 || index == 8) {
+		return "blank to probe"
+	}
 	if p.editorFieldIsTime(index) {
 		return rfc3339Example
 	}
@@ -142,10 +150,6 @@ func (p *posthouseApp) editorPlaceholder(index int) string {
 		return "text"
 	}
 	return ""
-}
-
-func (p *posthouseApp) editorFieldKey(index int) string {
-	return fmt.Sprintf("%s-%d-%d", p.editorKind.Get(), index, p.editorTick.Get())
 }
 
 func (p *posthouseApp) rfc3339Mark(index int) string {
@@ -206,7 +210,6 @@ func (p *posthouseApp) beginEditor(kind string, values []string) {
 	p.pendingToken.Set("")
 	p.pendingDiscover.Set("")
 	p.errorText.Set("")
-	p.editorTick.Set(p.editorTick.Get() + 1)
 }
 
 func (p *posthouseApp) cancelEditor() {

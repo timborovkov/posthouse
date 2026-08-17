@@ -71,7 +71,6 @@ type posthouseApp struct {
 	lastOperationError *tui.State[string]
 	editor *tui.State[bool]
 	editorKind *tui.State[string]
-	editorTick *tui.State[int]
 	editorFields []*tui.State[string]
 	app *tui.App
 	mailCursor *tui.State[string]
@@ -113,7 +112,7 @@ func New(application *service.Service) *posthouseApp {
 		executingToken: tui.NewState(""),
 		lastOperation: tui.NewState(model.OperationResult{}),
 		lastOperationError: tui.NewState(""),
-		editor: tui.NewState(false), editorKind: tui.NewState(""), editorTick: tui.NewState(0),
+		editor: tui.NewState(false), editorKind: tui.NewState(""),
 		mailCursor: tui.NewState(""), mailNext: tui.NewState(""), mailHistory: tui.NewState([]string{}),
 		eventCursor: tui.NewState(""), eventNext: tui.NewState(""), eventHistory: tui.NewState([]string{}),
 		attachment: tui.NewState(model.Attachment{}), attachmentData: tui.NewState([]byte{}),
@@ -169,7 +168,7 @@ func (p *posthouseApp) KeyMap() tui.KeyMap {
 		tui.On(tui.KeyPageUp, func(ke tui.KeyEvent) { p.pageList(-1) }),
 		tui.On(tui.KeyEnter, p.openSelected),
 		tui.On(tui.KeyEscape, func(ke tui.KeyEvent) { if p.view.Get()==2 { p.view.Set(1) } }),
-		tui.On(tui.Rune('?'), func(ke tui.KeyEvent) { p.modalText.Set("Keyboard\n\nTab/Shift+Tab areas · j/k or arrows move · / search · r refresh\nc compose/create · a actions · d discover · s save attachment · n/p page\nEnter open/confirm · Esc back · q quit"); p.modal.Set(true) }),
+		tui.On(tui.Rune('?'), func(ke tui.KeyEvent) { p.modalText.Set("Keyboard\n\nTab/Shift+Tab areas · j/k or arrows move · / search · r refresh\nc compose/create · a actions · d discover · s save attachment · n/p page\nEnter open/confirm · Esc back or cancel form · q quit"); p.modal.Set(true) }),
 	}
 }
 
@@ -399,12 +398,10 @@ templ (p *posthouseApp) Render() {
 					<span class="font-dim">{p.editorHelp()}</span>
 					<hr />
 					for index, label := range p.editorLabels() {
-						<div class="flex gap-1 items-center">
-							<span class="w-20 shrink-0">{label}</span>
-							if index < len(p.editorFields) && p.editorFieldIsBody(index) {
-								<textarea key={p.editorFieldKey(index)} value={p.editorFields[index]} width={42} maxHeight={8} border={tui.BorderRounded} submitKey={tui.KeyF2} onSubmit={p.submitEditorText} />
-							} else if index < len(p.editorFields) {
-								<input key={p.editorFieldKey(index)} value={p.editorFields[index]} width={42} border={tui.BorderRounded} placeholder={p.editorPlaceholder(index)} onSubmit={p.submitEditorText} />
+						<div class="flex gap-1 items-center" key={fmt.Sprintf("%s-%d", p.editorKind.Get(), index)}>
+							<span class="w-20 max-w-20 shrink-0 overflow-hidden">{label}</span>
+							if index < len(p.editorFields) {
+								@NewEditorField(p, index)
 							}
 							if p.rfc3339Mark(index)=="✓" { <span class="text-green">✓</span> }
 							if p.rfc3339Mark(index)=="×" { <span class="text-red">×</span> }
