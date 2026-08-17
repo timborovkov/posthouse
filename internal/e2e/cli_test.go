@@ -174,8 +174,9 @@ func TestBuiltBinaryMultiConnectionPreparedMailAndCalendar(t *testing.T) {
 	if collection == "" {
 		t.Fatal("connection discovery did not persist a calendar collection")
 	}
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
 	eventPath := filepath.Join(t.TempDir(), "event.json")
-	event := model.Event{ID: "e2e-event", CollectionID: collection, Title: "E2E calendar", Start: time.Now().UTC().Add(time.Hour).Truncate(time.Second), End: time.Now().UTC().Add(2 * time.Hour).Truncate(time.Second)}
+	event := model.Event{ID: "e2e-event-" + suffix, CollectionID: collection, Title: "E2E calendar", Start: time.Now().UTC().Add(time.Hour).Truncate(time.Second), End: time.Now().UTC().Add(2 * time.Hour).Truncate(time.Second)}
 	data, _ := json.Marshal(event)
 	if err := os.WriteFile(eventPath, data, 0o600); err != nil {
 		t.Fatal(err)
@@ -187,7 +188,7 @@ func TestBuiltBinaryMultiConnectionPreparedMailAndCalendar(t *testing.T) {
 	}
 	created := calendarResult["result"].(map[string]any)["event"].(map[string]any)
 	personalEventPath := filepath.Join(t.TempDir(), "personal-event.json")
-	personalEvent := model.Event{ID: "e2e-personal-event", CollectionID: collections["personal"], Title: "E2E personal calendar", Start: event.Start, End: event.End}
+	personalEvent := model.Event{ID: "e2e-personal-event-" + suffix, CollectionID: collections["personal"], Title: "E2E personal calendar", Start: event.Start, End: event.End}
 	personalData, _ := json.Marshal(personalEvent)
 	if err := os.WriteFile(personalEventPath, personalData, 0o600); err != nil {
 		t.Fatal(err)
@@ -472,7 +473,7 @@ func ensureCalendar(t *testing.T, endpoint, path, user, password string) {
 		t.Fatal(err)
 	}
 	defer response.Body.Close()
-	if response.StatusCode != http.StatusCreated && response.StatusCode != http.StatusMethodNotAllowed {
+	if response.StatusCode != http.StatusCreated && response.StatusCode != http.StatusMethodNotAllowed && response.StatusCode != http.StatusConflict {
 		t.Fatalf("MKCALENDAR %s", response.Status)
 	}
 }
