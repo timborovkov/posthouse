@@ -8,7 +8,7 @@ For code changes:
 
 1. Keep the words in [CONTEXT.md](./CONTEXT.md).
 2. Add a test if behavior changes. No live provider credentials.
-3. Update [README.md](./README.md), [INSTALLATION-AND-USAGE-GUIDE.md](./INSTALLATION-AND-USAGE-GUIDE.md), or [TODO.md](./TODO.md) if user-facing behavior moved.
+3. Update [README.md](./README.md), [INSTALLATION-AND-USAGE-GUIDE.md](./INSTALLATION-AND-USAGE-GUIDE.md), or [TODO.md](./TODO.md) if user-facing behavior moved. Keep policy class names and MCP profile names aligned with [CONTEXT.md](./CONTEXT.md).
 4. Run `make validate`.
 
 Dev setup is in the [README](./README.md#develop). Contributions use the same

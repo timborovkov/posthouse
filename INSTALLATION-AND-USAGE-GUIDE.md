@@ -119,13 +119,18 @@ Compose includes To, optional CC/BCC, subject, body type (`text` default, or
 `html`), a body textarea, and attachment paths. Choosing `html` sends the
 textarea as HTML; paste markup. Agenda times are RFC3339 with a visible
 example and live valid/invalid markers. Writes still go through a preview
-before anything hits the provider.
+before anything hits the provider. Policy denials apply in the TUI the same
+way as CLI/MCP.
 
 ## Writes
 
 CLI, TUI, and MCP all work the same: prepare → inspect preview → execute.
 Nothing is sent or saved until `operation execute TOKEN` (or the TUI
 confirm). Tokens last ten minutes.
+
+An agent (or you) can still chain prepare and execute in one session. To block
+classes of writes, use [Policy](#policy). To hide write tools from MCP clients,
+use an MCP [readonly profile](#mcp).
 
 CLI output is JSON, except `calendar ics`.
 
@@ -145,8 +150,6 @@ posthouse mail junk --connection work --folder INBOX --uid 42
 posthouse mail archive --connection work --folder INBOX --uids 42,43,44
 posthouse operation show 'TOKEN'
 posthouse operation execute 'TOKEN'
-posthouse policy deny mail.send mail.trash
-posthouse policy show
 
 posthouse mail reply --connection work --folder INBOX --uid 42 --body 'Thanks'
 posthouse mail archive --connection work --folder INBOX --uid 42
@@ -163,6 +166,57 @@ posthouse cache status
 HTML send uses `--html` / `--html-file` (and MCP `html`); text-only stays
 `text/plain`, HTML-only gets a derived plain fallback, both become
 `multipart/alternative`.
+
+## Policy
+
+Default is **allow everything**. You can deny write classes so prepare and
+execute fail on CLI, MCP, and TUI.
+
+| Class | Blocks |
+| --- | --- |
+| `mail.send` | send, reply, forward |
+| `mail.move` | move and archive |
+| `mail.mark` | seen / flagged |
+| `mail.trash` | trash |
+| `mail.junk` | junk |
+| `mail.draft` | draft create / update / delete |
+| `calendar.write` | CalDAV create / update / delete |
+
+```sh
+posthouse policy show
+posthouse policy deny mail.send mail.move mail.trash
+posthouse policy allow mail.move
+```
+
+Same settings in config (`posthouse config path`). Sample `policy` object:
+[examples/policy.json](./examples/policy.json).
+
+```json
+{
+  "policy": {
+    "deny": ["mail.send", "mail.trash"],
+    "mcp_profile": "readonly"
+  }
+}
+```
+
+Env overlay (merged with config; does not rewrite the file):
+
+```sh
+export POSTHOUSE_POLICY_DENY='mail.send,mail.trash'
+```
+
+Typical agent setups:
+
+- **Read-only agent**: `posthouse policy mcp-profile readonly` (or
+  `--profile readonly` / `POSTHOUSE_MCP_PROFILE=readonly`) so prepare/execute
+  tools are not listed.
+- **Full tools, no sending**: keep MCP `full`, deny `mail.send` (and any other
+  classes you do not want).
+- **No destructive mail**: deny `mail.move`, `mail.trash`, `mail.junk`.
+
+`policy show` prints effective deny (config + env), the effective MCP profile,
+and the known class list.
 
 ## MCP
 
@@ -194,41 +248,35 @@ HTTP (token required, loopback only):
 export POSTHOUSE_MCP_TOKEN='a-long-random-token'
 export POSTHOUSE_CACHE_KEY='a-base64-or-hex-encoded-32-byte-key'
 posthouse mcp http --address 127.0.0.1:8791
+# optional: --profile readonly
 ```
 
 `/mcp` is the API. `/healthz` is liveness; `/readyz` is config and cache key,
 not provider connectivity. Headless/Docker must set `POSTHOUSE_CACHE_KEY`.
+
+### MCP profiles
+
+| Profile | Tools |
+| --- | --- |
+| `full` (default) | Reads plus prepare/execute write tools |
+| `readonly` | Reads, doctor, sync, cache only — no prepare/execute |
+
+Resolution order for the profile:
+
+1. `--profile full|readonly` on `mcp stdio` / `mcp http`
+2. else `policy.mcp_profile` in config (`posthouse policy mcp-profile …`)
+3. else `POSTHOUSE_MCP_PROFILE`
+4. else `full`
+
+Deny classes still apply under `full`: if a tool is listed but the class is
+denied, prepare and execute return an error.
 
 Agent-oriented mail tools include `messages_triage`, `messages_unread_counts`,
 `messages_get` (includes `markdown`), `messages_attachment_get` with
 `extract_text` for PDFs, `messages_forward_prepare` with `verbatim`, and
 `messages_action_prepare` with `junk` plus batch `uids`. Prefer
 `messages_draft_prepare` when the operator should review before send. Every
-write still requires `operation_execute`.
-
-Readonly MCP (omits prepare/execute tools):
-
-```sh
-posthouse mcp stdio --profile readonly
-# or: posthouse policy mcp-profile readonly
-# or: export POSTHOUSE_MCP_PROFILE=readonly
-```
-
-## Policy
-
-Default is allow-all. Deny operation classes in config or from the CLI:
-
-```sh
-posthouse policy show
-posthouse policy deny mail.send mail.move mail.trash
-posthouse policy allow mail.move
-posthouse policy mcp-profile readonly
-```
-
-Classes: `mail.send`, `mail.move` (move+archive), `mail.mark`, `mail.trash`,
-`mail.junk`, `mail.draft`, `calendar.write`. Env overlay
-`POSTHOUSE_POLICY_DENY=mail.send,mail.trash` merges with config. Denials apply
-to both prepare and execute (CLI and MCP).
+write still requires `operation_execute`, and both steps honor policy deny.
 
 ## Docker
 
@@ -238,6 +286,38 @@ docker compose up --build
 ```
 
 Listens on `127.0.0.1:8791`. Data is the `posthouse-data` volume (`/data`).
+
+Optional in `.env` (passed through by `docker-compose.yml`):
+
+```sh
+POSTHOUSE_MCP_PROFILE=readonly
+POSTHOUSE_POLICY_DENY=mail.send,mail.trash
+```
+
+Or set `policy` in `/data/config.json` inside the volume. For a readonly MCP
+HTTP process without changing config:
+
+```sh
+# example override
+docker compose run --rm posthouse \
+  --config /data/config.json mcp http --address 0.0.0.0:8791 \
+  --allow-container-listener --profile readonly
+```
+
+## Environment variables
+
+| Variable | Role |
+| --- | --- |
+| `POSTHOUSE_CONFIG` | Config file path (else platform default / `--config`) |
+| `POSTHOUSE_CACHE_KEY` | Encrypted cache key (required headless / Docker) |
+| `POSTHOUSE_CACHE_KEY_NEW` | New key for `cache rekey --key-env` |
+| `POSTHOUSE_MCP_TOKEN` | Bearer token for `mcp http` |
+| `POSTHOUSE_MCP_PROFILE` | Default MCP profile when `--profile` and config are unset: `full` or `readonly` |
+| `POSTHOUSE_POLICY_DENY` | Comma-separated deny classes merged with `policy.deny` |
+| `ALL_PROXY` / `HTTPS_PROXY` / `HTTP_PROXY` / `NO_PROXY` | IMAP/SMTP proxy when connection proxy fields are unset |
+
+Connection secrets use whatever env names you put in `secret.env` (for example
+`ACME_MAIL_PASSWORD`).
 
 ## Cache
 

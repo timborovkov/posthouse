@@ -8,6 +8,8 @@ Posthouse is a local-first Go CLI, MCP server, and full-screen terminal applicat
 - Complete MIME reads, bounded previews and attachment access, text or HTML send, reply/forward/draft/folder actions, and configurable sent-copy handling.
 - CalDAV discovery, collection selection, ETag-guarded CRUD, recurrence exceptions, embedded timezones, and portable invitations.
 - Ten-minute encrypted prepared operations with exact previews, persisted cross-process claiming, idempotent replay, and uncertain-result handling.
+- Optional write policy (default allow-all) to deny classes such as send, move, trash, draft, or calendar write on prepare and execute.
+- MCP `full` / `readonly` profiles so agents can be limited to read/sync tools without listing prepare/execute.
 - CGo-free encrypted SQLite cache/state with verified key markers, offline fallback, explicit sync, bounded retention, LRU eviction, and safe rekeying.
 - Typed MCP tools over stdio and authenticated Streamable HTTP, plus the generated keyboard-first Go-TUI.
 - Deterministic GreenMail `2.1.11` and Radicale `3.7.3` development environments using disposable work and personal principals.

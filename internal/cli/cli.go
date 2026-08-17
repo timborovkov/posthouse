@@ -919,6 +919,7 @@ Usage:
 
 All provider writes return a ten-minute prepared token; only "operation execute" performs the side effect.
 Default policy allows every class; "policy deny" / POSTHOUSE_POLICY_DENY can block send, move, trash, and other writes.
+MCP "readonly" profile (--profile, policy mcp-profile, or POSTHOUSE_MCP_PROFILE) omits prepare/execute tools.
 Data commands write JSON except "calendar ics", which writes text/calendar to stdout by default. Run "posthouse <command> -h" for flags.
 
 Built by Tim Borovkov (https://timb.dev). MIT License.`)
