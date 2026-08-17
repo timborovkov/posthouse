@@ -72,7 +72,7 @@ func TestServerListsAndCallsReadOnlyConnectionTool(t *testing.T) {
 			attachmentTool = tool
 		}
 	}
-	for _, want := range []string{"connections_list", "messages_search", "messages_get", "messages_attachment_get", "messages_send_prepare", "messages_reply_prepare", "messages_forward_prepare", "messages_draft_prepare", "messages_action_prepare", "events_list", "event_ics_generate", "event_create_prepare", "operation_execute", "connection_doctor", "sync", "cache_status"} {
+	for _, want := range []string{"connections_list", "messages_search", "messages_triage", "messages_unread_counts", "messages_get", "messages_attachment_get", "messages_send_prepare", "messages_reply_prepare", "messages_forward_prepare", "messages_draft_prepare", "messages_action_prepare", "events_list", "event_ics_generate", "event_create_prepare", "operation_execute", "connection_doctor", "sync", "cache_status"} {
 		if !slices.Contains(names, want) {
 			t.Fatalf("tools %v do not contain %s", names, want)
 		}

@@ -53,6 +53,8 @@ func (c *CLI) Run(ctx context.Context, args []string) error {
 		return c.connection(ctx, args[1:])
 	case "mail":
 		return c.mail(ctx, args[1:])
+	case "schema":
+		return c.schema(args[1:])
 	case "calendar":
 		return c.calendar(ctx, args[1:])
 	case "operation", "operations":
@@ -80,7 +82,7 @@ func (c *CLI) config(args []string) error {
 
 func (c *CLI) connection(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: posthouse connection <list|add|update|remove|discover|doctor|secret>")
+		return fmt.Errorf("usage: posthouse connection <list|add|update|remove|probe|discover|doctor|secret>")
 	}
 	switch args[0] {
 	case "list":
@@ -96,13 +98,58 @@ func (c *CLI) connection(ctx context.Context, args []string) error {
 			return err
 		}
 		return writeJSON(c.stdout, connections)
+	case "probe":
+		flags := flag.NewFlagSet("connection probe", flag.ContinueOnError)
+		flags.SetOutput(c.stderr)
+		email := flags.String("email", "", "identity email used for SRV and autoconfig discovery")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		if *email == "" && flags.NArg() == 1 {
+			*email = flags.Arg(0)
+		}
+		if *email == "" {
+			return fmt.Errorf("usage: posthouse connection probe --email you@example.com")
+		}
+		result, err := c.service.ProbeConnection(ctx, *email)
+		if err != nil {
+			return err
+		}
+		return writeJSON(c.stdout, result)
 	case "add", "update":
 		flags := flag.NewFlagSet("connection add", flag.ContinueOnError)
 		flags.SetOutput(c.stderr)
-		file := flags.String("file", "-", "connection JSON file, or - for stdin")
+		file := flags.String("file", "", "connection JSON file, or - for stdin")
+		email := flags.String("email", "", "probe IMAP/SMTP/CalDAV from this address instead of --file")
+		id := flags.String("id", "", "connection id when using --email")
+		name := flags.String("name", "", "connection name when using --email")
+		category := flags.String("category", "", "connection category when using --email")
+		var labels stringList
+		flags.Var(&labels, "label", "label when using --email; repeat or comma-separate")
+		secretEnv := flags.String("secret-env", "", "environment variable holding the secret when using --email")
+		secretKeychain := flags.String("secret-keychain", "", "keychain secret name when using --email")
+		secretCommand := flags.String("secret-command", "", "space-separated argv that prints the secret when using --email")
+		caldav := flags.Bool("caldav", false, "include discovered CalDAV URL when using --email")
 		replace := flags.Bool("replace", args[0] == "update", "replace a connection with the same ID")
 		if err := flags.Parse(args[1:]); err != nil {
 			return err
+		}
+		if *email != "" {
+			if *file != "" {
+				return fmt.Errorf("connection add accepts either --file or --email, not both")
+			}
+			secret := model.SecretRef{Env: *secretEnv, Keychain: *secretKeychain}
+			if *secretCommand != "" {
+				secret.Command = strings.Fields(*secretCommand)
+			}
+			connection, probe, err := c.service.AddConnectionFromProbe(ctx, *id, *name, *category, *email, labels, secret, *caldav, *replace)
+			if err != nil {
+				return err
+			}
+			return writeJSON(c.stdout, map[string]any{"ok": true, "connection": connection.ID, "probe": probe})
+		}
+		if *file == "" {
+			*file = "-"
 		}
 		data, err := readInput(*file)
 		if err != nil {
@@ -168,7 +215,7 @@ func (c *CLI) connection(ctx context.Context, args []string) error {
 
 func (c *CLI) mail(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: posthouse mail <list|search|get|attachment|send|reply|forward|draft|mark|move|archive|trash>")
+		return fmt.Errorf("usage: posthouse mail <list|search|triage|unread|get|attachment|send|reply|forward|draft|mark|move|archive|trash|junk>")
 	}
 	switch args[0] {
 	case "list", "search":
@@ -205,6 +252,32 @@ func (c *CLI) mail(ctx context.Context, args []string) error {
 			return err
 		}
 		return writeJSON(c.stdout, messages)
+	case "triage":
+		flags := newSelectorFlags("mail triage")
+		folder := flags.set.String("folder", "", "IMAP folder; defaults to the connection inbox")
+		query := flags.set.String("query", "", "message text query")
+		unread := flags.set.Bool("unread", false, "only unread messages")
+		pageSize := flags.set.Int("page-size", 25, "messages per page, maximum 100")
+		cursor := flags.set.String("cursor", "", "opaque continuation cursor")
+		if err := flags.set.Parse(args[1:]); err != nil {
+			return err
+		}
+		page, err := c.service.TriageMessages(ctx, flags.selector("mail"), postmail.SearchOptions{Folder: *folder, Query: *query, Unread: *unread}, *pageSize, *cursor)
+		if err != nil {
+			return err
+		}
+		return writeJSON(c.stdout, page)
+	case "unread":
+		flags := newSelectorFlags("mail unread")
+		folder := flags.set.String("folder", "", "IMAP folder; defaults to the connection inbox")
+		if err := flags.set.Parse(args[1:]); err != nil {
+			return err
+		}
+		summaries, err := c.service.UnreadCounts(ctx, flags.selector("mail"), *folder)
+		if err != nil {
+			return err
+		}
+		return writeJSON(c.stdout, map[string]any{"unread": summaries})
 	case "send":
 		message, err := c.parseCompose(args[1:], "mail send")
 		if err != nil {
@@ -253,6 +326,7 @@ func (c *CLI) mail(ctx context.Context, args []string) error {
 		force := flags.Bool("force", false, "replace output file")
 		offline := flags.Bool("offline", false, "read only from encrypted cache")
 		refresh := flags.Bool("refresh", false, "require a live provider read without stale fallback")
+		extractText := flags.Bool("extract-text", false, "for PDF attachments, return extracted plain text instead of raw bytes")
 		if err := flags.Parse(args[1:]); err != nil {
 			return err
 		}
@@ -270,6 +344,15 @@ func (c *CLI) mail(ctx context.Context, args []string) error {
 		attachment, data, err := c.service.GetAttachmentMode(ctx, *connection, *folder, messageUID, *id, mode)
 		if err != nil {
 			return err
+		}
+		if *extractText && strings.Contains(strings.ToLower(attachment.ContentType), "pdf") {
+			text, extractErr := postmail.ExtractPDFText(data)
+			if extractErr != nil {
+				return extractErr
+			}
+			data = []byte(text)
+			attachment.ContentType = "text/plain; charset=utf-8"
+			attachment.Size = int64(len(data))
 		}
 		if *output == "-" {
 			_, err = c.stdout.Write(data)
@@ -292,6 +375,7 @@ func (c *CLI) mail(ctx context.Context, args []string) error {
 		htmlFile := flags.String("html-file", "", "HTML body file, or - for stdin")
 		var to stringList
 		flags.Var(&to, "to", "forward recipient; repeat or comma-separate")
+		verbatim := flags.Bool("verbatim", false, "forward original parts as attachments without quoting the body into the preview")
 		if err := flags.Parse(args[1:]); err != nil {
 			return err
 		}
@@ -312,7 +396,11 @@ func (c *CLI) mail(ctx context.Context, args []string) error {
 			if len(to) == 0 {
 				return fmt.Errorf("mail forward requires at least one --to")
 			}
-			prepared, err = c.service.PrepareForward(ctx, *connection, *folder, messageUID, to, *body, *htmlBody)
+			if *verbatim {
+				prepared, err = c.service.PrepareForwardVerbatim(ctx, *connection, *folder, messageUID, to, *body)
+			} else {
+				prepared, err = c.service.PrepareForward(ctx, *connection, *folder, messageUID, to, *body, *htmlBody)
+			}
 		}
 		if err != nil {
 			return err
@@ -350,25 +438,33 @@ func (c *CLI) mail(ctx context.Context, args []string) error {
 			return err
 		}
 		return writeJSON(c.stdout, prepared)
-	case "move", "archive", "trash":
+	case "move", "archive", "trash", "junk":
 		flags := flag.NewFlagSet("mail "+args[0], flag.ContinueOnError)
 		flags.SetOutput(c.stderr)
 		connection := flags.String("connection", "", "exact connection")
 		folder := flags.String("folder", "INBOX", "source folder")
 		uid := flags.Uint64("uid", 0, "message UID")
+		var uids uidList
+		flags.Var(&uids, "uids", "comma-separated UIDs for batch move/mark-style actions")
 		destination := flags.String("destination", "", "destination folder for move")
 		if err := flags.Parse(args[1:]); err != nil {
 			return err
 		}
-		if *connection == "" || *uid == 0 {
-			return fmt.Errorf("mail %s requires --connection and --uid", args[0])
-		}
-		messageUID, err := checkedUID(*uid)
-		if err != nil {
-			return err
+		if *connection == "" || (*uid == 0 && len(uids) == 0) {
+			return fmt.Errorf("mail %s requires --connection and --uid or --uids", args[0])
 		}
 		kind := "mail." + args[0]
-		prepared, err := c.service.PrepareMailAction(ctx, *connection, kind, service.MailAction{Folder: *folder, UID: messageUID, Destination: *destination})
+		action := service.MailAction{Folder: *folder, Destination: *destination}
+		if len(uids) > 0 {
+			action.UIDs = []uint32(uids)
+		} else {
+			messageUID, err := checkedUID(*uid)
+			if err != nil {
+				return err
+			}
+			action.UID = messageUID
+		}
+		prepared, err := c.service.PrepareMailAction(ctx, *connection, kind, action)
 		if err != nil {
 			return err
 		}
@@ -740,10 +836,11 @@ func (c *CLI) usage() {
 	_, _ = fmt.Fprintln(c.stdout, `Posthouse — one agent-friendly interface for all your mail and calendars
 
 Usage:
-  posthouse [--config PATH] connection list|add|update|remove|discover|doctor|secret
-  posthouse [--config PATH] mail list|search|get|attachment|send|reply|forward|draft|mark|move|archive|trash
+  posthouse [--config PATH] connection list|add|update|remove|probe|discover|doctor|secret
+  posthouse [--config PATH] mail list|search|triage|unread|get|attachment|send|reply|forward|draft|mark|move|archive|trash|junk
   posthouse [--config PATH] calendar list|get|create|update|delete|ics
   posthouse [--config PATH] operation show|execute
+  posthouse [--config PATH] schema write --dir DIR
   posthouse [--config PATH] sync
   posthouse [--config PATH] cache status|clear|rekey
   posthouse [--config PATH] mcp stdio|http
@@ -780,13 +877,55 @@ type stringList []string
 
 func (values *stringList) String() string { return strings.Join(*values, ",") }
 func (values *stringList) Set(value string) error {
-	for _, item := range strings.Split(value, ",") {
-		item = strings.TrimSpace(item)
-		if item != "" {
-			*values = append(*values, item)
+	for _, part := range strings.Split(value, ",") {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			*values = append(*values, part)
 		}
 	}
 	return nil
+}
+
+type uidList []uint32
+
+func (values *uidList) String() string {
+	parts := make([]string, 0, len(*values))
+	for _, value := range *values {
+		parts = append(parts, fmt.Sprintf("%d", value))
+	}
+	return strings.Join(parts, ",")
+}
+
+func (values *uidList) Set(value string) error {
+	for _, part := range strings.Split(value, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		parsed, err := parseUint32(part)
+		if err != nil {
+			return err
+		}
+		*values = append(*values, parsed)
+	}
+	return nil
+}
+
+func parseUint32(value string) (uint32, error) {
+	var parsed uint64
+	for _, r := range value {
+		if r < '0' || r > '9' {
+			return 0, fmt.Errorf("invalid uid %q", value)
+		}
+		parsed = parsed*10 + uint64(r-'0')
+		if parsed > uint64(^uint32(0)) {
+			return 0, fmt.Errorf("uid %q out of range", value)
+		}
+	}
+	if parsed == 0 {
+		return 0, fmt.Errorf("uid must be positive")
+	}
+	return uint32(parsed), nil
 }
 
 func readInput(path string) ([]byte, error) {

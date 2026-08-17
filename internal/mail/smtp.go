@@ -20,6 +20,7 @@ import (
 	gomail "github.com/emersion/go-message/mail"
 	messageproto "github.com/emersion/go-message/textproto"
 	"github.com/timborovkov/posthouse/internal/model"
+	"github.com/timborovkov/posthouse/internal/netproxy"
 )
 
 type UncertainError struct{ Err error }
@@ -175,8 +176,7 @@ func dialSMTP(settings model.SMTPConfig, host string) (*smtp.Client, error) {
 
 func dialSMTPContext(ctx context.Context, settings model.SMTPConfig, host string) (*smtp.Client, error) {
 	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12, ServerName: host}
-	dialer := &net.Dialer{Timeout: 30 * time.Second}
-	connection, err := dialer.DialContext(ctx, "tcp", settings.Address)
+	connection, err := netproxy.DialTCP(ctx, settings.Address, settings.Proxy)
 	if err != nil {
 		return nil, fmt.Errorf("connect to SMTP: %w", err)
 	}

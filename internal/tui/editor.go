@@ -55,7 +55,7 @@ func (p *posthouseApp) submitEditorText(string) { p.submitEditor() }
 func (p *posthouseApp) editorLabels() []string {
 	switch p.editorKind.Get() {
 	case "connection":
-		return []string{"ID", "Name", "Category", "Identity email", "Mail username", "Mail secret env", "IMAP TLS address", "SMTP TLS address", "CalDAV URL", "CalDAV username", "CalDAV secret env"}
+		return []string{"ID", "Name", "Category", "Identity email", "Mail username", "Mail secret env", "IMAP TLS address (blank to probe)", "SMTP TLS address (blank to probe)", "CalDAV URL (blank to probe)", "CalDAV username", "CalDAV secret env"}
 	case "action":
 		return []string{"Action", "Recipient / destination", "Body type text/html", "Body"}
 	case "event-action":
@@ -240,13 +240,60 @@ func (p *posthouseApp) submitEditor() {
 			err = fmt.Errorf("connection ID and name are required")
 		} else {
 			connection := model.Connection{ID: values[0], Name: values[1], Category: values[2], Identity: model.Identity{Email: values[3]}}
-			if values[6] != "" || values[7] != "" {
-				connection.Mail = &model.MailConfig{Username: values[4], Secret: model.SecretRef{Env: values[5]}, IMAP: model.IMAPConfig{Address: values[6], TLS: values[6] != ""}, SMTP: model.SMTPConfig{Address: values[7], TLS: values[7] != ""}, SentCopy: "provider-managed"}
+			imapAddress, smtpAddress := values[6], values[7]
+			caldavURL := values[8]
+			if values[3] != "" && imapAddress == "" && smtpAddress == "" {
+				probe, probeErr := p.service.ProbeConnection(p.ctx, values[3])
+				if probeErr != nil {
+					err = probeErr
+				} else {
+					if probe.IMAP != nil {
+						imapAddress = probe.IMAP.Address
+						connection.Mail = &model.MailConfig{Username: values[4], Secret: model.SecretRef{Env: values[5]}, IMAP: *probe.IMAP, SentCopy: "provider-managed"}
+					}
+					if probe.SMTP != nil {
+						smtpAddress = probe.SMTP.Address
+						if connection.Mail == nil {
+							connection.Mail = &model.MailConfig{Username: values[4], Secret: model.SecretRef{Env: values[5]}, SentCopy: "provider-managed"}
+						}
+						connection.Mail.SMTP = *probe.SMTP
+					}
+					if caldavURL == "" && probe.CalDAV != "" {
+						caldavURL = probe.CalDAV
+					}
+				}
 			}
-			if values[8] != "" {
-				connection.Calendar = &model.CalendarConfig{Kind: "caldav", URL: values[8], Username: values[9], Secret: model.SecretRef{Env: values[10]}}
+			if err == nil && (imapAddress != "" || smtpAddress != "") {
+				if connection.Mail == nil {
+					connection.Mail = &model.MailConfig{Username: values[4], Secret: model.SecretRef{Env: values[5]}, IMAP: model.IMAPConfig{Address: imapAddress, TLS: imapAddress != ""}, SMTP: model.SMTPConfig{Address: smtpAddress, TLS: smtpAddress != ""}, SentCopy: "provider-managed"}
+				} else {
+					if values[4] != "" {
+						connection.Mail.Username = values[4]
+					}
+					if values[5] != "" {
+						connection.Mail.Secret = model.SecretRef{Env: values[5]}
+					}
+					if connection.Mail.IMAP.Address == "" && imapAddress != "" {
+						connection.Mail.IMAP = model.IMAPConfig{Address: imapAddress, TLS: true}
+					}
+					if connection.Mail.SMTP.Address == "" && smtpAddress != "" {
+						connection.Mail.SMTP = model.SMTPConfig{Address: smtpAddress, TLS: smtpAddress != "" && !strings.HasSuffix(smtpAddress, ":587")}
+						if strings.HasSuffix(smtpAddress, ":587") {
+							connection.Mail.SMTP.StartTLS = true
+							connection.Mail.SMTP.TLS = false
+						}
+					}
+				}
 			}
-			err = p.service.UpsertConnection(connection, false)
+			if err == nil && caldavURL != "" {
+				connection.Calendar = &model.CalendarConfig{Kind: "caldav", URL: caldavURL, Username: values[9], Secret: model.SecretRef{Env: values[10]}}
+				if connection.Calendar.Username == "" {
+					connection.Calendar.Username = values[3]
+				}
+			}
+			if err == nil {
+				err = p.service.UpsertConnection(connection, false)
+			}
 			if err == nil {
 				p.editor.Set(false)
 				p.editorFields = nil
@@ -295,7 +342,7 @@ func (p *posthouseApp) submitEditor() {
 					kind = "mail.mark"
 				case "move":
 					payload.Destination = values[1]
-				case "archive", "trash":
+				case "archive", "trash", "junk":
 				default:
 					err = fmt.Errorf("unknown action %q", action)
 				}

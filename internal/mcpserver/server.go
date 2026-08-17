@@ -168,7 +168,8 @@ type messageReplyInput struct {
 
 type messageForwardInput struct {
 	messageReplyInput
-	To []string `json:"to"`
+	To       []string `json:"to"`
+	Verbatim bool     `json:"verbatim,omitempty" jsonschema:"when true, forward original parts as attachments; original body is omitted from the preview"`
 }
 
 type messageDraftInput struct {
@@ -217,6 +218,7 @@ type attachmentGetInput struct {
 	Offset       int    `json:"offset,omitempty"`
 	Limit        int    `json:"limit,omitempty"`
 	Cursor       string `json:"cursor,omitempty" jsonschema:"opaque attachment snapshot cursor returned with next_offset"`
+	ExtractText  bool   `json:"extract_text,omitempty" jsonschema:"when true and the attachment is PDF, return extracted plain text instead of raw bytes"`
 }
 
 type attachmentChunkOutput struct {
@@ -225,16 +227,18 @@ type attachmentChunkOutput struct {
 	NextOffset int              `json:"next_offset,omitempty"`
 	NextCursor string           `json:"next_cursor,omitempty"`
 	DataBase64 string           `json:"data_base64"`
+	Text       string           `json:"text,omitempty"`
 }
 
 type messageActionInput struct {
-	Connection  string `json:"connection"`
-	Action      string `json:"action" jsonschema:"mark, move, archive, or trash"`
-	Folder      string `json:"folder,omitempty"`
-	UID         uint32 `json:"uid"`
-	Destination string `json:"destination,omitempty"`
-	Seen        *bool  `json:"seen,omitempty"`
-	Flagged     *bool  `json:"flagged,omitempty"`
+	Connection  string   `json:"connection"`
+	Action      string   `json:"action" jsonschema:"mark, move, archive, trash, or junk"`
+	Folder      string   `json:"folder,omitempty"`
+	UID         uint32   `json:"uid,omitempty"`
+	UIDs        []uint32 `json:"uids,omitempty" jsonschema:"batch UIDs; when set, uid is ignored"`
+	Destination string   `json:"destination,omitempty"`
+	Seen        *bool    `json:"seen,omitempty"`
+	Flagged     *bool    `json:"flagged,omitempty"`
 }
 
 type connectionInput struct {
@@ -297,7 +301,7 @@ func (s *Server) registerTools() {
 			return nil, page, err
 		})
 
-	mcp.AddTool(s.mcp, &mcp.Tool{Name: "messages_search", Title: "Search messages", Description: "List or search messages across selected IMAP connections, up to 100 per page. Pass next_cursor back unchanged with identical filters; cursors validate each mailbox UID namespace. Offline full-text fallback searches available encrypted cached headers and bodies and returns an offline_search_incomplete source warning when uncached content may be omitted.", Annotations: readOnly},
+	mcp.AddTool(s.mcp, &mcp.Tool{Name: "messages_search", Title: "Search messages", Description: "List or search messages across selected IMAP connections, up to 100 per page. Pass next_cursor back unchanged with identical filters; cursors validate each mailbox UID namespace. Offline full-text fallback searches available encrypted cached headers and bodies and returns an offline_search_incomplete source warning when uncached content may be omitted. Prefer messages_triage for inbox cleanup workflows.", Annotations: readOnly},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input messageSearchInput) (*mcp.CallToolResult, model.MessagePage, error) {
 			since, err := optionalTime(input.Since)
 			if err != nil {
@@ -314,31 +318,49 @@ func (s *Server) registerTools() {
 			return nil, page, err
 		})
 
-	mcp.AddTool(s.mcp, &mcp.Tool{Name: "messages_send_prepare", Title: "Prepare message send", Description: "Prepare a plain-text or HTML email with up to 25 MiB total attachment data through exactly one SMTP connection. Text-only is text/plain. HTML-only is multipart/alternative with a derived text/plain fallback. Both bodies are multipart/alternative as supplied. Returns a ten-minute opaque token and exact side-effect preview; no message is sent until operation_execute is called.", Annotations: readOnly},
+	mcp.AddTool(s.mcp, &mcp.Tool{Name: "messages_triage", Title: "Triage messages", Description: "Compact inbox triage across selected connections: from, subject, date, unread/flagged, attachment hint, and short preview. Start here before messages_get. Pass next_cursor back unchanged with identical filters.", Annotations: readOnly},
+		func(ctx context.Context, _ *mcp.CallToolRequest, input messageSearchInput) (*mcp.CallToolResult, model.TriagePage, error) {
+			page, err := s.service.TriageMessages(ctx, input.selector(), postmail.SearchOptions{Folder: input.Folder, Query: input.Query, Unread: input.Unread, Mode: input.Mode}, input.PageSize, input.Cursor)
+			return nil, page, err
+		})
+
+	mcp.AddTool(s.mcp, &mcp.Tool{Name: "messages_unread_counts", Title: "Unread counts", Description: "Return unread counts per selected mail-capable connection for the inbox (or an explicit folder).", Annotations: readOnly},
+		func(ctx context.Context, _ *mcp.CallToolRequest, input messageSearchInput) (*mcp.CallToolResult, map[string]any, error) {
+			summaries, err := s.service.UnreadCounts(ctx, input.selector(), input.Folder)
+			return nil, map[string]any{"unread": summaries}, err
+		})
+
+	mcp.AddTool(s.mcp, &mcp.Tool{Name: "messages_send_prepare", Title: "Prepare message send", Description: "Prepare a plain-text or HTML email with up to 25 MiB total attachment data through exactly one SMTP connection. Prefer messages_draft_prepare when the operator should review before sending. Text-only is text/plain. HTML-only is multipart/alternative with a derived text/plain fallback. Both bodies are multipart/alternative as supplied. Returns a ten-minute opaque token and exact side-effect preview; no message is sent until operation_execute is called.", Annotations: readOnly},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input sendMessageInput) (*mcp.CallToolResult, model.PreparedOperation, error) {
 			prepared, err := s.service.PrepareSend(ctx, model.SendMessage{ConnectionID: input.Connection, To: input.To, CC: input.CC, BCC: input.BCC, Subject: input.Subject, Text: input.Text, HTML: input.HTML, ReplyTo: input.ReplyTo, InReplyTo: input.InReplyTo, References: input.References, Attachments: mcpAttachments(input.Attachments)})
 			return nil, prepared, err
 		})
 
-	mcp.AddTool(s.mcp, &mcp.Tool{Name: "messages_reply_prepare", Title: "Prepare message reply", Description: "Fetch one provider message and prepare a threaded plain-text or HTML reply through the same exact connection, honoring Reply-To. No message is sent until operation_execute.", Annotations: readOnly},
+	mcp.AddTool(s.mcp, &mcp.Tool{Name: "messages_reply_prepare", Title: "Prepare message reply", Description: "Fetch one provider message and prepare a threaded plain-text or HTML reply through the same exact connection, honoring Reply-To. Prefer a provider draft via messages_draft_prepare when the operator should review before sending. No message is sent until operation_execute.", Annotations: readOnly},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input messageReplyInput) (*mcp.CallToolResult, model.PreparedOperation, error) {
 			prepared, err := s.service.PrepareReply(ctx, input.Connection, input.Folder, input.UID, input.Text, input.HTML)
 			return nil, prepared, err
 		})
 
-	mcp.AddTool(s.mcp, &mcp.Tool{Name: "messages_forward_prepare", Title: "Prepare message forward", Description: "Fetch one provider message and prepare a plain-text or HTML forward through the same exact connection. No message is sent until operation_execute.", Annotations: readOnly},
+	mcp.AddTool(s.mcp, &mcp.Tool{Name: "messages_forward_prepare", Title: "Prepare message forward", Description: "Fetch one provider message and prepare a forward through the same exact connection. Set verbatim=true to attach original parts without putting the original body into the preview. No message is sent until operation_execute.", Annotations: readOnly},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input messageForwardInput) (*mcp.CallToolResult, model.PreparedOperation, error) {
-			prepared, err := s.service.PrepareForward(ctx, input.Connection, input.Folder, input.UID, input.To, input.Text, input.HTML)
+			var prepared model.PreparedOperation
+			var err error
+			if input.Verbatim {
+				prepared, err = s.service.PrepareForwardVerbatim(ctx, input.Connection, input.Folder, input.UID, input.To, input.Text)
+			} else {
+				prepared, err = s.service.PrepareForward(ctx, input.Connection, input.Folder, input.UID, input.To, input.Text, input.HTML)
+			}
 			return nil, prepared, err
 		})
 
-	mcp.AddTool(s.mcp, &mcp.Tool{Name: "messages_draft_prepare", Title: "Prepare provider draft mutation", Description: "Prepare create, update, or non-expunging delete of one provider-side draft through exactly one IMAP connection; attachment data is limited to 25 MiB total.", Annotations: readOnly},
+	mcp.AddTool(s.mcp, &mcp.Tool{Name: "messages_draft_prepare", Title: "Prepare provider draft mutation", Description: "Preferred compose path for agent workflows: prepare create, update, or non-expunging delete of one provider-side draft through exactly one IMAP connection so the operator can review before sending. Attachment data is limited to 25 MiB total. No provider draft changes until operation_execute.", Annotations: readOnly},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input messageDraftInput) (*mcp.CallToolResult, model.PreparedOperation, error) {
 			prepared, err := s.service.PrepareDraft(ctx, input.Connection, "mail.draft."+input.Action, input.Folder, input.UID, input.Message.model())
 			return nil, prepared, err
 		})
 
-	mcp.AddTool(s.mcp, &mcp.Tool{Name: "messages_get", Title: "Get message", Description: "Fetch and decode one complete MIME message from an exact connection and UID, including safe HTML, text, threading headers, and attachment metadata.", Annotations: readOnly},
+	mcp.AddTool(s.mcp, &mcp.Tool{Name: "messages_get", Title: "Get message", Description: "Fetch and decode one complete MIME message from an exact connection and UID, including safe HTML, plain text, markdown approximation, threading headers, and attachment metadata.", Annotations: readOnly},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input messageGetInput) (*mcp.CallToolResult, model.MessageDetail, error) {
 			if err := validateReadMode(input.Mode); err != nil {
 				return nil, model.MessageDetail{}, err
@@ -347,7 +369,7 @@ func (s *Server) registerTools() {
 			return nil, detail, err
 		})
 
-	mcp.AddTool(s.mcp, &mcp.Tool{Name: "messages_attachment_get", Title: "Get attachment chunk", Description: "Read a bounded base64 chunk from one immutable message-attachment snapshot. The maximum chunk is 1 MiB; pass both next_offset and next_cursor until omitted. A final cursorless chunk can be returned without caching, while multi-chunk reads require cache.max_bytes capacity for the full encrypted snapshot.", Annotations: readOnly},
+	mcp.AddTool(s.mcp, &mcp.Tool{Name: "messages_attachment_get", Title: "Get attachment chunk", Description: "Read a bounded base64 chunk from one immutable message-attachment snapshot. The maximum chunk is 1 MiB; pass both next_offset and next_cursor until omitted. Set extract_text=true for PDF attachments to return extracted plain text in text (and as UTF-8 data_base64). A final cursorless chunk can be returned without caching, while multi-chunk reads require cache.max_bytes capacity for the full encrypted snapshot.", Annotations: readOnly},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input attachmentGetInput) (*mcp.CallToolResult, attachmentChunkOutput, error) {
 			if err := validateReadMode(input.Mode); err != nil {
 				return nil, attachmentChunkOutput{}, err
@@ -368,14 +390,24 @@ func (s *Server) registerTools() {
 			if err != nil {
 				return nil, attachmentChunkOutput{}, err
 			}
+			var extracted string
+			if input.ExtractText && strings.Contains(strings.ToLower(attachment.ContentType), "pdf") {
+				extracted, err = postmail.ExtractPDFText(data)
+				if err != nil {
+					return nil, attachmentChunkOutput{}, err
+				}
+				data = []byte(extracted)
+				attachment.ContentType = "text/plain; charset=utf-8"
+				attachment.Size = int64(len(data))
+			}
 			if input.Offset > len(data) {
 				return nil, attachmentChunkOutput{}, fmt.Errorf("offset exceeds attachment size")
 			}
 			end := min(input.Offset+input.Limit, len(data))
-			if end < len(data) && snapshotCursor == "" {
+			if end < len(data) && snapshotCursor == "" && !input.ExtractText {
 				return nil, attachmentChunkOutput{}, fmt.Errorf("attachment exceeds encrypted cache capacity; increase cache.max_bytes or request an attachment no larger than the 1 MiB chunk limit")
 			}
-			output := attachmentChunkOutput{Attachment: attachment, Offset: input.Offset, DataBase64: base64.StdEncoding.EncodeToString(data[input.Offset:end])}
+			output := attachmentChunkOutput{Attachment: attachment, Offset: input.Offset, DataBase64: base64.StdEncoding.EncodeToString(data[input.Offset:end]), Text: extracted}
 			if end < len(data) {
 				output.NextOffset = end
 				output.NextCursor = snapshotCursor
@@ -383,9 +415,9 @@ func (s *Server) registerTools() {
 			return nil, output, nil
 		})
 
-	mcp.AddTool(s.mcp, &mcp.Tool{Name: "messages_action_prepare", Title: "Prepare message action", Description: "Prepare a mark, move, archive, or trash action for exactly one provider message. No provider state changes until operation_execute.", Annotations: readOnly},
+	mcp.AddTool(s.mcp, &mcp.Tool{Name: "messages_action_prepare", Title: "Prepare message action", Description: "Prepare a mark, move, archive, trash, or junk action for one or more provider messages (uid or uids). No provider state changes until operation_execute.", Annotations: readOnly},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input messageActionInput) (*mcp.CallToolResult, model.PreparedOperation, error) {
-			prepared, err := s.service.PrepareMailAction(ctx, input.Connection, "mail."+input.Action, service.MailAction{Folder: input.Folder, UID: input.UID, Destination: input.Destination, Seen: input.Seen, Flagged: input.Flagged})
+			prepared, err := s.service.PrepareMailAction(ctx, input.Connection, "mail."+input.Action, service.MailAction{Folder: input.Folder, UID: input.UID, UIDs: input.UIDs, Destination: input.Destination, Seen: input.Seen, Flagged: input.Flagged})
 			return nil, prepared, err
 		})
 

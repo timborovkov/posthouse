@@ -48,8 +48,9 @@ type MailConfig struct {
 }
 
 type SecretRef struct {
-	Env      string `json:"env,omitempty"`
-	Keychain string `json:"keychain,omitempty"`
+	Env      string   `json:"env,omitempty"`
+	Keychain string   `json:"keychain,omitempty"`
+	Command  []string `json:"command,omitempty"` // argv that prints the secret on stdout
 }
 
 type IMAPConfig struct {
@@ -57,6 +58,7 @@ type IMAPConfig struct {
 	TLS      bool   `json:"tls"`
 	StartTLS bool   `json:"starttls,omitempty"`
 	Insecure bool   `json:"insecure,omitempty"`
+	Proxy    string `json:"proxy,omitempty"` // socks5:// or http://; else ALL_PROXY/HTTPS_PROXY/HTTP_PROXY
 }
 
 type SMTPConfig struct {
@@ -64,6 +66,7 @@ type SMTPConfig struct {
 	TLS      bool   `json:"tls"`
 	StartTLS bool   `json:"starttls,omitempty"`
 	Insecure bool   `json:"insecure,omitempty"`
+	Proxy    string `json:"proxy,omitempty"` // socks5:// or http://; else ALL_PROXY/HTTPS_PROXY/HTTP_PROXY
 }
 
 type FolderConfig struct {
@@ -187,9 +190,37 @@ type MessageDetail struct {
 	ReplyTo     []Address    `json:"reply_to,omitempty"`
 	Text        string       `json:"text,omitempty"`
 	HTML        string       `json:"html,omitempty"`
+	Markdown    string       `json:"markdown,omitempty"`
 	InReplyTo   string       `json:"in_reply_to,omitempty"`
 	References  []string     `json:"references,omitempty"`
 	Attachments []Attachment `json:"attachments,omitempty"`
+}
+
+// TriageItem is a compact message summary for agent inbox triage.
+type TriageItem struct {
+	ConnectionID   string    `json:"connection_id"`
+	Folder         string    `json:"folder"`
+	UID            uint32    `json:"uid"`
+	From           []Address `json:"from,omitempty"`
+	Subject        string    `json:"subject,omitempty"`
+	Date           time.Time `json:"date,omitempty"`
+	Unread         bool      `json:"unread"`
+	Flagged        bool      `json:"flagged,omitempty"`
+	HasAttachments bool      `json:"has_attachments,omitempty"`
+	Preview        string    `json:"preview,omitempty"`
+}
+
+type TriagePage struct {
+	Items      []TriageItem  `json:"items"`
+	NextCursor string        `json:"next_cursor,omitempty"`
+	Errors     []SourceError `json:"errors,omitempty"`
+}
+
+type UnreadSummary struct {
+	ConnectionID string `json:"connection_id"`
+	Folder       string `json:"folder"`
+	Unread       int    `json:"unread"`
+	Error        string `json:"error,omitempty"`
 }
 
 type RecurrencePeriod struct {

@@ -18,6 +18,7 @@ import (
 	"github.com/emersion/go-imap/v2"
 	"github.com/emersion/go-imap/v2/imapclient"
 	gomail "github.com/emersion/go-message/mail"
+	"github.com/ledongthuc/pdf"
 	"github.com/microcosm-cc/bluemonday"
 
 	"github.com/timborovkov/posthouse/internal/model"
@@ -273,6 +274,11 @@ func parseMessage(raw []byte) (FetchedMessage, error) {
 	if result.Detail.Text == "" && result.Detail.HTML != "" {
 		result.Detail.Text = htmlToText(result.Detail.HTML)
 	}
+	if result.Detail.HTML != "" {
+		result.Detail.Markdown = HTMLToMarkdown(result.Detail.HTML)
+	} else if result.Detail.Text != "" {
+		result.Detail.Markdown = result.Detail.Text
+	}
 	result.Detail.Preview = preview([]byte(result.Detail.Text))
 	return result, nil
 }
@@ -321,6 +327,73 @@ func htmlToText(value string) string {
 	value = regexp.MustCompile(`(?i)<br\s*/?>|</(p|div|li|tr|h[1-6])>`).ReplaceAllString(value, "\n")
 	value = htmlTags.ReplaceAllString(value, "")
 	return strings.TrimSpace(strings.NewReplacer("&nbsp;", " ", "&amp;", "&", "&lt;", "<", "&gt;", ">").Replace(value))
+}
+
+// HTMLToMarkdown converts sanitized HTML into a compact markdown approximation for agents.
+func HTMLToMarkdown(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	replacements := []struct {
+		pattern string
+		repl    string
+	}{
+		{`(?i)<br\s*/?>`, "\n"},
+		{`(?i)</p>`, "\n\n"},
+		{`(?i)</div>`, "\n"},
+		{`(?i)</li>`, "\n"},
+		{`(?i)<li[^>]*>`, "- "},
+		{`(?i)<h1[^>]*>`, "# "},
+		{`(?i)</h1>`, "\n\n"},
+		{`(?i)<h2[^>]*>`, "## "},
+		{`(?i)</h2>`, "\n\n"},
+		{`(?i)<h3[^>]*>`, "### "},
+		{`(?i)</h3>`, "\n\n"},
+		{`(?i)<strong[^>]*>|<b[^>]*>`, "**"},
+		{`(?i)</strong>|</b>`, "**"},
+		{`(?i)<em[^>]*>|<i[^>]*>`, "_"},
+		{`(?i)</em>|</i>`, "_"},
+		{`(?i)<a\s+[^>]*href=["']([^"']+)["'][^>]*>`, "["},
+		{`(?i)</a>`, "]"},
+	}
+	for _, item := range replacements {
+		value = regexp.MustCompile(item.pattern).ReplaceAllString(value, item.repl)
+	}
+	// Turn remaining "<a ...>text" patterns already partially handled; strip leftover tags.
+	value = htmlTags.ReplaceAllString(value, "")
+	value = strings.NewReplacer("&nbsp;", " ", "&amp;", "&", "&lt;", "<", "&gt;", ">", "&quot;", `"`).Replace(value)
+	lines := strings.Split(value, "\n")
+	for i, line := range lines {
+		lines[i] = strings.TrimRight(line, " \t")
+	}
+	return strings.TrimSpace(strings.Join(lines, "\n"))
+}
+
+// ExtractPDFText returns plain text from a PDF attachment when possible.
+func ExtractPDFText(data []byte) (string, error) {
+	reader, err := pdf.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		return "", fmt.Errorf("open PDF: %w", err)
+	}
+	var builder strings.Builder
+	for page := 1; page <= reader.NumPage(); page++ {
+		p := reader.Page(page)
+		if p.V.IsNull() {
+			continue
+		}
+		text, err := p.GetPlainText(nil)
+		if err != nil {
+			return "", fmt.Errorf("read PDF page %d: %w", page, err)
+		}
+		if text = strings.TrimSpace(text); text != "" {
+			if builder.Len() > 0 {
+				builder.WriteString("\n\n")
+			}
+			builder.WriteString(text)
+		}
+	}
+	return strings.TrimSpace(builder.String()), nil
 }
 
 func Discover(connection model.Connection) (Discovery, error) {

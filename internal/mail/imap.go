@@ -14,6 +14,7 @@ import (
 	"github.com/emersion/go-imap/v2/imapclient"
 	"github.com/timborovkov/posthouse/internal/config"
 	"github.com/timborovkov/posthouse/internal/model"
+	"github.com/timborovkov/posthouse/internal/netproxy"
 )
 
 type SearchOptions struct {
@@ -355,8 +356,7 @@ func dialIMAPContext(ctx context.Context, settings model.IMAPConfig) (*imapclien
 	if !settings.TLS && !settings.StartTLS && host != "localhost" && host != "127.0.0.1" && host != "::1" {
 		return nil, fmt.Errorf("refusing remote cleartext IMAP connection; enable tls or starttls")
 	}
-	dialer := &net.Dialer{Timeout: 30 * time.Second}
-	connection, err := dialer.DialContext(ctx, "tcp", settings.Address)
+	connection, err := netproxy.DialTCP(ctx, settings.Address, settings.Proxy)
 	if err != nil {
 		return nil, fmt.Errorf("connect to IMAP: %w", err)
 	}

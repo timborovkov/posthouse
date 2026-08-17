@@ -25,8 +25,20 @@ not your normal login. OAuth is not in v0.2.
 
 ## Add a connection
 
-Copy [examples/connection.json](./examples/connection.json), fill in hosts and
-your address, keep the password in the environment:
+**Probe from an email address** (RFC 6186 SRV + Thunderbird autoconfig +
+CalDAV `/.well-known/caldav`). No branded hostname catalogs:
+
+```sh
+export ACME_MAIL_PASSWORD='app password'
+posthouse connection probe --email you@acme.example
+posthouse connection add --email you@acme.example --id acme --category work \
+  --label acme --label primary --secret-env ACME_MAIL_PASSWORD --caldav
+posthouse connection discover acme
+posthouse connection doctor acme
+```
+
+Or copy [examples/connection.json](./examples/connection.json), fill in hosts
+and your address, keep the password in the environment:
 
 ```sh
 export ACME_MAIL_PASSWORD='app password'
@@ -36,15 +48,19 @@ posthouse connection discover acme
 posthouse connection doctor acme
 ```
 
-`discover` saves folders and calendar collections. The printed JSON is
+`discover` saves folder roles (inbox/sent/drafts/archive/trash/junk via IMAP
+SPECIAL-USE when advertised) and calendar collections. The printed JSON is
 redacted — do not feed it to `connection update`.
+
+In the TUI, press `c` on Connections, fill ID/name/email/secret, leave IMAP/SMTP
+blank to probe, then Enter to discover folders.
 
 Read-only ICS feed: [examples/feed-connection.json](./examples/feed-connection.json).
 
 Config path: `posthouse config path` (or `--config` / `POSTHOUSE_CONFIG`).
 State is `posthouse.db` next to it.
 
-Secret in the JSON is one of:
+Secret in the JSON is exactly one of:
 
 ```json
 {"secret":{"env":"ACME_MAIL_PASSWORD"}}
@@ -54,11 +70,32 @@ Secret in the JSON is one of:
 {"secret":{"keychain":"acme-mail"}}
 ```
 
+```json
+{"secret":{"command":["pass","show","acme-mail"]}}
+```
+
 ```sh
 printf '%s' "$ACME_MAIL_PASSWORD" | posthouse connection secret set acme-mail --file -
 ```
 
+Optional `mail.imap.proxy` / `mail.smtp.proxy` (`socks5://` or `http://`). When
+unset, `ALL_PROXY` / `HTTPS_PROXY` / `HTTP_PROXY` are honored for IMAP and SMTP.
+
 Remote servers need real TLS or STARTTLS. Cleartext auth is loopback-only.
+
+### Provider quirks (generic IMAP/SMTP)
+
+- **Gmail app password**: enable 2-Step Verification, create an app password, and
+  quote folder names under `[Gmail]/` (or rely on `connection discover` roles).
+- **iCloud**: IMAP username is usually the address local-part; SMTP username is
+  the full address; use an app-specific password.
+- **Proton**: use Proton Bridge local IMAP/SMTP endpoints and the Bridge password,
+  not the account password.
+- **Fastmail**: app password for IMAP/SMTP, or wait for a native API backend if
+  you prefer that path later.
+
+OAuth / native Gmail and Microsoft Graph are tracked separately and are not part
+of this generic setup path.
 
 ## Terminal app
 
@@ -94,12 +131,18 @@ CLI output is JSON, except `calendar ics`.
 
 ```sh
 posthouse mail list --category work --label primary --unread
+posthouse mail triage --category work --unread --page-size 25
+posthouse mail unread --category work
 posthouse mail search --query renewal --page-size 25
 posthouse calendar list --collection team --start 2026-08-01T00:00:00Z
 
 posthouse mail get --connection work --folder INBOX --uid 42
+posthouse mail attachment --connection work --folder INBOX --uid 42 --id 1 --extract-text --output -
 posthouse mail send --connection work --to teammate@example.test --subject Status --body-file status.txt
 posthouse mail send --connection work --to teammate@example.test --subject Status --html-file status.html
+posthouse mail forward --connection work --folder INBOX --uid 42 --to teammate@example.test --verbatim
+posthouse mail junk --connection work --folder INBOX --uid 42
+posthouse mail archive --connection work --folder INBOX --uids 42,43,44
 posthouse operation show 'TOKEN'
 posthouse operation execute 'TOKEN'
 
@@ -108,6 +151,7 @@ posthouse mail archive --connection work --folder INBOX --uid 42
 
 posthouse calendar create --connection work --file event.json
 posthouse calendar ics --title Planning --start 2026-08-17T09:00:00+03:00 --end 2026-08-17T10:00:00+03:00 --output planning.ics
+posthouse schema write --dir ./schemas
 posthouse sync
 posthouse cache status
 ```
@@ -145,6 +189,13 @@ posthouse mcp http --address 127.0.0.1:8791
 
 `/mcp` is the API. `/healthz` is liveness; `/readyz` is config and cache key,
 not provider connectivity. Headless/Docker must set `POSTHOUSE_CACHE_KEY`.
+
+Agent-oriented mail tools include `messages_triage`, `messages_unread_counts`,
+`messages_get` (includes `markdown`), `messages_attachment_get` with
+`extract_text` for PDFs, `messages_forward_prepare` with `verbatim`, and
+`messages_action_prepare` with `junk` plus batch `uids`. Prefer
+`messages_draft_prepare` when the operator should review before send. Every
+write still requires `operation_execute`.
 
 ## Docker
 
