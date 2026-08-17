@@ -210,6 +210,28 @@ func resolvedMailSecret(connection model.Connection) (string, error) {
 	return config.ResolveSecret(connection.Mail.Secret)
 }
 
+// UnreadCountContext returns the IMAP STATUS UNSEEN count for folder.
+func UnreadCountContext(ctx context.Context, connection model.Connection, folder string) (int, error) {
+	client, stop, err := authenticatedIMAPContext(ctx, connection)
+	if err != nil {
+		return 0, err
+	}
+	defer stop()
+	defer client.Close()
+	defer client.Logout()
+	if folder == "" {
+		folder = defaultFolder(connection, folder)
+	}
+	data, err := client.Status(folder, &imap.StatusOptions{NumUnseen: true}).Wait()
+	if err != nil {
+		return 0, fmt.Errorf("IMAP STATUS UNSEEN for %s: %w", folder, err)
+	}
+	if data.NumUnseen == nil {
+		return 0, fmt.Errorf("IMAP STATUS UNSEEN for %s returned no count", folder)
+	}
+	return int(*data.NumUnseen), nil
+}
+
 func safePreviewSize(size, limit int64) bool { return size > 0 && size <= limit }
 
 func missingSortCursor(uids []imap.UID, cursorUID uint32) bool {

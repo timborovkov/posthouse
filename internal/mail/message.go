@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"net/smtp"
 	"regexp"
@@ -317,6 +318,21 @@ func headerAddresses(header gomail.Header, key string) []model.Address {
 var (
 	emailHTMLPolicy = bluemonday.UGCPolicy()
 	htmlTags        = regexp.MustCompile(`(?s)<[^>]+>`)
+	mdBreak         = regexp.MustCompile(`(?i)<br\s*/?>`)
+	mdCloseBlock    = regexp.MustCompile(`(?i)</(p|div|h[1-6]|li|tr)>`)
+	mdListItem      = regexp.MustCompile(`(?i)<li[^>]*>`)
+	mdH1Open        = regexp.MustCompile(`(?i)<h1[^>]*>`)
+	mdH1Close       = regexp.MustCompile(`(?i)</h1>`)
+	mdH2Open        = regexp.MustCompile(`(?i)<h2[^>]*>`)
+	mdH2Close       = regexp.MustCompile(`(?i)</h2>`)
+	mdH3Open        = regexp.MustCompile(`(?i)<h3[^>]*>`)
+	mdH3Close       = regexp.MustCompile(`(?i)</h3>`)
+	mdBoldOpen      = regexp.MustCompile(`(?i)<(b|strong)(\s[^>]*)?>`)
+	mdBoldClose     = regexp.MustCompile(`(?i)</(b|strong)>`)
+	mdEmOpen        = regexp.MustCompile(`(?i)<(i|em)(\s[^>]*)?>`)
+	mdEmClose       = regexp.MustCompile(`(?i)</(i|em)>`)
+	mdLink          = regexp.MustCompile(`(?is)<a\s[^>]*href\s*=\s*["']([^"']+)["'][^>]*>(.*?)</a>`)
+	mdBlockquote    = regexp.MustCompile(`(?is)<blockquote[^>]*>(.*?)</blockquote>`)
 )
 
 func sanitizeHTML(value string) string {
@@ -326,7 +342,7 @@ func sanitizeHTML(value string) string {
 func htmlToText(value string) string {
 	value = regexp.MustCompile(`(?i)<br\s*/?>|</(p|div|li|tr|h[1-6])>`).ReplaceAllString(value, "\n")
 	value = htmlTags.ReplaceAllString(value, "")
-	return strings.TrimSpace(strings.NewReplacer("&nbsp;", " ", "&amp;", "&", "&lt;", "<", "&gt;", ">").Replace(value))
+	return strings.TrimSpace(html.UnescapeString(value))
 }
 
 // HTMLToMarkdown converts sanitized HTML into a compact markdown approximation for agents.
@@ -335,34 +351,24 @@ func HTMLToMarkdown(value string) string {
 	if value == "" {
 		return ""
 	}
-	replacements := []struct {
-		pattern string
-		repl    string
-	}{
-		{`(?i)<br\s*/?>`, "\n"},
-		{`(?i)</p>`, "\n\n"},
-		{`(?i)</div>`, "\n"},
-		{`(?i)</li>`, "\n"},
-		{`(?i)<li[^>]*>`, "- "},
-		{`(?i)<h1[^>]*>`, "# "},
-		{`(?i)</h1>`, "\n\n"},
-		{`(?i)<h2[^>]*>`, "## "},
-		{`(?i)</h2>`, "\n\n"},
-		{`(?i)<h3[^>]*>`, "### "},
-		{`(?i)</h3>`, "\n\n"},
-		{`(?i)<strong[^>]*>|<b[^>]*>`, "**"},
-		{`(?i)</strong>|</b>`, "**"},
-		{`(?i)<em[^>]*>|<i[^>]*>`, "_"},
-		{`(?i)</em>|</i>`, "_"},
-		{`(?i)<a\s+[^>]*href=["']([^"']+)["'][^>]*>`, "["},
-		{`(?i)</a>`, "]"},
-	}
-	for _, item := range replacements {
-		value = regexp.MustCompile(item.pattern).ReplaceAllString(value, item.repl)
-	}
-	// Turn remaining "<a ...>text" patterns already partially handled; strip leftover tags.
+	value = mdLink.ReplaceAllString(value, "[$2]($1)")
+	value = mdBlockquote.ReplaceAllString(value, "> $1\n")
+	value = mdBreak.ReplaceAllString(value, "\n")
+	value = mdCloseBlock.ReplaceAllString(value, "\n")
+	value = mdListItem.ReplaceAllString(value, "- ")
+	value = mdH1Open.ReplaceAllString(value, "# ")
+	value = mdH1Close.ReplaceAllString(value, "\n\n")
+	value = mdH2Open.ReplaceAllString(value, "## ")
+	value = mdH2Close.ReplaceAllString(value, "\n\n")
+	value = mdH3Open.ReplaceAllString(value, "### ")
+	value = mdH3Close.ReplaceAllString(value, "\n\n")
+	value = mdBoldOpen.ReplaceAllString(value, "**")
+	value = mdBoldClose.ReplaceAllString(value, "**")
+	value = mdEmOpen.ReplaceAllString(value, "_")
+	value = mdEmClose.ReplaceAllString(value, "_")
 	value = htmlTags.ReplaceAllString(value, "")
-	value = strings.NewReplacer("&nbsp;", " ", "&amp;", "&", "&lt;", "<", "&gt;", ">", "&quot;", `"`).Replace(value)
+	value = html.UnescapeString(value)
+	value = strings.NewReplacer("<", "&lt;", ">", "&gt;").Replace(value)
 	lines := strings.Split(value, "\n")
 	for i, line := range lines {
 		lines[i] = strings.TrimRight(line, " \t")
@@ -370,30 +376,64 @@ func HTMLToMarkdown(value string) string {
 	return strings.TrimSpace(strings.Join(lines, "\n"))
 }
 
+const (
+	maxPDFPages        = 200
+	maxPDFExtractBytes = 1 << 20
+	maxPDFInputBytes   = 16 << 20
+)
+
 // ExtractPDFText returns plain text from a PDF attachment when possible.
-func ExtractPDFText(data []byte) (string, error) {
+func ExtractPDFText(data []byte) (text string, err error) {
+	if len(data) == 0 {
+		return "", fmt.Errorf("PDF attachment is empty")
+	}
+	if len(data) > maxPDFInputBytes {
+		return "", fmt.Errorf("PDF exceeds %d byte extraction limit", maxPDFInputBytes)
+	}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("malformed PDF")
+			text = ""
+		}
+	}()
 	reader, err := pdf.NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
 		return "", fmt.Errorf("open PDF: %w", err)
 	}
+	pages := reader.NumPage()
+	if pages > maxPDFPages {
+		pages = maxPDFPages
+	}
 	var builder strings.Builder
-	for page := 1; page <= reader.NumPage(); page++ {
-		p := reader.Page(page)
-		if p.V.IsNull() {
-			continue
-		}
-		text, err := p.GetPlainText(nil)
-		if err != nil {
-			return "", fmt.Errorf("read PDF page %d: %w", page, err)
-		}
-		if text = strings.TrimSpace(text); text != "" {
+	for page := 1; page <= pages; page++ {
+		func(page int) {
+			defer func() { _ = recover() }()
+			p := reader.Page(page)
+			if p.V.IsNull() {
+				return
+			}
+			pageText, pageErr := p.GetPlainText(nil)
+			if pageErr != nil {
+				return
+			}
+			pageText = strings.TrimSpace(pageText)
+			if pageText == "" {
+				return
+			}
 			if builder.Len() > 0 {
 				builder.WriteString("\n\n")
 			}
-			builder.WriteString(text)
+			builder.WriteString(pageText)
+		}(page)
+		if builder.Len() >= maxPDFExtractBytes {
+			break
 		}
 	}
-	return strings.TrimSpace(builder.String()), nil
+	out := strings.TrimSpace(builder.String())
+	if len(out) > maxPDFExtractBytes {
+		out = out[:maxPDFExtractBytes]
+	}
+	return out, nil
 }
 
 func Discover(connection model.Connection) (Discovery, error) {

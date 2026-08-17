@@ -137,7 +137,7 @@ posthouse mail search --query renewal --page-size 25
 posthouse calendar list --collection team --start 2026-08-01T00:00:00Z
 
 posthouse mail get --connection work --folder INBOX --uid 42
-posthouse mail attachment --connection work --folder INBOX --uid 42 --id 1 --extract-text --output -
+posthouse mail attachment --connection work --folder INBOX --uid 42 --id ATTACHMENT_ID --extract-text --output -
 posthouse mail send --connection work --to teammate@example.test --subject Status --body-file status.txt
 posthouse mail send --connection work --to teammate@example.test --subject Status --html-file status.html
 posthouse mail forward --connection work --folder INBOX --uid 42 --to teammate@example.test --verbatim

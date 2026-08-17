@@ -511,26 +511,6 @@ func Secret(environmentVariable string) (string, error) {
 	return value, nil
 }
 
-func ResolveSecret(ref model.SecretRef) (string, error) {
-	switch {
-	case ref.Env != "":
-		return Secret(ref.Env)
-	case ref.Keychain != "":
-		value, err := keyring.Get(keyringService, ref.Keychain)
-		if err != nil {
-			return "", fmt.Errorf("resolve keychain secret %q: %w", ref.Keychain, err)
-		}
-		if value == "" {
-			return "", fmt.Errorf("keychain secret %q is empty", ref.Keychain)
-		}
-		return value, nil
-	case len(ref.Command) > 0:
-		return resolveCommandSecret(ref.Command)
-	default:
-		return "", fmt.Errorf("secret reference is not configured")
-	}
-}
-
 func resolveCommandSecret(command []string) (string, error) {
 	if len(command) == 0 || strings.TrimSpace(command[0]) == "" {
 		return "", fmt.Errorf("secret command is empty")
@@ -539,18 +519,75 @@ func resolveCommandSecret(command []string) (string, error) {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, command[0], command[1:]...)
 	cmd.Stdin = nil
+	cmd.Env = scrubbedEnviron()
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		return "", fmt.Errorf("secret command %q failed: %w", command[0], err)
 	}
-	value := strings.TrimRight(stdout.String(), "\r\n")
+	value := stdout.String()
+	if idx := strings.IndexByte(value, '\n'); idx >= 0 {
+		value = value[:idx]
+	}
+	value = strings.TrimRight(value, "\r")
 	if value == "" {
 		return "", fmt.Errorf("secret command %q returned an empty secret", command[0])
 	}
-	if strings.Contains(value, "\n") {
-		return "", fmt.Errorf("secret command %q returned multiple lines", command[0])
+	if err := rejectControlChars(value); err != nil {
+		return "", err
+	}
+	return value, nil
+}
+
+func scrubbedEnviron() []string {
+	env := os.Environ()
+	filtered := make([]string, 0, len(env))
+	for _, entry := range env {
+		key, _, _ := strings.Cut(entry, "=")
+		if strings.HasPrefix(key, "POSTHOUSE_") {
+			continue
+		}
+		filtered = append(filtered, entry)
+	}
+	return filtered
+}
+
+func rejectControlChars(value string) error {
+	for _, r := range value {
+		if r < 0x20 || r == 0x7f {
+			return fmt.Errorf("secret contains control characters")
+		}
+	}
+	return nil
+}
+
+func ResolveSecret(ref model.SecretRef) (string, error) {
+	var (
+		value string
+		err   error
+	)
+	switch {
+	case ref.Env != "":
+		value, err = Secret(ref.Env)
+	case ref.Keychain != "":
+		value, err = keyring.Get(keyringService, ref.Keychain)
+		if err != nil {
+			return "", fmt.Errorf("resolve keychain secret %q: %w", ref.Keychain, err)
+		}
+		if value == "" {
+			return "", fmt.Errorf("keychain secret %q is empty", ref.Keychain)
+		}
+	case len(ref.Command) > 0:
+		value, err = resolveCommandSecret(ref.Command)
+	default:
+		return "", fmt.Errorf("secret reference is not configured")
+	}
+	if err != nil {
+		return "", err
+	}
+	if err := rejectControlChars(value); err != nil {
+		return "", err
 	}
 	return value, nil
 }

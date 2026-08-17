@@ -391,23 +391,28 @@ func (s *Server) registerTools() {
 				return nil, attachmentChunkOutput{}, err
 			}
 			var extracted string
-			if input.ExtractText && strings.Contains(strings.ToLower(attachment.ContentType), "pdf") {
+			if input.ExtractText {
+				if !strings.Contains(strings.ToLower(attachment.ContentType), "pdf") {
+					return nil, attachmentChunkOutput{}, fmt.Errorf("extract_text is only supported for PDF attachments")
+				}
 				extracted, err = postmail.ExtractPDFText(data)
 				if err != nil {
 					return nil, attachmentChunkOutput{}, err
 				}
-				data = []byte(extracted)
-				attachment.ContentType = "text/plain; charset=utf-8"
-				attachment.Size = int64(len(data))
+				return nil, attachmentChunkOutput{
+					Attachment: attachment,
+					Offset:     0,
+					Text:       extracted,
+				}, nil
 			}
 			if input.Offset > len(data) {
 				return nil, attachmentChunkOutput{}, fmt.Errorf("offset exceeds attachment size")
 			}
 			end := min(input.Offset+input.Limit, len(data))
-			if end < len(data) && snapshotCursor == "" && !input.ExtractText {
+			if end < len(data) && snapshotCursor == "" {
 				return nil, attachmentChunkOutput{}, fmt.Errorf("attachment exceeds encrypted cache capacity; increase cache.max_bytes or request an attachment no larger than the 1 MiB chunk limit")
 			}
-			output := attachmentChunkOutput{Attachment: attachment, Offset: input.Offset, DataBase64: base64.StdEncoding.EncodeToString(data[input.Offset:end]), Text: extracted}
+			output := attachmentChunkOutput{Attachment: attachment, Offset: input.Offset, DataBase64: base64.StdEncoding.EncodeToString(data[input.Offset:end])}
 			if end < len(data) {
 				output.NextOffset = end
 				output.NextCursor = snapshotCursor

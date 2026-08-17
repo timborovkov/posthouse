@@ -847,25 +847,28 @@ func (s *Service) PrepareForwardVerbatim(ctx context.Context, connectionID, fold
 		return model.PreparedOperation{}, err
 	}
 	original := fetched.Detail
-	attachments := make([]model.AttachmentInput, 0, len(original.Attachments)+1)
-	for _, attachment := range original.Attachments {
-		data := fetched.Attachments[attachment.ID]
+	attachments := make([]model.AttachmentInput, 0, 1)
+	if len(fetched.Raw) > 0 {
 		attachments = append(attachments, model.AttachmentInput{
-			Name:        attachment.Name,
-			ContentType: attachment.ContentType,
-			Data:        data,
+			Name:        "forwarded-message.eml",
+			ContentType: "message/rfc822",
+			Data:        fetched.Raw,
 		})
-	}
-	if original.Text != "" || original.HTML != "" {
-		name := "forwarded-message.txt"
-		body := original.Text
-		contentType := "text/plain; charset=utf-8"
-		if body == "" {
-			name = "forwarded-message.html"
-			body = original.HTML
-			contentType = "text/html; charset=utf-8"
+	} else {
+		// Fallback when raw MIME is unavailable: attach text and HTML when present.
+		if original.Text != "" {
+			attachments = append(attachments, model.AttachmentInput{Name: "forwarded-message.txt", ContentType: "text/plain; charset=utf-8", Data: []byte(original.Text)})
 		}
-		attachments = append(attachments, model.AttachmentInput{Name: name, ContentType: contentType, Data: []byte(body)})
+		if original.HTML != "" {
+			attachments = append(attachments, model.AttachmentInput{Name: "forwarded-message.html", ContentType: "text/html; charset=utf-8", Data: []byte(original.HTML)})
+		}
+		for _, attachment := range original.Attachments {
+			attachments = append(attachments, model.AttachmentInput{
+				Name:        attachment.Name,
+				ContentType: attachment.ContentType,
+				Data:        fetched.Attachments[attachment.ID],
+			})
+		}
 	}
 	message := model.SendMessage{
 		ConnectionID: connection.ID,
@@ -949,6 +952,41 @@ func prefixedSubject(subject, prefix string) string {
 	return prefix + " " + subject
 }
 
+func mailActionUIDs(payload MailAction) []uint32 {
+	if len(payload.UIDs) > 0 {
+		seen := map[uint32]struct{}{}
+		result := make([]uint32, 0, len(payload.UIDs))
+		for _, uid := range payload.UIDs {
+			if uid == 0 {
+				continue
+			}
+			if _, ok := seen[uid]; ok {
+				continue
+			}
+			seen[uid] = struct{}{}
+			result = append(result, uid)
+		}
+		return result
+	}
+	if payload.UID != 0 {
+		return []uint32{payload.UID}
+	}
+	return nil
+}
+
+func mailActionPrecondition(action MailAction, uid uint32) (postmail.MessagePrecondition, bool) {
+	if len(action.Preconditions) > 0 {
+		precondition, ok := action.Preconditions[uid]
+		return precondition, ok
+	}
+	if action.UID == uid {
+		return action.Precondition, true
+	}
+	return postmail.MessagePrecondition{}, false
+}
+
+const maxBatchMailUIDs = 100
+
 func (s *Service) PrepareMailAction(ctx context.Context, connectionID, kind string, payload MailAction) (model.PreparedOperation, error) {
 	connection, err := s.exactConnection(connectionID, "mail.read")
 	if err != nil {
@@ -984,6 +1022,9 @@ func (s *Service) PrepareMailAction(ctx context.Context, connectionID, kind stri
 	if len(uids) == 0 {
 		return model.PreparedOperation{}, fmt.Errorf("mail action requires uid or uids")
 	}
+	if len(uids) > maxBatchMailUIDs {
+		return model.PreparedOperation{}, fmt.Errorf("mail action accepts at most %d uids", maxBatchMailUIDs)
+	}
 	if len(uids) == 1 {
 		payload.UID = uids[0]
 		payload.UIDs = nil
@@ -1005,33 +1046,17 @@ func (s *Service) PrepareMailAction(ctx context.Context, connectionID, kind stri
 		}
 		payload.Precondition = postmail.MessagePrecondition{}
 	}
-	return s.prepare(ctx, kind, connection, payload, map[string]any{
-		"acting_identity": connection.Identity, "folder": payload.Folder, "uid": payload.UID, "uids": payload.UIDs,
+	preview := map[string]any{
+		"acting_identity": connection.Identity, "folder": payload.Folder,
 		"destination": payload.Destination, "seen": payload.Seen, "flagged": payload.Flagged,
 		"side_effects": []string{fmt.Sprintf("modify %d provider message(s)", len(uids))},
-	})
-}
-
-func mailActionUIDs(payload MailAction) []uint32 {
-	if len(payload.UIDs) > 0 {
-		seen := map[uint32]struct{}{}
-		result := make([]uint32, 0, len(payload.UIDs))
-		for _, uid := range payload.UIDs {
-			if uid == 0 {
-				continue
-			}
-			if _, ok := seen[uid]; ok {
-				continue
-			}
-			seen[uid] = struct{}{}
-			result = append(result, uid)
-		}
-		return result
 	}
-	if payload.UID != 0 {
-		return []uint32{payload.UID}
+	if len(uids) == 1 {
+		preview["uid"] = payload.UID
+	} else {
+		preview["uids"] = payload.UIDs
 	}
-	return nil
+	return s.prepare(ctx, kind, connection, payload, preview)
 }
 
 func (s *Service) PrepareDraft(ctx context.Context, connectionID, kind string, folder string, uid uint32, message model.SendMessage) (model.PreparedOperation, error) {
@@ -1406,28 +1431,50 @@ func (s *Service) execute(ctx context.Context, connection model.Connection, kind
 		if len(uids) == 0 {
 			return nil, fmt.Errorf("mail action requires uid or uids")
 		}
+		succeeded := make([]uint32, 0, len(uids))
+		failed := make([]map[string]any, 0)
 		if kind == "mail.mark" {
 			for _, uid := range uids {
-				precondition := action.Precondition
-				if len(action.Preconditions) > 0 {
-					precondition = action.Preconditions[uid]
+				precondition, ok := mailActionPrecondition(action, uid)
+				if !ok {
+					return nil, fmt.Errorf("missing precondition for uid %d", uid)
 				}
 				if err := postmail.SetFlagsContext(ctx, connection, action.Folder, uid, action.Seen, action.Flagged, precondition); err != nil {
-					return nil, err
+					failed = append(failed, map[string]any{"uid": uid, "error": err.Error()})
+					continue
 				}
+				succeeded = append(succeeded, uid)
 			}
-			return map[string]any{"updated": true, "count": len(uids)}, nil
+			result := map[string]any{"updated": len(failed) == 0, "count": len(succeeded), "uids": succeeded}
+			if len(failed) > 0 {
+				result["failed"] = failed
+				if len(succeeded) > 0 {
+					return result, &uncertainOperationError{message: fmt.Sprintf("updated %d message(s); %d failed", len(succeeded), len(failed))}
+				}
+				return nil, fmt.Errorf("mark failed for all %d message(s)", len(failed))
+			}
+			return result, nil
 		}
 		for _, uid := range uids {
-			precondition := action.Precondition
-			if len(action.Preconditions) > 0 {
-				precondition = action.Preconditions[uid]
+			precondition, ok := mailActionPrecondition(action, uid)
+			if !ok {
+				return nil, fmt.Errorf("missing precondition for uid %d", uid)
 			}
 			if err := postmail.MoveContext(ctx, connection, action.Folder, uid, action.Destination, precondition); err != nil {
-				return nil, err
+				failed = append(failed, map[string]any{"uid": uid, "error": err.Error()})
+				continue
 			}
+			succeeded = append(succeeded, uid)
 		}
-		return map[string]any{"moved": true, "destination": action.Destination, "count": len(uids)}, nil
+		result := map[string]any{"moved": len(failed) == 0, "destination": action.Destination, "count": len(succeeded), "uids": succeeded}
+		if len(failed) > 0 {
+			result["failed"] = failed
+			if len(succeeded) > 0 {
+				return result, &uncertainOperationError{message: fmt.Sprintf("moved %d message(s); %d failed", len(succeeded), len(failed))}
+			}
+			return nil, fmt.Errorf("move failed for all %d message(s)", len(failed))
+		}
+		return result, nil
 	case "mail.draft.create", "mail.draft.update", "mail.draft.delete":
 		var draft draftPayload
 		if err := json.Unmarshal(payload, &draft); err != nil {
@@ -2008,10 +2055,13 @@ func resolveMailConnection(connection model.Connection) (model.Connection, error
 	mailConfig := *connection.Mail
 	var err error
 	if mailConfig.ResolvedSecret == "" {
-		if mailConfig.Secret.Env != "" || mailConfig.Secret.Keychain != "" {
+		switch {
+		case validConfiguredSecret(mailConfig.Secret):
 			mailConfig.ResolvedSecret, err = config.ResolveSecret(mailConfig.Secret)
-		} else if mailConfig.SecretEnv != "" {
+		case mailConfig.SecretEnv != "":
 			mailConfig.ResolvedSecret, err = config.Secret(mailConfig.SecretEnv)
+		default:
+			err = fmt.Errorf("secret reference is not configured")
 		}
 	}
 	if err != nil || mailConfig.ResolvedSecret == "" {
@@ -2034,7 +2084,7 @@ func resolveCalendarConnection(connection model.Connection) (model.Connection, e
 		switch {
 		case calendarConfig.URL != "":
 			calendarConfig.ResolvedURL = calendarConfig.URL
-		case calendarConfig.URLSecret.Env != "" || calendarConfig.URLSecret.Keychain != "":
+		case validConfiguredSecret(calendarConfig.URLSecret):
 			calendarConfig.ResolvedURL, err = config.ResolveSecret(calendarConfig.URLSecret)
 		case calendarConfig.URLSecretEnv != "":
 			calendarConfig.ResolvedURL, err = config.Secret(calendarConfig.URLSecretEnv)
@@ -2054,6 +2104,10 @@ func resolveCalendarConnection(connection model.Connection) (model.Connection, e
 	}
 	connection.Calendar = &calendarConfig
 	return connection, nil
+}
+
+func validConfiguredSecret(ref model.SecretRef) bool {
+	return ref.Env != "" || ref.Keychain != "" || len(ref.Command) > 0
 }
 
 func attachmentPreviews(attachments []model.AttachmentInput) []map[string]any {
@@ -2244,13 +2298,13 @@ func (s *Service) UnreadCounts(ctx context.Context, selection model.Selector, fo
 			summaries = append(summaries, summary)
 			continue
 		}
-		result, searchErr := s.mailSearchContext(ctx, resolved, postmail.SearchOptions{Folder: summary.Folder, Unread: true, Limit: 1000})
-		if searchErr != nil {
-			summary.Error = searchErr.Error()
+		count, countErr := postmail.UnreadCountContext(ctx, resolved, summary.Folder)
+		if countErr != nil {
+			summary.Error = countErr.Error()
 			summaries = append(summaries, summary)
 			continue
 		}
-		summary.Unread = len(result.Messages)
+		summary.Unread = count
 		summaries = append(summaries, summary)
 	}
 	return summaries, nil

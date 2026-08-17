@@ -345,14 +345,23 @@ func (c *CLI) mail(ctx context.Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		if *extractText && strings.Contains(strings.ToLower(attachment.ContentType), "pdf") {
+		if *extractText {
+			if !strings.Contains(strings.ToLower(attachment.ContentType), "pdf") {
+				return fmt.Errorf("extract-text is only supported for PDF attachments")
+			}
 			text, extractErr := postmail.ExtractPDFText(data)
 			if extractErr != nil {
 				return extractErr
 			}
-			data = []byte(text)
-			attachment.ContentType = "text/plain; charset=utf-8"
-			attachment.Size = int64(len(data))
+			if *output == "-" {
+				_, err = c.stdout.Write([]byte(text))
+				return err
+			}
+			path, err := safeio.WriteFile(*output, []byte(text), *force)
+			if err != nil {
+				return err
+			}
+			return writeJSON(c.stdout, map[string]any{"attachment": attachment, "file": path, "extracted_text": true})
 		}
 		if *output == "-" {
 			_, err = c.stdout.Write(data)

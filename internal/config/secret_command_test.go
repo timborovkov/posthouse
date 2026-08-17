@@ -11,7 +11,7 @@ import (
 func TestResolveSecretCommand(t *testing.T) {
 	dir := t.TempDir()
 	script := filepath.Join(dir, "secret.sh")
-	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf 'command-secret-value'\n"), 0o700); err != nil {
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf 'command-secret-value\\nmetadata line\\n'\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	value, err := ResolveSecret(model.SecretRef{Command: []string{script}})
@@ -19,6 +19,22 @@ func TestResolveSecretCommand(t *testing.T) {
 		t.Fatal(err)
 	}
 	if value != "command-secret-value" {
+		t.Fatalf("got %q", value)
+	}
+}
+
+func TestResolveSecretCommandScrubsPosthouseEnv(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "secret.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nif printenv POSTHOUSE_CACHE_KEY >/dev/null 2>&1; then echo leaked; else echo ok-secret; fi\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("POSTHOUSE_CACHE_KEY", "should-not-leak")
+	value, err := ResolveSecret(model.SecretRef{Command: []string{script}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value != "ok-secret" {
 		t.Fatalf("got %q", value)
 	}
 }

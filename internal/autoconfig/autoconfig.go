@@ -66,9 +66,6 @@ func Probe(ctx context.Context, email string) (Result, error) {
 	}
 
 	if result.IMAP == nil && result.SMTP == nil && result.CalDAV == "" {
-		if len(result.Warnings) > 0 {
-			return result, fmt.Errorf("no IMAP, SMTP, or CalDAV endpoints discovered for %s", domain)
-		}
 		return result, fmt.Errorf("no IMAP, SMTP, or CalDAV endpoints discovered for %s", domain)
 	}
 	return result, nil
@@ -131,11 +128,7 @@ func probeSRV(ctx context.Context, domain string) (imapCfg *model.IMAPConfig, sm
 		}
 		host := strings.TrimSuffix(best.Target, ".")
 		address := net.JoinHostPort(host, fmt.Sprintf("%d", best.Port))
-		smtpCfg = &model.SMTPConfig{Address: address, TLS: item.secure && best.Port == 465, StartTLS: !item.secure || best.Port == 587}
-		if item.secure && best.Port == 465 {
-			smtpCfg.TLS = true
-			smtpCfg.StartTLS = false
-		}
+		smtpCfg = &model.SMTPConfig{Address: address, TLS: item.secure, StartTLS: !item.secure}
 		sources = append(sources, "srv:_"+item.service+"._tcp")
 		break
 	}
@@ -273,6 +266,9 @@ func probeCalDAV(ctx context.Context, domain string) (string, string, error) {
 		resolved, err := resp.Request.URL.Parse(location)
 		if err != nil {
 			return "", "", err
+		}
+		if !strings.EqualFold(resolved.Scheme, "https") {
+			return "", "", fmt.Errorf("caldav well-known redirected to non-HTTPS URL")
 		}
 		return resolved.String(), "well-known:caldav", nil
 	}

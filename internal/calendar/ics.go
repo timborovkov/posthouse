@@ -814,17 +814,20 @@ func resolveFeedURL(connection model.Connection) (string, error) {
 	if feedURL == "" {
 		feedURL = connection.Calendar.URL
 	}
-	if connection.Calendar.ResolvedURL == "" && (connection.Calendar.URLSecret.Env != "" || connection.Calendar.URLSecret.Keychain != "") {
-		var err error
-		feedURL, err = config.ResolveSecret(connection.Calendar.URLSecret)
-		if err != nil {
-			return "", err
-		}
-	} else if connection.Calendar.ResolvedURL == "" && connection.Calendar.URLSecretEnv != "" {
-		var err error
-		feedURL, err = config.Secret(connection.Calendar.URLSecretEnv)
-		if err != nil {
-			return "", err
+	if connection.Calendar.ResolvedURL == "" {
+		switch {
+		case connection.Calendar.URLSecret.Env != "" || connection.Calendar.URLSecret.Keychain != "" || len(connection.Calendar.URLSecret.Command) > 0:
+			var err error
+			feedURL, err = config.ResolveSecret(connection.Calendar.URLSecret)
+			if err != nil {
+				return "", err
+			}
+		case connection.Calendar.URLSecretEnv != "":
+			var err error
+			feedURL, err = config.Secret(connection.Calendar.URLSecretEnv)
+			if err != nil {
+				return "", err
+			}
 		}
 	}
 	parsed, err := url.Parse(feedURL)

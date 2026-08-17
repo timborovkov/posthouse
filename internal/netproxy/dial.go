@@ -1,12 +1,16 @@
 // Package netproxy dials TCP through optional SOCKS5/HTTP proxies.
 // When no explicit proxy is set, ALL_PROXY / HTTPS_PROXY / HTTP_PROXY are honored.
+// Loopback targets and NO_PROXY matches bypass the environment proxy.
 package netproxy
 
 import (
+	"bufio"
 	"context"
+	"crypto/tls"
 	"encoding/base64"
 	"fmt"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"strings"
@@ -19,6 +23,9 @@ import (
 func DialTCP(ctx context.Context, address, proxyURL string) (net.Conn, error) {
 	proxyURL = strings.TrimSpace(proxyURL)
 	if proxyURL == "" {
+		if bypassProxy(address) {
+			return dialDirect(ctx, address)
+		}
 		proxyURL = firstEnv("ALL_PROXY", "all_proxy", "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy")
 	}
 	dialer := &net.Dialer{Timeout: 30 * time.Second}
@@ -44,17 +51,24 @@ func DialTCP(ctx context.Context, address, proxyURL string) (net.Conn, error) {
 			return contextDialer.DialContext(ctx, "tcp", address)
 		}
 		return socks.Dial("tcp", address)
-	case "http", "https":
-		return dialHTTPConnect(ctx, dialer, parsed, address)
+	case "http":
+		return dialHTTPConnect(ctx, dialer, parsed, address, false)
+	case "https":
+		return dialHTTPConnect(ctx, dialer, parsed, address, true)
 	default:
 		return nil, fmt.Errorf("unsupported proxy scheme %q (use socks5:// or http://)", parsed.Scheme)
 	}
 }
 
-func dialHTTPConnect(ctx context.Context, dialer *net.Dialer, proxyURL *url.URL, address string) (net.Conn, error) {
+func dialDirect(ctx context.Context, address string) (net.Conn, error) {
+	dialer := &net.Dialer{Timeout: 30 * time.Second}
+	return dialer.DialContext(ctx, "tcp", address)
+}
+
+func dialHTTPConnect(ctx context.Context, dialer *net.Dialer, proxyURL *url.URL, address string, useTLS bool) (net.Conn, error) {
 	proxyHost := proxyURL.Host
 	if !strings.Contains(proxyHost, ":") {
-		if proxyURL.Scheme == "https" {
+		if useTLS {
 			proxyHost += ":443"
 		} else {
 			proxyHost += ":80"
@@ -69,30 +83,99 @@ func dialHTTPConnect(ctx context.Context, dialer *net.Dialer, proxyURL *url.URL,
 		deadline = contextDeadline
 	}
 	_ = connection.SetDeadline(deadline)
-	request := fmt.Sprintf("CONNECT %s HTTP/1.1\r\nHost: %s\r\n", address, address)
+
+	var transport net.Conn = connection
+	if useTLS {
+		serverName := proxyURL.Hostname()
+		tlsConn := tls.Client(connection, &tls.Config{MinVersion: tls.VersionTLS12, ServerName: serverName})
+		if err := tlsConn.HandshakeContext(ctx); err != nil {
+			_ = connection.Close()
+			return nil, fmt.Errorf("TLS handshake with HTTPS proxy: %w", err)
+		}
+		transport = tlsConn
+	}
+
+	request := &http.Request{
+		Method: http.MethodConnect,
+		URL:    &url.URL{Opaque: address},
+		Host:   address,
+		Header: make(http.Header),
+	}
 	if proxyURL.User != nil {
 		password, _ := proxyURL.User.Password()
 		token := base64.StdEncoding.EncodeToString([]byte(proxyURL.User.Username() + ":" + password))
-		request += "Proxy-Authorization: Basic " + token + "\r\n"
+		request.Header.Set("Proxy-Authorization", "Basic "+token)
 	}
-	request += "\r\n"
-	if _, err := connection.Write([]byte(request)); err != nil {
-		_ = connection.Close()
+	if err := request.Write(transport); err != nil {
+		_ = transport.Close()
 		return nil, fmt.Errorf("write HTTP CONNECT: %w", err)
 	}
-	buffer := make([]byte, 1024)
-	n, err := connection.Read(buffer)
+	reader := bufio.NewReader(transport)
+	response, err := http.ReadResponse(reader, request)
 	if err != nil {
-		_ = connection.Close()
+		_ = transport.Close()
 		return nil, fmt.Errorf("read HTTP CONNECT response: %w", err)
 	}
-	statusLine := string(buffer[:n])
-	if !strings.Contains(statusLine, " 200 ") && !strings.HasPrefix(statusLine, "HTTP/1.1 200") && !strings.HasPrefix(statusLine, "HTTP/1.0 200") {
-		_ = connection.Close()
-		return nil, fmt.Errorf("HTTP CONNECT failed: %s", strings.Split(statusLine, "\r\n")[0])
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		_ = transport.Close()
+		return nil, fmt.Errorf("HTTP CONNECT failed: %s", response.Status)
 	}
-	_ = connection.SetDeadline(time.Time{})
-	return connection, nil
+	_ = transport.SetDeadline(time.Time{})
+	return &bufferedConn{Conn: transport, reader: reader}, nil
+}
+
+type bufferedConn struct {
+	net.Conn
+	reader *bufio.Reader
+}
+
+func (c *bufferedConn) Read(p []byte) (int, error) {
+	if c.reader != nil && c.reader.Buffered() > 0 {
+		return c.reader.Read(p)
+	}
+	return c.Conn.Read(p)
+}
+
+func (c *bufferedConn) Close() error {
+	return c.Conn.Close()
+}
+
+func bypassProxy(address string) bool {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		host = address
+	}
+	host = strings.Trim(host, "[]")
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		return true
+	}
+	noProxy := firstEnv("NO_PROXY", "no_proxy")
+	if noProxy == "" {
+		return false
+	}
+	for _, entry := range strings.Split(noProxy, ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		if entry == "*" {
+			return true
+		}
+		if strings.EqualFold(entry, host) {
+			return true
+		}
+		if strings.HasPrefix(entry, ".") && strings.HasSuffix(strings.ToLower(host), strings.ToLower(entry)) {
+			return true
+		}
+		if strings.HasSuffix(strings.ToLower(host), "."+strings.ToLower(entry)) {
+			return true
+		}
+	}
+	return false
 }
 
 func firstEnv(keys ...string) string {
