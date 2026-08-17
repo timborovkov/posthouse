@@ -13,14 +13,59 @@ MCP, REST, and an optional terminal UI. Free and open source under MIT.
 
 ![Posthouse TUI unified inbox with demo work and personal messages](docs/images/tui-inbox.png)
 
-IMAP/SMTP, CalDAV, and read-only ICS feeds today. Native Gmail and Microsoft
-sign-in are on the roadmap. Recipients are raw addresses; there is no contacts
-registry. The TUI is optional — config, CLI, and MCP cover every operation.
+Built by [Tim Borovkov](https://timb.dev). Landing + privacy pages:
+[`website/`](./website/).
 
-Built by [Tim Borovkov](https://timb.dev). Site and privacy pages for OAuth
-verification live in [`website/`](./website/).
+v0.2. IMAP/SMTP, CalDAV, and ICS feeds today. OAuth / native Gmail and
+Microsoft are on the roadmap — see [TODO.md](./TODO.md).
 
-v0.2. No OAuth yet. See [TODO.md](./TODO.md).
+## Features
+
+### Connections and selectors
+
+| Idea | What it does |
+| --- | --- |
+| **Multiple connections** | Several mailboxes and calendars in one config (work + personal + …). |
+| **Category** | One broad grouping per connection: `work` or `personal`. |
+| **Labels** | Free markers you choose (`acme`, `finance`, `primary`) to select across connections. |
+| **Capabilities** | What each connection can do: `mail.read`, `mail.send`, `calendar.read`, `calendar.write`. |
+| **Selector** | Scope a read by connection IDs, category, labels, and/or capability. |
+| **Identity** | The From name/address used when that connection acts externally. |
+
+Reads may fan out across a selector. Every write targets **exactly one**
+connection, with a ten-minute prepare → preview → execute flow.
+
+### Mail
+
+| Action | Notes |
+| --- | --- |
+| List / search | Unified inbox; filter by category, label, unread, query. |
+| Get / attachments | Full message body; save attachments locally. |
+| Send | Text or HTML (`--html` / `--html-file`); optional CC/BCC and file attachments. |
+| Reply / forward | Prepare-then-execute; same preview safety. |
+| Drafts | Create, update, delete. |
+| Mark / move / archive / trash | Folder actions on one connection. |
+
+### Calendar
+
+| Action | Notes |
+| --- | --- |
+| List / get | Across CalDAV collections and read-only ICS feeds. |
+| Create / update / delete | CalDAV writes with ETag checks; prepare-then-execute. |
+| Portable ICS | Generate invitation/cancel files without a provider write. |
+| Discover | Pull folders and calendar collections into config. |
+
+### How you use it
+
+| Surface | Best for |
+| --- | --- |
+| **CLI** | Scripts and JSON output (`posthouse mail search`, …). |
+| **TUI** | Keyboard-first daily loop; optional — same operations as CLI/MCP. |
+| **MCP** | Local `stdio` or Streamable HTTP for Claude, Cursor, Codex, Hermes, … |
+| **REST** | `/v1` on a personal `posthouse serve` (access key required). |
+| **Agent skills** | `posthouse skill install --agent …` ships CLI / MCP / REST skill files. |
+
+Recipients are raw addresses (no contacts registry). The TUI is optional.
 
 ## Install
 
@@ -29,11 +74,14 @@ go install github.com/timborovkov/posthouse/cmd/posthouse@latest
 posthouse tui
 ```
 
-Non-technical path (first connection, agents, private server):
+First connection, agents, Docker, Railway:
 [GETTING-STARTED.md](./GETTING-STARTED.md).
 
-Full CLI, MCP, REST, Docker, and Railway:
+Full CLI, MCP, REST, and deploy detail:
 [INSTALLATION-AND-USAGE-GUIDE.md](./INSTALLATION-AND-USAGE-GUIDE.md).
+
+Agent-oriented setup on the site: [website/#setup](./website/index.html#setup)
+(Claude, Codex, Hermes, Cursor, Railway).
 
 ## Develop
 

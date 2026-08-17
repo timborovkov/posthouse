@@ -64,7 +64,9 @@
     <header class="wrap site-header">
       <a class="brand" href="/">POSTHOUSE</a>
       <nav class="nav" aria-label="Primary">
+        <a href="#features">Features</a>
         <a href="#connect">Connect</a>
+        <a href="#setup">Setup</a>
         <a href="#install">Install</a>
         <a href="privacy.html">Privacy</a>
         <a href="https://github.com/timborovkov/posthouse">GitHub</a>
@@ -84,7 +86,7 @@
         </p>
         <div class="cta-row">
           <a class="btn btn-primary" href="https://github.com/timborovkov/posthouse">View on GitHub</a>
-          <a class="btn btn-ghost" href="#install">Install</a>
+          <a class="btn btn-ghost" href="#setup">Agent setup</a>
           <a class="btn btn-ghost" href="privacy.html">Privacy</a>
         </div>
         <img
@@ -97,6 +99,159 @@
         <p class="shot-caption">
           Optional terminal UI. CLI, MCP, and REST cover the same operations.
         </p>
+      </section>
+
+      <section class="wrap section" id="features" aria-labelledby="features-title">
+        <h2 id="features-title">What you get</h2>
+        <p>
+          Multiple mail and calendar connections in one place, with selectors
+          for category and labels — then the same operations from CLI, TUI, MCP,
+          or REST.
+        </p>
+
+        <h3>Connections and selectors</h3>
+        <div class="table-wrap">
+          <table class="feat">
+            <thead>
+              <tr>
+                <th scope="col">Idea</th>
+                <th scope="col">What it does</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Multiple connections</td>
+                <td>Several mailboxes and calendars in one config (work + personal + …).</td>
+              </tr>
+              <tr>
+                <td>Category</td>
+                <td>One broad grouping per connection: <code>work</code> or <code>personal</code>.</td>
+              </tr>
+              <tr>
+                <td>Labels</td>
+                <td>Free markers you choose (<code>acme</code>, <code>finance</code>, <code>primary</code>) to select across connections.</td>
+              </tr>
+              <tr>
+                <td>Capabilities</td>
+                <td><code>mail.read</code>, <code>mail.send</code>, <code>calendar.read</code>, <code>calendar.write</code>.</td>
+              </tr>
+              <tr>
+                <td>Selector</td>
+                <td>Scope a read by connection IDs, category, labels, and/or capability.</td>
+              </tr>
+              <tr>
+                <td>Identity</td>
+                <td>The From name/address used when that connection acts externally.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="note">
+          Reads may fan out. Writes always target exactly one connection, with
+          prepare → preview → execute (ten-minute token).
+        </p>
+
+        <h3>Mail</h3>
+        <div class="table-wrap">
+          <table class="feat">
+            <thead>
+              <tr>
+                <th scope="col">Action</th>
+                <th scope="col">Notes</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>List / search</td>
+                <td>Unified inbox; filter by category, label, unread, query.</td>
+              </tr>
+              <tr>
+                <td>Get / attachments</td>
+                <td>Full message body; save attachments locally.</td>
+              </tr>
+              <tr>
+                <td>Send</td>
+                <td>Text or HTML; optional CC/BCC and file attachments.</td>
+              </tr>
+              <tr>
+                <td>Reply / forward</td>
+                <td>Same prepare-then-execute safety as send.</td>
+              </tr>
+              <tr>
+                <td>Drafts</td>
+                <td>Create, update, delete.</td>
+              </tr>
+              <tr>
+                <td>Mark / move / archive / trash</td>
+                <td>Folder actions on one connection.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3>Calendar</h3>
+        <div class="table-wrap">
+          <table class="feat">
+            <thead>
+              <tr>
+                <th scope="col">Action</th>
+                <th scope="col">Notes</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>List / get</td>
+                <td>Across CalDAV collections and read-only ICS feeds.</td>
+              </tr>
+              <tr>
+                <td>Create / update / delete</td>
+                <td>CalDAV writes with ETag checks; prepare-then-execute.</td>
+              </tr>
+              <tr>
+                <td>Portable ICS</td>
+                <td>Generate invitation/cancel files without a provider write.</td>
+              </tr>
+              <tr>
+                <td>Discover</td>
+                <td>Pull folders and calendar collections into config.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3>How you run it</h3>
+        <div class="table-wrap">
+          <table class="feat">
+            <thead>
+              <tr>
+                <th scope="col">Surface</th>
+                <th scope="col">Best for</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>CLI</td>
+                <td>Scripts and JSON output (<code>posthouse mail search</code>, …).</td>
+              </tr>
+              <tr>
+                <td>TUI</td>
+                <td>Keyboard-first daily loop; optional — same operations as CLI/MCP.</td>
+              </tr>
+              <tr>
+                <td>MCP</td>
+                <td>Local <code>stdio</code> or Streamable HTTP for Claude, Cursor, Codex, Hermes, …</td>
+              </tr>
+              <tr>
+                <td>REST</td>
+                <td><code>/v1</code> on a personal <code>posthouse serve</code> (access key required).</td>
+              </tr>
+              <tr>
+                <td>Agent skills</td>
+                <td><code>posthouse skill install --agent …</code> ships CLI / MCP / REST skill files.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
       </section>
 
       <section class="wrap section" id="connect" aria-labelledby="connect-title">
@@ -129,21 +284,113 @@
               <a href="privacy.html">privacy policy</a>.
             </p>
           </li>
-          <li>
-            <h3>Agents via MCP</h3>
-            <p>
-              Point Claude, Cursor, Codex, Hermes, or another MCP client at
-              Posthouse. Message content leaves your machine only when you ask
-              an agent to read it.
-            </p>
-          </li>
         </ul>
         <p class="note">
-          Setup walkthrough:
+          Walkthrough:
           <a href="https://github.com/timborovkov/posthouse/blob/main/GETTING-STARTED.md"
             >Getting started</a
           >.
         </p>
+      </section>
+
+      <section class="wrap section" id="setup" aria-labelledby="setup-title">
+        <h2 id="setup-title">Setup with agents &amp; deploy</h2>
+        <p>
+          Install the binary (or run Docker), add a connection, then teach your
+          agent with skills and/or MCP. Full detail lives in the
+          <a href="https://github.com/timborovkov/posthouse/blob/main/GETTING-STARTED.md"
+            >repo guide</a
+          >.
+        </p>
+
+        <div class="setup-block" id="setup-skills">
+          <h3>Agent skills (any of the agents below)</h3>
+          <p>
+            Skills teach CLI, MCP, and REST — including prepare-before-execute.
+            <code>--agent</code> accepts <code>claude</code>, <code>cursor</code>,
+            <code>codex</code>, or <code>hermes</code>.
+          </p>
+          <pre><code>posthouse skill install --agent claude --all
+posthouse skill list</code></pre>
+        </div>
+
+        <div class="setup-block" id="setup-claude">
+          <h3>Claude</h3>
+          <p>
+            Install skills into Claude’s skill folder, and/or register local MCP
+            stdio in your MCP client config:
+          </p>
+          <pre><code>posthouse skill install --agent claude --all
+
+# MCP client snippet (stdio — no access key)
+{
+  "mcpServers": {
+    "posthouse": {
+      "command": "/absolute/path/to/posthouse",
+      "args": ["mcp", "stdio"]
+    }
+  }
+}</code></pre>
+        </div>
+
+        <div class="setup-block" id="setup-codex">
+          <h3>Codex</h3>
+          <p>Same skills + MCP pattern; point Codex at the skill install and stdio server:</p>
+          <pre><code>posthouse skill install --agent codex --all
+posthouse mcp stdio</code></pre>
+        </div>
+
+        <div class="setup-block" id="setup-hermes">
+          <h3>Hermes</h3>
+          <p>
+            Hermes uses the same MCP tools (<code>messages_search</code>,
+            prepare/execute, …). Install the Hermes skills, then attach stdio or
+            a remote <code>/mcp</code> URL with your access key.
+          </p>
+          <pre><code>posthouse skill install --agent hermes --all
+# Local: posthouse mcp stdio
+# Remote: https://your-host/mcp  +  Authorization: Bearer &lt;POSTHOUSE_ACCESS_KEY&gt;</code></pre>
+        </div>
+
+        <div class="setup-block" id="setup-cursor">
+          <h3>Cursor</h3>
+          <p>Install Cursor skills and add Posthouse as an MCP server (stdio or HTTP):</p>
+          <pre><code>posthouse skill install --agent cursor --all</code></pre>
+        </div>
+
+        <div class="setup-block" id="setup-railway">
+          <h3>Deploy on Railway</h3>
+          <p>
+            Still <em>your</em> process — not a Posthouse cloud. Create a service
+            from the GitHub repo; <code>railway.json</code> builds the Dockerfile
+            and health-checks <code>/healthz</code>.
+          </p>
+          <pre><code># 1. Attach a volume at /data
+# 2. Set env:
+POSTHOUSE_CACHE_KEY=…
+POSTHOUSE_ACCESS_KEY=…   # ≥16 chars
+POSTHOUSE_TRUST_PROXY=1
+# plus provider app-password variables
+
+# 3. Point MCP/REST clients at:
+#    https://your-railway-url/mcp
+#    https://your-railway-url/v1
+# with Authorization: Bearer &lt;POSTHOUSE_ACCESS_KEY&gt;</code></pre>
+          <p>
+            Railway injects <code>PORT</code>; the start command already passes
+            <code>--allow-container-listener</code>. Keep bearer auth on.
+          </p>
+        </div>
+
+        <div class="setup-block" id="setup-docker">
+          <h3>Docker Compose (VPS / homelab)</h3>
+          <pre><code>git clone https://github.com/timborovkov/posthouse
+cd posthouse
+posthouse setup --write-env .env
+# add provider secrets to .env
+docker compose up --build
+# listens on 127.0.0.1:8791 — put TLS in front for remote access</code></pre>
+        </div>
       </section>
 
       <section class="wrap section" id="install" aria-labelledby="install-title">
@@ -154,8 +401,7 @@ posthouse tui</code></pre>
         <p class="note">
           Or clone the
           <a href="https://github.com/timborovkov/posthouse">repository</a>
-          and run <code>make build</code>. Docker and private-server deploy notes
-          are in the repo docs.
+          and run <code>make build</code>.
         </p>
       </section>
 

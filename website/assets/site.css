@@ -221,6 +221,82 @@ a:hover {
   font-size: 0.95rem;
 }
 
+.section h3 {
+  margin: 1.75rem 0 0.55rem;
+  font-size: 1.05rem;
+  letter-spacing: -0.01em;
+}
+
+.section h3:first-of-type {
+  margin-top: 0.25rem;
+}
+
+.table-wrap {
+  overflow-x: auto;
+  margin: 0 0 0.5rem;
+}
+
+.feat {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.95rem;
+}
+
+.feat th,
+.feat td {
+  padding: 0.65rem 0.75rem;
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid var(--line);
+}
+
+.feat th {
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+  border-bottom-color: rgba(28, 36, 48, 0.18);
+}
+
+.feat td:first-child {
+  font-family: var(--mono);
+  font-size: 0.88rem;
+  font-weight: 600;
+  white-space: nowrap;
+  width: 28%;
+}
+
+.feat td:last-child {
+  color: var(--muted);
+}
+
+.setup-block {
+  margin: 0 0 1.75rem;
+  padding: 0 0 1.5rem;
+  border-bottom: 1px solid rgba(28, 36, 48, 0.08);
+}
+
+.setup-block:last-of-type {
+  border-bottom: none;
+  margin-bottom: 0;
+  padding-bottom: 0;
+}
+
+.setup-block h3 {
+  margin-top: 0;
+  font-family: var(--mono);
+  font-size: 0.98rem;
+}
+
+.setup-block p {
+  margin: 0 0 0.75rem;
+  max-width: 42rem;
+  color: var(--muted);
+  font-size: 0.98rem;
+}
+
 pre,
 code {
   font-family: var(--mono);
@@ -235,6 +311,10 @@ pre {
   background: var(--panel);
   font-size: 0.9rem;
   line-height: 1.45;
+}
+
+.setup-block pre {
+  margin-top: 0.35rem;
 }
 
 .site-footer {
