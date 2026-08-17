@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Posthouse — local mail &amp; calendar switchboard</title>
+    <meta
+      name="description"
+      content="Posthouse is a free, open-source, local-first CLI, MCP server, REST API, and terminal UI for multiple mail and calendar connections. Run it on your machine — not a hosted SaaS."
+    />
+    <meta name="author" content="Tim Borovkov" />
+    <meta name="robots" content="index,follow" />
+    <link rel="canonical" href="https://posthouse.timb.dev/" />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Posthouse" />
+    <meta property="og:title" content="Posthouse — local mail &amp; calendar switchboard" />
+    <meta
+      property="og:description"
+      content="One local switchboard for mail, calendars, and agents. Free and open source. You run it; nothing is hosted by Posthouse."
+    />
+    <meta property="og:url" content="https://posthouse.timb.dev/" />
+    <meta property="og:image" content="https://posthouse.timb.dev/assets/tui-inbox.png" />
+    <meta property="og:image:alt" content="Posthouse terminal UI showing a unified inbox" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Posthouse — local mail &amp; calendar switchboard" />
+    <meta
+      name="twitter:description"
+      content="Free, open-source, local-first mail and calendar tool for people and agents."
+    />
+    <meta name="twitter:image" content="https://posthouse.timb.dev/assets/tui-inbox.png" />
+    <link rel="stylesheet" href="assets/site.css" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@500;700&family=Sora:wght@400;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "SoftwareApplication",
+        "name": "Posthouse",
+        "applicationCategory": "UtilitiesApplication",
+        "operatingSystem": "Linux, macOS, Windows",
+        "offers": {
+          "@type": "Offer",
+          "price": "0",
+          "priceCurrency": "USD"
+        },
+        "license": "https://opensource.org/licenses/MIT",
+        "url": "https://posthouse.timb.dev/",
+        "codeRepository": "https://github.com/timborovkov/posthouse",
+        "description": "Personal, local-first CLI, MCP server, REST API, and terminal UI for multiple mail and calendar connections.",
+        "author": {
+          "@type": "Person",
+          "name": "Tim Borovkov",
+          "url": "https://timb.dev"
+        },
+        "isAccessibleForFree": true
+      }
+    </script>
+  </head>
+  <body>
+    <header class="wrap site-header">
+      <a class="brand" href="/">POSTHOUSE</a>
+      <nav class="nav" aria-label="Primary">
+        <a href="#connect">Connect</a>
+        <a href="#install">Install</a>
+        <a href="privacy.html">Privacy</a>
+        <a href="https://github.com/timborovkov/posthouse">GitHub</a>
+        <a href="https://timb.dev">timb.dev</a>
+      </nav>
+    </header>
+
+    <main>
+      <section class="wrap hero" aria-labelledby="hero-brand">
+        <p class="hero-brand" id="hero-brand">POSTHOUSE</p>
+        <h1>One local switchboard for mail, calendars, and agents.</h1>
+        <p class="lede">
+          Free and open source. Posthouse gives you — and the agents that help
+          you — one language across separate mailboxes and calendars. Search
+          across connections; every write is previewed, then run on exactly one.
+          You install it. There is no Posthouse cloud.
+        </p>
+        <div class="cta-row">
+          <a class="btn btn-primary" href="https://github.com/timborovkov/posthouse">View on GitHub</a>
+          <a class="btn btn-ghost" href="#install">Install</a>
+          <a class="btn btn-ghost" href="privacy.html">Privacy</a>
+        </div>
+        <img
+          class="shot"
+          src="assets/tui-inbox.png"
+          width="1280"
+          height="720"
+          alt="Posthouse terminal UI: unified inbox with work and personal demo messages"
+        />
+        <p class="shot-caption">
+          Optional terminal UI. CLI, MCP, and REST cover the same operations.
+        </p>
+      </section>
+
+      <section class="wrap section" id="connect" aria-labelledby="connect-title">
+        <h2 id="connect-title">How to connect</h2>
+        <p>
+          Posthouse talks to providers you already use. Credentials stay on your
+          machine (OS keychain or an environment variable you set).
+        </p>
+        <ul class="connect-list">
+          <li>
+            <h3>IMAP / SMTP</h3>
+            <p>
+              Generic mail for Fastmail, iCloud, Proton Bridge, and similar.
+              Use a provider app password, not your login password.
+            </p>
+          </li>
+          <li>
+            <h3>CalDAV &amp; ICS feeds</h3>
+            <p>
+              Mutable CalDAV calendars plus read-only iCalendar subscription
+              URLs. Discovery picks the collections you want.
+            </p>
+          </li>
+          <li>
+            <h3>Gmail &amp; Microsoft (coming)</h3>
+            <p>
+              Native OAuth sign-in in the browser on your device — no Google
+              Cloud or Entra project for you to create. Tokens stay local.
+              Required for that: this site’s
+              <a href="privacy.html">privacy policy</a>.
+            </p>
+          </li>
+          <li>
+            <h3>Agents via MCP</h3>
+            <p>
+              Point Claude, Cursor, Codex, Hermes, or another MCP client at
+              Posthouse. Message content leaves your machine only when you ask
+              an agent to read it.
+            </p>
+          </li>
+        </ul>
+        <p class="note">
+          Setup walkthrough:
+          <a href="https://github.com/timborovkov/posthouse/blob/main/GETTING-STARTED.md"
+            >Getting started</a
+          >.
+        </p>
+      </section>
+
+      <section class="wrap section" id="install" aria-labelledby="install-title">
+        <h2 id="install-title">Install</h2>
+        <p>Go 1.26.6 or newer:</p>
+        <pre><code>go install github.com/timborovkov/posthouse/cmd/posthouse@latest
+posthouse tui</code></pre>
+        <p class="note">
+          Or clone the
+          <a href="https://github.com/timborovkov/posthouse">repository</a>
+          and run <code>make build</code>. Docker and private-server deploy notes
+          are in the repo docs.
+        </p>
+      </section>
+
+      <section class="wrap section" id="about" aria-labelledby="about-title">
+        <h2 id="about-title">Local and personal</h2>
+        <p>
+          Posthouse is personal software under the
+          <a href="https://github.com/timborovkov/posthouse/blob/main/LICENSE">MIT License</a>.
+          Mail and calendar data live in a local encrypted cache you control.
+          There is no backend that receives your mailbox. See
+          <a href="privacy.html">Privacy</a> for the full statement used with
+          Google and Microsoft OAuth verification.
+        </p>
+      </section>
+    </main>
+
+    <footer class="wrap site-footer">
+      <p>
+        Built by
+        <a href="https://timb.dev">Tim Borovkov</a>
+        ·
+        <a href="https://github.com/timborovkov/posthouse">github.com/timborovkov/posthouse</a>
+        · free &amp; open source (MIT)
+      </p>
+      <p>
+        <a href="privacy.html">Privacy</a>
+        · not affiliated with Google or Microsoft
+      </p>
+    </footer>
+  </body>
+</html>

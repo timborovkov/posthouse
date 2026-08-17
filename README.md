@@ -3,20 +3,24 @@
 [![CI](https://github.com/timborovkov/posthouse/actions/workflows/ci.yml/badge.svg)](https://github.com/timborovkov/posthouse/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Personal, local-first CLI, MCP server, REST API, and terminal app for multiple
-mail and calendar connections. IMAP/SMTP, CalDAV, and read-only ICS feeds.
-Reads can span connections; every write is previewed, then executed on exactly
-one connection. It is not a hosted SaaS: you run it on your laptop or on a
-machine you control.
+**One local switchboard for mail, calendars, and agents.**
 
-Send text or HTML (`--html` / `--html-file`, MCP `html`, TUI body type). The
-TUI is optional: config, CLI, and MCP already cover every operation.
-Recipients are raw addresses; there is no contacts registry.
+You juggle work and personal mailboxes, a few calendars, and maybe an agent
+that needs to read them. Providers do not speak the same language. Posthouse
+does: search across connections, then preview and execute every write on
+exactly one. It is personal software you run on a machine you control — CLI,
+MCP, REST, and an optional terminal UI. Free and open source under MIT.
 
-Built by [Tim Borovkov](https://timb.dev). Free to use under the
-[MIT License](LICENSE).
+![Posthouse TUI unified inbox with demo work and personal messages](docs/images/tui-inbox.png)
 
-v0.2. No OAuth, no native Gmail/Microsoft APIs. See [TODO.md](./TODO.md).
+IMAP/SMTP, CalDAV, and read-only ICS feeds today. Native Gmail and Microsoft
+sign-in are on the roadmap. Recipients are raw addresses; there is no contacts
+registry. The TUI is optional — config, CLI, and MCP cover every operation.
+
+Built by [Tim Borovkov](https://timb.dev). Site and privacy pages for OAuth
+verification live in [`website/`](./website/).
+
+v0.2. No OAuth yet. See [TODO.md](./TODO.md).
 
 ## Install
 
