@@ -25,6 +25,15 @@ go install github.com/timborovkov/posthouse/cmd/posthouse@latest
 posthouse tui
 ```
 
+Teach a local agent (Codex, Claude, Cursor, Hermes):
+
+```sh
+posthouse skill install --agent codex --all
+posthouse skill list
+```
+
+Skills cover connections, mail, calendar, plus MCP/REST when you use those transports.
+
 Non-technical path (first connection, agents, private server):
 [GETTING-STARTED.md](./GETTING-STARTED.md).
 

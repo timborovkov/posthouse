@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/timborovkov/posthouse/skills"
 )
@@ -21,28 +22,33 @@ func TestListAndInstallSelectedSkills(t *testing.T) {
 		if info.Description == "" || !strings.HasPrefix(info.Name, "posthouse-") {
 			t.Fatalf("skill %#v", info)
 		}
+		if utf8.RuneCountInString(info.Description) > 300 {
+			t.Fatalf("description too long for %s (%d runes)", info.ID, utf8.RuneCountInString(info.Description))
+		}
 	}
 
 	dir := t.TempDir()
-	installed, err := Install(dir, []string{"email-send", "posthouse-rest"})
+	installed, err := Install(dir, []string{"mail", "posthouse-rest"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(installed) != 2 {
 		t.Fatalf("installed = %#v", installed)
 	}
-	body, err := os.ReadFile(filepath.Join(dir, "posthouse-email-send", "SKILL.md"))
+	body, err := os.ReadFile(filepath.Join(dir, "posthouse-mail", "SKILL.md"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(body), "prepared operation") && !strings.Contains(string(body), "Prepared operation") {
-		t.Fatalf("email-send skill body = %s", body)
+	if !strings.Contains(string(body), "prepared operation") {
+		t.Fatalf("mail skill body = %s", body)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "posthouse-mcp", "SKILL.md")); !os.IsNotExist(err) {
 		t.Fatalf("mcp skill should not have been installed: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(dir, "posthouse-cli", "SKILL.md")); !os.IsNotExist(err) {
-		t.Fatalf("legacy cli skill should not exist: %v", err)
+	for _, legacy := range []string{"cli", "email-inboxes", "email-send"} {
+		if _, err := os.Stat(filepath.Join(dir, "posthouse-"+legacy, "SKILL.md")); !os.IsNotExist(err) {
+			t.Fatalf("legacy skill %s should not exist: %v", legacy, err)
+		}
 	}
 
 	if _, err := Install(dir, []string{"nope"}); err == nil || !strings.Contains(err.Error(), "unknown skill") {

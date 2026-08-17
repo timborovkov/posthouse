@@ -1,34 +1,34 @@
 ---
 name: posthouse-connections
-description: Add, label, update, discover, doctor, or remove Posthouse connections via the local CLI. Use when setting up IMAP/SMTP/CalDAV/ICS, changing labels or category, rotating secrets, or troubleshooting a connection — not for reading or sending mail.
+description: Manage Posthouse connections via CLI (add, label, update, remove, discover, doctor). Use for IMAP/SMTP/CalDAV setup — not mail or calendar work.
 ---
 
 # Posthouse connections
 
-Guide connection **management** on a machine that can run `posthouse`. Do not use this skill for inbox search or calendar agenda; use `posthouse-email-inboxes`, `posthouse-email-send`, or `posthouse-calendar`.
+Guide connection **management** on a machine that can run `posthouse`. Mail → `posthouse-mail`. Calendar → `posthouse-calendar`.
 
 ## Vocabulary
 
-- **Connection**: one authenticated provider endpoint (mail and/or calendar). Never say account or inbox.
-- **Category**: single grouping such as `work` or `personal`.
-- **Label**: free marker for selectors (`acme`, `primary`, finance). Changing labels is how you “tag” a connection.
+- **Connection**: one authenticated provider endpoint. Never say account or inbox.
+- **Category**: `work` / `personal` (one per connection).
+- **Label**: free markers for selectors (`acme`, `primary`). Labels are how you “tag” a connection.
 - **Capability**: `mail.read`, `mail.send`, `calendar.read`, `calendar.write`.
 
-Never log, print, or commit passwords, keychain values, `POSTHOUSE_CACHE_KEY`, or access keys.
+Never log passwords, keychain values, `POSTHOUSE_CACHE_KEY`, or access keys.
 
-## List and select
+## List
 
 ```sh
 posthouse connection list
 posthouse connection list --category work --label primary --capability mail.read
 ```
 
-Pass `--cursor` from `next_cursor` with the same filters. Output is redacted JSON (no secret values or env names for secrets on doctor/list paths that omit them — still never paste live passwords).
+Pass `--cursor` from `next_cursor` with the same filters.
 
-## Add a connection
+## Add
 
-1. Ask the user for hosts, address, category, labels, and where the app password lives (env var name or keychain entry). Prefer an **app password**, not their normal login.
-2. Write a JSON file from their answers (do not embed the password in the file):
+1. Collect hosts, address, category, labels, and secret location (env name or keychain). Prefer an **app password**.
+2. Write JSON with secrets as refs only — never embed the password:
 
 ```json
 {
@@ -58,18 +58,9 @@ Pass `--cursor` from `next_cursor` with the same filters. Output is redacted JSO
 }
 ```
 
-Read-only ICS feed alternative: `"calendar": {"kind": "feed", "url_secret": {"env": "HOLIDAYS_ICS_URL"}}` (no mail block required).
+ICS feed: `"calendar": {"kind": "feed", "url_secret": {"env": "HOLIDAYS_ICS_URL"}}`.
 
-3. Put the secret in the environment or keychain **before** add:
-
-```sh
-export ACME_MAIL_PASSWORD='…'          # user supplies; do not echo
-# or:
-printf '%s' "$ACME_MAIL_PASSWORD" | posthouse connection secret set acme-mail --file -
-# then use "secret": {"keychain": "acme-mail"} in JSON
-```
-
-4. Add, discover folders/collections, then doctor:
+3. Export the secret (or `posthouse connection secret set NAME --file -` with `"secret": {"keychain":"NAME"}`), then:
 
 ```sh
 posthouse connection add --file connection.json
@@ -77,34 +68,15 @@ posthouse connection discover acme
 posthouse connection doctor acme
 ```
 
-`discover` **saves** folder and calendar collection metadata. Printed discover JSON is redacted — **do not** feed it back into `connection update`.
+`discover` saves folders/collections. Redacted discover JSON must **not** be fed into `connection update`. Remote servers need real TLS/STARTTLS; cleartext auth is loopback-only.
 
-Remote servers need real TLS or STARTTLS. Cleartext auth is loopback-only (`"insecure": true` only for local test servers).
+## Update / retag / remove
 
-## Update, retag, or replace
-
-`connection update` replaces the whole connection document for that `id` (`--replace` is implied). To change labels/category/name/folders:
-
-1. `posthouse connection list` (and the user's known config) to reconstruct the full JSON.
-2. Edit labels/category/fields. Keep the same `id`. Keep secrets as `{"env":"…"}` or `{"keychain":"…"}` — never paste the secret value into JSON.
-3. `posthouse connection update --file connection.json`
-4. Re-run `discover` / `doctor` if hosts or auth changed.
-
-There is no separate “tag” command: labels in the connection JSON are the tags.
-
-## Remove
+`connection update` replaces the whole document for that `id`. Edit labels/category/hosts in full JSON (keep secret refs), then:
 
 ```sh
+posthouse connection update --file connection.json
 posthouse connection remove acme
 ```
 
-Confirm with the user first. This removes local config for that connection, not provider mailbox data.
-
-## Secrets and config paths
-
-```sh
-posthouse config path
-posthouse connection secret set KEYCHAIN_NAME --file -
-```
-
-State DB (`posthouse.db`) sits next to the config. Headless environments need `POSTHOUSE_CACHE_KEY`.
+Confirm remove with the user. Config path: `posthouse config path`.
