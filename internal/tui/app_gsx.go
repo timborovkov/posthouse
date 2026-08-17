@@ -973,7 +973,7 @@ func (p *posthouseApp) Render(app *tui.App) *tui.Element {
 			)
 			__tui_52.AddChild(__tui_53)
 			if index < len(p.editorFields) {
-				__tui_54 := app.Mount(p, tui.MountKey(1, index), func() tui.Component {
+				__tui_54 := app.Mount(p, tui.MountKey(1, fmt.Sprintf("%s-%d", p.editorKind.Get(), index)), func() tui.Component {
 					return NewEditorField(p, index)
 				})
 				__tui_52.AddChild(__tui_54)

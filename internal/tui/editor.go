@@ -90,8 +90,10 @@ func (p *posthouseApp) editorTitle() string {
 
 func (p *posthouseApp) editorHelp() string {
 	switch p.editorKind.Get() {
-	case "save", "connection":
+	case "save":
 		return "Tab fields · Enter saves · Esc cancels"
+	case "connection":
+		return "Tab fields · Enter saves · Esc cancels · blank hosts probe"
 	}
 	if p.editorHasTimeFields() {
 		return "Tab fields · Enter prepares · Ctrl+S prepares · Esc cancels · RFC3339 e.g. " + rfc3339Example

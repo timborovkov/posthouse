@@ -159,7 +159,7 @@ posthouse tui
 `d` discover the selected connection, `s` save a loaded attachment (0600,
 never overwrite), `n` / `PageDown` and `p` / `PageUp` page inbox (25) and
 agenda (100) with opaque cursors, `Enter` open/confirm/prepare, `Esc` back
-or cancel a form without saving, `?` help, `q` quit.
+or cancel a form without submitting, `?` help, `q` quit.
 
 Compose includes To, optional CC/BCC, subject, body type (`text` default, or
 `html`), a body textarea, and attachment paths. Choosing `html` sends the

@@ -398,7 +398,7 @@ templ (p *posthouseApp) Render() {
 					<span class="font-dim">{p.editorHelp()}</span>
 					<hr />
 					for index, label := range p.editorLabels() {
-						<div class="flex gap-1 items-center">
+						<div class="flex gap-1 items-center" key={fmt.Sprintf("%s-%d", p.editorKind.Get(), index)}>
 							<span class="w-20 max-w-20 shrink-0 overflow-hidden">{label}</span>
 							if index < len(p.editorFields) {
 								@NewEditorField(p, index)

@@ -348,7 +348,7 @@ func TestConnectionEditorHelpAndProbePlaceholders(t *testing.T) {
 	app := testApp(t)
 	defer app.close()
 	app.editorKind.Set("connection")
-	if !strings.Contains(app.editorHelp(), "Esc cancels") || !strings.Contains(app.editorHelp(), "Enter saves") {
+	if !strings.Contains(app.editorHelp(), "Esc cancels") || !strings.Contains(app.editorHelp(), "Enter saves") || !strings.Contains(app.editorHelp(), "probe") {
 		t.Fatalf("connection help=%q", app.editorHelp())
 	}
 	if app.editorPlaceholder(6) != "blank to probe" || app.editorPlaceholder(7) != "blank to probe" || app.editorPlaceholder(8) != "blank to probe" {
