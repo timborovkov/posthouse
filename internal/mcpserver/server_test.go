@@ -272,7 +272,7 @@ func TestReadonlyProfileOmitsWriteTools(t *testing.T) {
 	for _, tool := range listed.Tools {
 		names = append(names, tool.Name)
 	}
-	for _, want := range []string{"connections_list", "messages_search", "messages_triage", "messages_get", "events_list", "event_ics_generate", "cache_status"} {
+	for _, want := range []string{"connections_list", "messages_search", "messages_triage", "messages_get", "events_list", "event_ics_generate", "cache_status", "operation_show"} {
 		if !slices.Contains(names, want) {
 			t.Fatalf("readonly tools %v do not contain %s", names, want)
 		}

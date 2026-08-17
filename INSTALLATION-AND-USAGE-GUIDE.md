@@ -33,8 +33,18 @@ export ACME_MAIL_PASSWORD='app password'
 posthouse connection probe --email you@acme.example
 posthouse connection add --email you@acme.example --id acme --category work \
   --label acme --label primary --secret-env ACME_MAIL_PASSWORD --caldav
+# command secret with spaces: repeat --secret-command once per argv
+# posthouse connection add --email you@acme.example --secret-command pass --secret-command show --secret-command "acme mail"
 posthouse connection discover acme
 posthouse connection doctor acme
+```
+
+Probe refuses loopback, link-local, and private discovered hosts (and HTTPS
+redirects to those destinations). For an internal mail server:
+
+```sh
+posthouse connection probe --email you@internal.example --allow-private
+# or: export POSTHOUSE_AUTOCONFIG_ALLOW_PRIVATE=1
 ```
 
 Or copy [examples/connection.json](./examples/connection.json), fill in hosts
@@ -80,6 +90,12 @@ printf '%s' "$ACME_MAIL_PASSWORD" | posthouse connection secret set acme-mail --
 
 Optional `mail.imap.proxy` / `mail.smtp.proxy` (`socks5://` or `http://`). When
 unset, `ALL_PROXY` / `HTTPS_PROXY` / `HTTP_PROXY` are honored for IMAP and SMTP.
+Loopback targets bypass the **environment** proxy. `NO_PROXY` / `no_proxy`
+matches `*`, exact host, `.suffix`, CIDR (`10.0.0.0/8`), and `host:port`.
+An explicit connection `proxy` URL is always used (no `NO_PROXY` bypass).
+
+Secret commands inherit the process environment except `POSTHOUSE_*` keys. Other
+ambient secrets remain visible to `pass` or a custom argv.
 
 Remote servers need real TLS or STARTTLS. Cleartext auth is loopback-only.
 
@@ -146,6 +162,7 @@ posthouse mail attachment --connection work --folder INBOX --uid 42 --id ATTACHM
 posthouse mail send --connection work --to teammate@example.test --subject Status --body-file status.txt
 posthouse mail send --connection work --to teammate@example.test --subject Status --html-file status.html
 posthouse mail forward --connection work --folder INBOX --uid 42 --to teammate@example.test --verbatim
+posthouse mail mark --connection work --folder INBOX --uids 42,43 --read
 posthouse mail junk --connection work --folder INBOX --uid 42
 posthouse mail archive --connection work --folder INBOX --uids 42,43,44
 posthouse operation show 'TOKEN'
@@ -259,12 +276,12 @@ not provider connectivity. Headless/Docker must set `POSTHOUSE_CACHE_KEY`.
 | Profile | Tools |
 | --- | --- |
 | `full` (default) | Reads plus prepare/execute write tools |
-| `readonly` | Reads, doctor, sync, cache only — no prepare/execute |
+| `readonly` | Reads, doctor, sync, cache, and `operation_show` — no prepare/execute |
 
 Resolution order for the profile:
 
 1. `--profile full|readonly` on `mcp stdio` / `mcp http`
-2. else `policy.mcp_profile` in config (`posthouse policy mcp-profile …`)
+2. else `policy.mcp_profile` in config, including an explicit `full` (`posthouse policy mcp-profile …`)
 3. else `POSTHOUSE_MCP_PROFILE`
 4. else `full`
 
@@ -312,9 +329,10 @@ docker compose run --rm posthouse \
 | `POSTHOUSE_CACHE_KEY` | Encrypted cache key (required headless / Docker) |
 | `POSTHOUSE_CACHE_KEY_NEW` | New key for `cache rekey --key-env` |
 | `POSTHOUSE_MCP_TOKEN` | Bearer token for `mcp http` |
-| `POSTHOUSE_MCP_PROFILE` | Default MCP profile when `--profile` and config are unset: `full` or `readonly` |
+| `POSTHOUSE_MCP_PROFILE` | Default MCP profile when `--profile` and config are unset: `full` or `readonly`. An explicit config `full` beats this env. |
 | `POSTHOUSE_POLICY_DENY` | Comma-separated deny classes merged with `policy.deny` |
-| `ALL_PROXY` / `HTTPS_PROXY` / `HTTP_PROXY` / `NO_PROXY` | IMAP/SMTP proxy when connection proxy fields are unset |
+| `POSTHOUSE_AUTOCONFIG_ALLOW_PRIVATE` | `1`/`true` allows private/loopback hosts from probe (same as `--allow-private`) |
+| `ALL_PROXY` / `HTTPS_PROXY` / `HTTP_PROXY` / `NO_PROXY` | IMAP/SMTP env proxy when connection proxy fields are unset. `NO_PROXY` supports `*`, host, `.suffix`, CIDR, `host:port`. Explicit connection proxies ignore `NO_PROXY`. |
 
 Connection secrets use whatever env names you put in `secret.env` (for example
 `ACME_MAIL_PASSWORD`).

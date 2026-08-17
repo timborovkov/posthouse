@@ -30,16 +30,22 @@ type Result struct {
 }
 
 // Probe discovers mail endpoints for email. Secrets and identities are not filled.
-func Probe(ctx context.Context, email string) (Result, error) {
+// Private/loopback/link-local destinations are rejected unless allowPrivate is set
+// (or POSTHOUSE_AUTOCONFIG_ALLOW_PRIVATE=1).
+func Probe(ctx context.Context, email string, allowPrivate bool) (Result, error) {
 	email = strings.TrimSpace(strings.ToLower(email))
 	at := strings.LastIndex(email, "@")
 	if at <= 0 || at == len(email)-1 || strings.Contains(email[:at], " ") {
 		return Result{}, fmt.Errorf("email address is required")
 	}
+	allowPrivate = allowPrivate || envAllowPrivate()
 	domain := email[at+1:]
 	result := Result{Email: email, Domain: domain}
+	if err := validateHost(ctx, domain, allowPrivate); err != nil {
+		return Result{}, fmt.Errorf("probe domain %s: %w", domain, err)
+	}
 
-	tbIMAP, tbSMTP, tbSource, tbErr := probeThunderbird(ctx, email, domain)
+	tbIMAP, tbSMTP, tbSource, tbErr := probeThunderbird(ctx, email, domain, allowPrivate)
 	if tbErr != nil {
 		result.Warnings = append(result.Warnings, "thunderbird autoconfig: "+tbErr.Error())
 	} else if tbSource != "" {
@@ -48,7 +54,7 @@ func Probe(ctx context.Context, email string) (Result, error) {
 		result.SMTP = tbSMTP
 	}
 
-	srvIMAP, srvSMTP, srvSources, srvWarnings := probeSRV(ctx, domain)
+	srvIMAP, srvSMTP, srvSources, srvWarnings := probeSRV(ctx, domain, allowPrivate)
 	result.Warnings = append(result.Warnings, srvWarnings...)
 	result.Sources = append(result.Sources, srvSources...)
 	if result.IMAP == nil {
@@ -58,7 +64,7 @@ func Probe(ctx context.Context, email string) (Result, error) {
 		result.SMTP = srvSMTP
 	}
 
-	if caldav, source, err := probeCalDAV(ctx, domain); err != nil {
+	if caldav, source, err := probeCalDAV(ctx, domain, allowPrivate); err != nil {
 		result.Warnings = append(result.Warnings, "caldav well-known: "+err.Error())
 	} else if caldav != "" {
 		result.CalDAV = caldav
@@ -71,7 +77,7 @@ func Probe(ctx context.Context, email string) (Result, error) {
 	return result, nil
 }
 
-func probeSRV(ctx context.Context, domain string) (imapCfg *model.IMAPConfig, smtpCfg *model.SMTPConfig, sources, warnings []string) {
+func probeSRV(ctx context.Context, domain string, allowPrivate bool) (imapCfg *model.IMAPConfig, smtpCfg *model.SMTPConfig, sources, warnings []string) {
 	type candidate struct {
 		service string
 		secure  bool
@@ -113,6 +119,11 @@ func probeSRV(ctx context.Context, domain string) (imapCfg *model.IMAPConfig, sm
 		if !item.secure && best.Port == 143 {
 			imapCfg.StartTLS = true
 		}
+		if err := validateMailAddress(ctx, imapCfg.Address, allowPrivate); err != nil {
+			warnings = append(warnings, fmt.Sprintf("SRV _%s._tcp: %v", item.service, err))
+			imapCfg = nil
+			continue
+		}
 		sources = append(sources, "srv:_"+item.service+"._tcp")
 		break
 	}
@@ -129,6 +140,11 @@ func probeSRV(ctx context.Context, domain string) (imapCfg *model.IMAPConfig, sm
 		host := strings.TrimSuffix(best.Target, ".")
 		address := net.JoinHostPort(host, fmt.Sprintf("%d", best.Port))
 		smtpCfg = &model.SMTPConfig{Address: address, TLS: item.secure, StartTLS: !item.secure}
+		if err := validateMailAddress(ctx, smtpCfg.Address, allowPrivate); err != nil {
+			warnings = append(warnings, fmt.Sprintf("SRV _%s._tcp: %v", item.service, err))
+			smtpCfg = nil
+			continue
+		}
 		sources = append(sources, "srv:_"+item.service+"._tcp")
 		break
 	}
@@ -151,16 +167,13 @@ type thunderbirdServer struct {
 	Username       string `xml:"username"`
 }
 
-func probeThunderbird(ctx context.Context, email, domain string) (*model.IMAPConfig, *model.SMTPConfig, string, error) {
+func probeThunderbird(ctx context.Context, email, domain string, allowPrivate bool) (*model.IMAPConfig, *model.SMTPConfig, string, error) {
 	urls := []string{
 		fmt.Sprintf("https://autoconfig.%s/mail/config-v1.1.xml?emailaddress=%s", domain, url.QueryEscape(email)),
 		fmt.Sprintf("https://%s/.well-known/autoconfig/mail/config-v1.1.xml?emailaddress=%s", domain, url.QueryEscape(email)),
 	}
 	client := &http.Client{Timeout: 10 * time.Second, CheckRedirect: func(req *http.Request, via []*http.Request) error {
-		if len(via) >= 5 {
-			return fmt.Errorf("too many redirects")
-		}
-		return nil
+		return checkAutoconfigRedirect(req.URL, len(via), allowPrivate)
 	}}
 	var lastErr error
 	for _, endpoint := range urls {
@@ -195,8 +208,22 @@ func probeThunderbird(ctx context.Context, email, domain string) (*model.IMAPCon
 			continue
 		}
 		imapCfg, smtpCfg := thunderbirdConfigs(doc)
+		if imapCfg != nil {
+			if err := validateMailAddress(ctx, imapCfg.Address, allowPrivate); err != nil {
+				lastErr = err
+				imapCfg = nil
+			}
+		}
+		if smtpCfg != nil {
+			if err := validateMailAddress(ctx, smtpCfg.Address, allowPrivate); err != nil {
+				lastErr = err
+				smtpCfg = nil
+			}
+		}
 		if imapCfg == nil && smtpCfg == nil {
-			lastErr = fmt.Errorf("%s had no IMAP/SMTP servers", endpoint)
+			if lastErr == nil {
+				lastErr = fmt.Errorf("%s had no IMAP/SMTP servers", endpoint)
+			}
 			continue
 		}
 		return imapCfg, smtpCfg, "thunderbird:" + endpoint, nil
@@ -245,7 +272,7 @@ func socketFlags(socketType string, port int, incoming bool) (tls, startTLS bool
 	}
 }
 
-func probeCalDAV(ctx context.Context, domain string) (string, string, error) {
+func probeCalDAV(ctx context.Context, domain string, allowPrivate bool) (string, string, error) {
 	endpoint := fmt.Sprintf("https://%s/.well-known/caldav", domain)
 	client := &http.Client{
 		Timeout: 10 * time.Second,
@@ -263,14 +290,14 @@ func probeCalDAV(ctx context.Context, domain string) (string, string, error) {
 		return "", "", err
 	}
 	defer resp.Body.Close()
-	caldav, err := acceptCalDAVWellKnown(endpoint, resp.StatusCode, resp.Header.Get("Location"), resp.Request.URL)
+	caldav, err := acceptCalDAVWellKnown(endpoint, resp.StatusCode, resp.Header.Get("Location"), resp.Request.URL, allowPrivate)
 	if err != nil {
 		return "", "", err
 	}
 	return caldav, "well-known:caldav", nil
 }
 
-func acceptCalDAVWellKnown(endpoint string, status int, location string, base *url.URL) (string, error) {
+func acceptCalDAVWellKnown(endpoint string, status int, location string, base *url.URL, allowPrivate bool) (string, error) {
 	if location != "" {
 		resolved, err := base.Parse(location)
 		if err != nil {
@@ -279,12 +306,18 @@ func acceptCalDAVWellKnown(endpoint string, status int, location string, base *u
 		if !strings.EqualFold(resolved.Scheme, "https") {
 			return "", fmt.Errorf("caldav well-known redirected to non-HTTPS URL")
 		}
+		if err := validateHost(context.Background(), resolved.Hostname(), allowPrivate); err != nil {
+			return "", err
+		}
 		return resolved.String(), nil
 	}
 	if status >= 300 && status < 400 {
 		return "", fmt.Errorf("%s returned %s without Location", endpoint, http.StatusText(status))
 	}
 	if status == http.StatusOK || status == http.StatusUnauthorized || status == http.StatusMethodNotAllowed {
+		if err := validateHost(context.Background(), base.Hostname(), allowPrivate); err != nil {
+			return "", err
+		}
 		return endpoint, nil
 	}
 	return "", fmt.Errorf("%s returned %s", endpoint, http.StatusText(status))

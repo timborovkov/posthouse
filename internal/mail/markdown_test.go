@@ -1,6 +1,7 @@
 package mail
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -44,9 +45,21 @@ func TestExtractPDFTextRejectsEmpty(t *testing.T) {
 }
 
 func TestExtractPDFTextRecoversMalformed(t *testing.T) {
-	_, err := ExtractPDFText([]byte("%PDF-1.4\n1 0 obj<<>>endobj\ntrailer<<>>\n"))
-	if err == nil {
-		// Some malformed inputs may still parse; panic recovery is the guarantee.
-		return
+	if _, err := ExtractPDFText([]byte("%PDF-1.4\n1 0 obj<<>>endobj\ntrailer<<>>\n")); err == nil {
+		t.Fatal("malformed PDF should not succeed with empty text")
+	}
+}
+
+func TestUnreadFromStatus(t *testing.T) {
+	count := uint32(4)
+	got, err := unreadFromStatus("INBOX", &count, nil)
+	if err != nil || got != 4 {
+		t.Fatalf("unread = %d, %v", got, err)
+	}
+	if _, err := unreadFromStatus("INBOX", nil, nil); err == nil || !strings.Contains(err.Error(), "no count") {
+		t.Fatalf("nil unseen error = %v", err)
+	}
+	if _, err := unreadFromStatus("INBOX", &count, errors.New("boom")); err == nil || !strings.Contains(err.Error(), "STATUS UNSEEN") {
+		t.Fatalf("status error = %v", err)
 	}
 }

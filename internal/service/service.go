@@ -871,6 +871,9 @@ func (s *Service) PrepareForwardVerbatim(ctx context.Context, connectionID, fold
 			})
 		}
 	}
+	if len(attachments) == 0 {
+		return model.PreparedOperation{}, fmt.Errorf("verbatim forward requires original MIME or message parts")
+	}
 	message := model.SendMessage{
 		ConnectionID: connection.ID,
 		To:           recipients,
@@ -897,9 +900,11 @@ func (s *Service) PrepareForwardVerbatim(ctx context.Context, connectionID, fold
 		"acting_identity": connection.Identity,
 		"recipients":      map[string]any{"to": recipients},
 		"subject":         message.Subject,
+		"text":            message.Text,
 		"verbatim":        true,
 		"source":          map[string]any{"folder": folder, "uid": uid, "attachment_count": len(attachments)},
-		"comment":         strings.TrimSpace(comment) != "",
+		"comment":         strings.TrimSpace(comment),
+		"attachments":     attachmentPreviews(attachments),
 		"side_effects":    []string{"send SMTP message", sentCopyEffect(connection)},
 	})
 }
@@ -984,6 +989,22 @@ func mailActionPrecondition(action MailAction, uid uint32) (postmail.MessagePrec
 		return action.Precondition, true
 	}
 	return postmail.MessagePrecondition{}, false
+}
+
+func finishBatchMailAction(verb string, succeeded []uint32, failed []map[string]any, result map[string]any) (map[string]any, error) {
+	if result == nil {
+		result = map[string]any{}
+	}
+	result["count"] = len(succeeded)
+	result["uids"] = succeeded
+	if len(failed) == 0 {
+		return result, nil
+	}
+	result["failed"] = failed
+	if len(succeeded) > 0 {
+		return result, &uncertainOperationError{message: fmt.Sprintf("%s %d message(s); %d failed", verb, len(succeeded), len(failed))}
+	}
+	return result, &uncertainOperationError{message: fmt.Sprintf("%s failed for all %d message(s)", verb, len(failed))}
 }
 
 const maxBatchMailUIDs = 100
@@ -1318,7 +1339,7 @@ func (s *Service) PolicySetMCPProfile(profile string) (policy.Status, error) {
 		profile = strings.TrimSpace(strings.ToLower(profile))
 		switch profile {
 		case policy.MCPProfileFull:
-			current.MCPProfile = ""
+			current.MCPProfile = policy.MCPProfileFull
 		case policy.MCPProfileReadonly:
 			current.MCPProfile = policy.MCPProfileReadonly
 		default:
@@ -1548,9 +1569,14 @@ func (s *Service) execute(ctx context.Context, connection model.Connection, kind
 		failed := make([]map[string]any, 0)
 		if kind == "mail.mark" {
 			for _, uid := range uids {
+				if err := ctx.Err(); err != nil {
+					failed = append(failed, map[string]any{"uid": uid, "error": err.Error()})
+					break
+				}
 				precondition, ok := mailActionPrecondition(action, uid)
 				if !ok {
-					return nil, fmt.Errorf("missing precondition for uid %d", uid)
+					failed = append(failed, map[string]any{"uid": uid, "error": fmt.Sprintf("missing precondition for uid %d", uid)})
+					continue
 				}
 				if err := postmail.SetFlagsContext(ctx, connection, action.Folder, uid, action.Seen, action.Flagged, precondition); err != nil {
 					failed = append(failed, map[string]any{"uid": uid, "error": err.Error()})
@@ -1558,20 +1584,17 @@ func (s *Service) execute(ctx context.Context, connection model.Connection, kind
 				}
 				succeeded = append(succeeded, uid)
 			}
-			result := map[string]any{"updated": len(failed) == 0, "count": len(succeeded), "uids": succeeded}
-			if len(failed) > 0 {
-				result["failed"] = failed
-				if len(succeeded) > 0 {
-					return result, &uncertainOperationError{message: fmt.Sprintf("updated %d message(s); %d failed", len(succeeded), len(failed))}
-				}
-				return nil, fmt.Errorf("mark failed for all %d message(s)", len(failed))
-			}
-			return result, nil
+			return finishBatchMailAction("updated", succeeded, failed, map[string]any{"updated": len(failed) == 0})
 		}
 		for _, uid := range uids {
+			if err := ctx.Err(); err != nil {
+				failed = append(failed, map[string]any{"uid": uid, "error": err.Error()})
+				break
+			}
 			precondition, ok := mailActionPrecondition(action, uid)
 			if !ok {
-				return nil, fmt.Errorf("missing precondition for uid %d", uid)
+				failed = append(failed, map[string]any{"uid": uid, "error": fmt.Sprintf("missing precondition for uid %d", uid)})
+				continue
 			}
 			if err := postmail.MoveContext(ctx, connection, action.Folder, uid, action.Destination, precondition); err != nil {
 				failed = append(failed, map[string]any{"uid": uid, "error": err.Error()})
@@ -1579,15 +1602,7 @@ func (s *Service) execute(ctx context.Context, connection model.Connection, kind
 			}
 			succeeded = append(succeeded, uid)
 		}
-		result := map[string]any{"moved": len(failed) == 0, "destination": action.Destination, "count": len(succeeded), "uids": succeeded}
-		if len(failed) > 0 {
-			result["failed"] = failed
-			if len(succeeded) > 0 {
-				return result, &uncertainOperationError{message: fmt.Sprintf("moved %d message(s); %d failed", len(succeeded), len(failed))}
-			}
-			return nil, fmt.Errorf("move failed for all %d message(s)", len(failed))
-		}
-		return result, nil
+		return finishBatchMailAction("moved", succeeded, failed, map[string]any{"moved": len(failed) == 0, "destination": action.Destination})
 	case "mail.draft.create", "mail.draft.update", "mail.draft.delete":
 		var draft draftPayload
 		if err := json.Unmarshal(payload, &draft); err != nil {
@@ -2301,13 +2316,13 @@ func (s *Service) DiscoverConnection(ctx context.Context, id string) (model.Conn
 }
 
 // ProbeConnection discovers IMAP/SMTP/CalDAV endpoints from an email address without writing config.
-func (s *Service) ProbeConnection(ctx context.Context, email string) (autoconfig.Result, error) {
-	return autoconfig.Probe(ctx, email)
+func (s *Service) ProbeConnection(ctx context.Context, email string, allowPrivate bool) (autoconfig.Result, error) {
+	return autoconfig.Probe(ctx, email, allowPrivate)
 }
 
 // AddConnectionFromProbe builds a connection from probe results plus operator-supplied identity and secret.
-func (s *Service) AddConnectionFromProbe(ctx context.Context, id, name, category, email string, labels []string, secret model.SecretRef, includeCalDAV bool, replace bool) (model.Connection, autoconfig.Result, error) {
-	probe, err := autoconfig.Probe(ctx, email)
+func (s *Service) AddConnectionFromProbe(ctx context.Context, id, name, category, email string, labels []string, secret model.SecretRef, includeCalDAV bool, replace, allowPrivate bool) (model.Connection, autoconfig.Result, error) {
+	probe, err := autoconfig.Probe(ctx, email, allowPrivate)
 	if err != nil {
 		return model.Connection{}, probe, err
 	}

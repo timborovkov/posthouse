@@ -547,6 +547,8 @@ func resolveCommandSecret(command []string) (string, error) {
 }
 
 func scrubbedEnviron() []string {
+	// Only POSTHOUSE_* is stripped. Other ambient secrets remain visible to
+	// operator-configured secret commands such as `pass`.
 	env := os.Environ()
 	filtered := make([]string, 0, len(env))
 	for _, entry := range env {

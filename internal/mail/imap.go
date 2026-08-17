@@ -224,12 +224,19 @@ func UnreadCountContext(ctx context.Context, connection model.Connection, folder
 	}
 	data, err := client.Status(folder, &imap.StatusOptions{NumUnseen: true}).Wait()
 	if err != nil {
+		return unreadFromStatus(folder, nil, err)
+	}
+	return unreadFromStatus(folder, data.NumUnseen, nil)
+}
+
+func unreadFromStatus(folder string, unseen *uint32, err error) (int, error) {
+	if err != nil {
 		return 0, fmt.Errorf("IMAP STATUS UNSEEN for %s: %w", folder, err)
 	}
-	if data.NumUnseen == nil {
+	if unseen == nil {
 		return 0, fmt.Errorf("IMAP STATUS UNSEEN for %s returned no count", folder)
 	}
-	return int(*data.NumUnseen), nil
+	return int(*unseen), nil
 }
 
 func safePreviewSize(size, limit int64) bool { return size > 0 && size <= limit }

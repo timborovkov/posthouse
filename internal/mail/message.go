@@ -430,6 +430,9 @@ func ExtractPDFText(data []byte) (text string, err error) {
 		}
 	}
 	out := strings.TrimSpace(builder.String())
+	if out == "" {
+		return "", fmt.Errorf("malformed or empty PDF text")
+	}
 	if len(out) > maxPDFExtractBytes {
 		out = out[:maxPDFExtractBytes]
 	}

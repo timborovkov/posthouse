@@ -104,6 +104,7 @@ func (c *CLI) connection(ctx context.Context, args []string) error {
 		flags := flag.NewFlagSet("connection probe", flag.ContinueOnError)
 		flags.SetOutput(c.stderr)
 		email := flags.String("email", "", "identity email used for SRV and autoconfig discovery")
+		allowPrivate := flags.Bool("allow-private", false, "allow loopback/private discovered endpoints")
 		if err := flags.Parse(args[1:]); err != nil {
 			return err
 		}
@@ -113,7 +114,7 @@ func (c *CLI) connection(ctx context.Context, args []string) error {
 		if *email == "" {
 			return fmt.Errorf("usage: posthouse connection probe --email you@example.com")
 		}
-		result, err := c.service.ProbeConnection(ctx, *email)
+		result, err := c.service.ProbeConnection(ctx, *email, *allowPrivate)
 		if err != nil {
 			return err
 		}
@@ -130,8 +131,10 @@ func (c *CLI) connection(ctx context.Context, args []string) error {
 		flags.Var(&labels, "label", "label when using --email; repeat or comma-separate")
 		secretEnv := flags.String("secret-env", "", "environment variable holding the secret when using --email")
 		secretKeychain := flags.String("secret-keychain", "", "keychain secret name when using --email")
-		secretCommand := flags.String("secret-command", "", "space-separated argv that prints the secret when using --email")
+		var secretCommand argvList
+		flags.Var(&secretCommand, "secret-command", "secret command argv; repeat once per argument")
 		caldav := flags.Bool("caldav", false, "include discovered CalDAV URL when using --email")
+		allowPrivate := flags.Bool("allow-private", false, "allow loopback/private discovered endpoints when using --email")
 		replace := flags.Bool("replace", args[0] == "update", "replace a connection with the same ID")
 		if err := flags.Parse(args[1:]); err != nil {
 			return err
@@ -140,11 +143,8 @@ func (c *CLI) connection(ctx context.Context, args []string) error {
 			if *file != "" {
 				return fmt.Errorf("connection add accepts either --file or --email, not both")
 			}
-			secret := model.SecretRef{Env: *secretEnv, Keychain: *secretKeychain}
-			if *secretCommand != "" {
-				secret.Command = strings.Fields(*secretCommand)
-			}
-			connection, probe, err := c.service.AddConnectionFromProbe(ctx, *id, *name, *category, *email, labels, secret, *caldav, *replace)
+			secret := model.SecretRef{Env: *secretEnv, Keychain: *secretKeychain, Command: secretCommand}
+			connection, probe, err := c.service.AddConnectionFromProbe(ctx, *id, *name, *category, *email, labels, secret, *caldav, *replace, *allowPrivate)
 			if err != nil {
 				return err
 			}
@@ -423,17 +423,15 @@ func (c *CLI) mail(ctx context.Context, args []string) error {
 		connection := flags.String("connection", "", "exact connection")
 		folder := flags.String("folder", "INBOX", "IMAP folder")
 		uid := flags.Uint64("uid", 0, "message UID")
+		var uids uidList
+		flags.Var(&uids, "uids", "comma-separated UIDs for batch mark")
 		read, unread := flags.Bool("read", false, "mark read"), flags.Bool("unread", false, "mark unread")
 		flagged, unflagged := flags.Bool("flagged", false, "flag message"), flags.Bool("unflagged", false, "remove flag")
 		if err := flags.Parse(args[1:]); err != nil {
 			return err
 		}
-		if *connection == "" || *uid == 0 || (*read && *unread) || (*flagged && *unflagged) || (!*read && !*unread && !*flagged && !*unflagged) {
+		if *connection == "" || (*uid == 0 && len(uids) == 0) || (*read && *unread) || (*flagged && *unflagged) || (!*read && !*unread && !*flagged && !*unflagged) {
 			return fmt.Errorf("mail mark requires target and one unambiguous state change")
-		}
-		messageUID, err := checkedUID(*uid)
-		if err != nil {
-			return err
 		}
 		var seenValue, flagValue *bool
 		if *read != *unread {
@@ -444,7 +442,17 @@ func (c *CLI) mail(ctx context.Context, args []string) error {
 			value := *flagged
 			flagValue = &value
 		}
-		prepared, err := c.service.PrepareMailAction(ctx, *connection, "mail.mark", service.MailAction{Folder: *folder, UID: messageUID, Seen: seenValue, Flagged: flagValue})
+		action := service.MailAction{Folder: *folder, Seen: seenValue, Flagged: flagValue}
+		if len(uids) > 0 {
+			action.UIDs = []uint32(uids)
+		} else {
+			messageUID, err := checkedUID(*uid)
+			if err != nil {
+				return err
+			}
+			action.UID = messageUID
+		}
+		prepared, err := c.service.PrepareMailAction(ctx, *connection, "mail.mark", action)
 		if err != nil {
 			return err
 		}
@@ -956,6 +964,17 @@ func (values *stringList) Set(value string) error {
 			*values = append(*values, part)
 		}
 	}
+	return nil
+}
+
+type argvList []string
+
+func (values *argvList) String() string { return strings.Join(*values, " ") }
+func (values *argvList) Set(value string) error {
+	if value == "" {
+		return fmt.Errorf("secret command argument is empty")
+	}
+	*values = append(*values, value)
 	return nil
 }
 

@@ -142,6 +142,11 @@ type messageSearchInput struct {
 	Mode   string `json:"mode,omitempty" jsonschema:"empty for live-first stale fallback, offline for cache-only, or refresh for live-only"`
 }
 
+type unreadCountsInput struct {
+	selectorInput
+	Folder string `json:"folder,omitempty"`
+}
+
 type sendMessageInput struct {
 	Connection  string               `json:"connection" jsonschema:"exact connection ID or unique name"`
 	To          []string             `json:"to"`
@@ -337,7 +342,7 @@ func (s *Server) registerTools() {
 		})
 
 	mcp.AddTool(s.mcp, &mcp.Tool{Name: "messages_unread_counts", Title: "Unread counts", Description: "Return unread counts per selected mail-capable connection for the inbox (or an explicit folder).", Annotations: readOnly},
-		func(ctx context.Context, _ *mcp.CallToolRequest, input messageSearchInput) (*mcp.CallToolResult, map[string]any, error) {
+		func(ctx context.Context, _ *mcp.CallToolRequest, input unreadCountsInput) (*mcp.CallToolResult, map[string]any, error) {
 			summaries, err := s.service.UnreadCounts(ctx, input.selector(), input.Folder)
 			return nil, map[string]any{"unread": summaries}, err
 		})
@@ -417,6 +422,7 @@ func (s *Server) registerTools() {
 					Attachment: attachment,
 					Offset:     0,
 					Text:       extracted,
+					DataBase64: base64.StdEncoding.EncodeToString([]byte(extracted)),
 				}, nil
 			}
 			if input.Offset > len(data) {
@@ -509,12 +515,15 @@ func (s *Server) registerTools() {
 				prepared, err := s.service.PrepareCalendarDelete(ctx, input.Connection, input.Collection, input.Href, input.ETag, input.RecurrenceID)
 				return nil, prepared, err
 			})
+	}
 
-		mcp.AddTool(s.mcp, &mcp.Tool{Name: "operation_show", Title: "Show prepared operation", Description: "Show the exact preview and status for an opaque prepared-operation token without executing it.", Annotations: readOnly},
-			func(ctx context.Context, _ *mcp.CallToolRequest, input operationInput) (*mcp.CallToolResult, model.PreparedOperation, error) {
-				operation, err := s.service.OperationShow(ctx, input.Token)
-				return nil, operation, err
-			})
+	mcp.AddTool(s.mcp, &mcp.Tool{Name: "operation_show", Title: "Show prepared operation", Description: "Show the exact preview and status for an opaque prepared-operation token without executing it.", Annotations: readOnly},
+		func(ctx context.Context, _ *mcp.CallToolRequest, input operationInput) (*mcp.CallToolResult, model.PreparedOperation, error) {
+			operation, err := s.service.OperationShow(ctx, input.Token)
+			return nil, operation, err
+		})
+
+	if s.profile != policy.MCPProfileReadonly {
 		mcp.AddTool(s.mcp, &mcp.Tool{Name: "operation_execute", Title: "Execute prepared operation", Description: "Execute one confirmed prepared-operation token exactly once. Repeated calls return the original result; uncertain SMTP outcomes are never retried. Honors policy.deny and POSTHOUSE_POLICY_DENY.", Annotations: executeWrite},
 			func(ctx context.Context, _ *mcp.CallToolRequest, input operationInput) (*mcp.CallToolResult, model.OperationResult, error) {
 				result, err := s.service.ExecuteOperation(ctx, input.Token)

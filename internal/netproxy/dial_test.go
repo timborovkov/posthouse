@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -177,5 +178,30 @@ func TestBypassProxyNOProxy(t *testing.T) {
 	t.Setenv("NO_PROXY", "*")
 	if !bypassProxy("anywhere.example:993") {
 		t.Fatal("* should bypass")
+	}
+	t.Setenv("NO_PROXY", "10.0.0.0/8")
+	if !bypassProxy("10.1.2.3:993") {
+		t.Fatal("CIDR should bypass")
+	}
+	t.Setenv("NO_PROXY", "imap.example.test:993")
+	if !bypassProxy("imap.example.test:993") || bypassProxy("imap.example.test:143") {
+		t.Fatal("host:port should match only that port")
+	}
+}
+
+func TestProxyDialAddressIPv6DefaultPort(t *testing.T) {
+	parsed, err := url.Parse("http://[::1]")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := proxyDialAddress(parsed, false); got != "[::1]:80" {
+		t.Fatalf("ipv6 http = %q", got)
+	}
+	parsed, err = url.Parse("https://[2001:db8::1]:8443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := proxyDialAddress(parsed, true); got != "[2001:db8::1]:8443" {
+		t.Fatalf("ipv6 explicit port = %q", got)
 	}
 }

@@ -243,7 +243,7 @@ func (p *posthouseApp) submitEditor() {
 			imapAddress, smtpAddress := values[6], values[7]
 			caldavURL := values[8]
 			if values[3] != "" && imapAddress == "" && smtpAddress == "" {
-				probe, probeErr := p.service.ProbeConnection(p.ctx, values[3])
+				probe, probeErr := p.service.ProbeConnection(p.ctx, values[3], false)
 				if probeErr != nil {
 					err = probeErr
 				} else {
@@ -265,7 +265,7 @@ func (p *posthouseApp) submitEditor() {
 			}
 			if err == nil && (imapAddress != "" || smtpAddress != "") {
 				if connection.Mail == nil {
-					connection.Mail = &model.MailConfig{Username: values[4], Secret: model.SecretRef{Env: values[5]}, IMAP: model.IMAPConfig{Address: imapAddress, TLS: imapAddress != ""}, SMTP: model.SMTPConfig{Address: smtpAddress, TLS: smtpAddress != ""}, SentCopy: "provider-managed"}
+					connection.Mail = &model.MailConfig{Username: values[4], Secret: model.SecretRef{Env: values[5]}, IMAP: imapTransport(imapAddress), SMTP: smtpTransport(smtpAddress), SentCopy: "provider-managed"}
 				} else {
 					if values[4] != "" {
 						connection.Mail.Username = values[4]
@@ -274,14 +274,10 @@ func (p *posthouseApp) submitEditor() {
 						connection.Mail.Secret = model.SecretRef{Env: values[5]}
 					}
 					if connection.Mail.IMAP.Address == "" && imapAddress != "" {
-						connection.Mail.IMAP = model.IMAPConfig{Address: imapAddress, TLS: true}
+						connection.Mail.IMAP = imapTransport(imapAddress)
 					}
 					if connection.Mail.SMTP.Address == "" && smtpAddress != "" {
-						connection.Mail.SMTP = model.SMTPConfig{Address: smtpAddress, TLS: smtpAddress != "" && !strings.HasSuffix(smtpAddress, ":587")}
-						if strings.HasSuffix(smtpAddress, ":587") {
-							connection.Mail.SMTP.StartTLS = true
-							connection.Mail.SMTP.TLS = false
-						}
+						connection.Mail.SMTP = smtpTransport(smtpAddress)
 					}
 				}
 			}
@@ -590,4 +586,26 @@ func (p *posthouseApp) beginAttachmentSave() {
 		return
 	}
 	p.beginEditor("save", []string{attachmentSaveName(p.attachment.Get())})
+}
+
+func imapTransport(address string) model.IMAPConfig {
+	address = strings.TrimSpace(address)
+	if address == "" {
+		return model.IMAPConfig{}
+	}
+	if strings.HasSuffix(address, ":143") {
+		return model.IMAPConfig{Address: address, StartTLS: true}
+	}
+	return model.IMAPConfig{Address: address, TLS: true}
+}
+
+func smtpTransport(address string) model.SMTPConfig {
+	address = strings.TrimSpace(address)
+	if address == "" {
+		return model.SMTPConfig{}
+	}
+	if strings.HasSuffix(address, ":587") {
+		return model.SMTPConfig{Address: address, StartTLS: true}
+	}
+	return model.SMTPConfig{Address: address, TLS: true}
 }

@@ -16,6 +16,8 @@ Use these shipped controls:
   other write classes on every surface.
 - **MCP readonly profile** — `posthouse mcp … --profile readonly`,
   `policy.mcp_profile`, or `POSTHOUSE_MCP_PROFILE=readonly` omits prepare and
-  execute tools from the MCP tool list.
+  execute tools from the MCP tool list (`operation_show` remains).
+- Autoconfig probe refuses private/loopback destinations unless
+  `--allow-private` / `POSTHOUSE_AUTOCONFIG_ALLOW_PRIVATE=1`.
 
 Details: [INSTALLATION-AND-USAGE-GUIDE.md](./INSTALLATION-AND-USAGE-GUIDE.md#policy).

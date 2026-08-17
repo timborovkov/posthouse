@@ -65,15 +65,21 @@ func dialDirect(ctx context.Context, address string) (net.Conn, error) {
 	return dialer.DialContext(ctx, "tcp", address)
 }
 
-func dialHTTPConnect(ctx context.Context, dialer *net.Dialer, proxyURL *url.URL, address string, useTLS bool) (net.Conn, error) {
-	proxyHost := proxyURL.Host
-	if !strings.Contains(proxyHost, ":") {
+func proxyDialAddress(proxyURL *url.URL, useTLS bool) string {
+	host := proxyURL.Hostname()
+	port := proxyURL.Port()
+	if port == "" {
 		if useTLS {
-			proxyHost += ":443"
+			port = "443"
 		} else {
-			proxyHost += ":80"
+			port = "80"
 		}
 	}
+	return net.JoinHostPort(host, port)
+}
+
+func dialHTTPConnect(ctx context.Context, dialer *net.Dialer, proxyURL *url.URL, address string, useTLS bool) (net.Conn, error) {
+	proxyHost := proxyDialAddress(proxyURL, useTLS)
 	connection, err := dialer.DialContext(ctx, "tcp", proxyHost)
 	if err != nil {
 		return nil, fmt.Errorf("connect to HTTP proxy: %w", err)
@@ -142,9 +148,10 @@ func (c *bufferedConn) Close() error {
 }
 
 func bypassProxy(address string) bool {
-	host, _, err := net.SplitHostPort(address)
+	host, port, err := net.SplitHostPort(address)
 	if err != nil {
 		host = address
+		port = ""
 	}
 	host = strings.Trim(host, "[]")
 	if strings.EqualFold(host, "localhost") {
@@ -164,6 +171,20 @@ func bypassProxy(address string) bool {
 		}
 		if entry == "*" {
 			return true
+		}
+		if _, network, err := net.ParseCIDR(entry); err == nil {
+			if ip := net.ParseIP(host); ip != nil && network.Contains(ip) {
+				return true
+			}
+			continue
+		}
+		entryHost, entryPort, splitErr := net.SplitHostPort(entry)
+		if splitErr == nil {
+			entryHost = strings.Trim(entryHost, "[]")
+			if strings.EqualFold(entryHost, host) && (entryPort == "" || entryPort == port) {
+				return true
+			}
+			continue
 		}
 		if strings.EqualFold(entry, host) {
 			return true

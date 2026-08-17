@@ -149,6 +149,9 @@ func TestPrepareForwardVerbatimAttachesRawMIMEWithoutBodyPreview(t *testing.T) {
 	if text, _ := prepared.Preview["text"].(string); strings.Contains(text, "secret original body") {
 		t.Fatalf("preview leaked original body: %#v", prepared.Preview)
 	}
+	if _, ok := prepared.Preview["attachments"]; !ok {
+		t.Fatalf("preview missing attachments: %#v", prepared.Preview)
+	}
 	ledger, err := application.ensureState()
 	if err != nil {
 		t.Fatal(err)
@@ -166,6 +169,27 @@ func TestPrepareForwardVerbatimAttachesRawMIMEWithoutBodyPreview(t *testing.T) {
 	}
 	if string(payload.Attachments[0].Data) != string(raw) {
 		t.Fatalf("attachment data mismatch")
+	}
+}
+
+func TestPrepareForwardVerbatimRequiresParts(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	connection := mailConnection("work")
+	connection.Identity = model.Identity{Email: "work@example.test"}
+	connection.Mail.SMTP = model.SMTPConfig{Address: "localhost:3025", Insecure: true}
+	application := serviceWithConnections(t, connection)
+	application.mailGetMessage = func(context.Context, model.Connection, string, uint32) (postmail.FetchedMessage, error) {
+		return postmail.FetchedMessage{Detail: model.MessageDetail{Message: model.Message{Subject: "Empty"}}}, nil
+	}
+	if _, err := application.PrepareForwardVerbatim(context.Background(), "work", "INBOX", 1, []string{"person@example.test"}, ""); err == nil || !strings.Contains(err.Error(), "requires original MIME") {
+		t.Fatalf("empty verbatim error = %v", err)
+	}
+}
+
+func TestFinishBatchMailActionPreservesFailures(t *testing.T) {
+	result, err := finishBatchMailAction("moved", nil, []map[string]any{{"uid": uint32(1), "error": "boom"}}, map[string]any{"moved": false})
+	if err == nil || result["failed"] == nil || result["count"] != 0 {
+		t.Fatalf("result=%#v err=%v", result, err)
 	}
 }
 

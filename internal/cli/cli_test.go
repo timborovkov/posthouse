@@ -150,6 +150,22 @@ func TestMailMarkRejectsContradictoryFlags(t *testing.T) {
 	}
 }
 
+func TestArgvListPreservesSpaces(t *testing.T) {
+	var argv argvList
+	if err := argv.Set("pass"); err != nil {
+		t.Fatal(err)
+	}
+	if err := argv.Set("show"); err != nil {
+		t.Fatal(err)
+	}
+	if err := argv.Set("acme mail"); err != nil {
+		t.Fatal(err)
+	}
+	if len(argv) != 3 || argv[2] != "acme mail" {
+		t.Fatalf("argv = %#v", argv)
+	}
+}
+
 func TestHeadlessCacheRekeyReportsEnvironmentRotation(t *testing.T) {
 	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
 	t.Setenv("POSTHOUSE_CACHE_KEY_NEW", base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{1}, 32)))

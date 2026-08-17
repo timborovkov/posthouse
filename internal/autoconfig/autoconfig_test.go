@@ -3,6 +3,7 @@ package autoconfig
 import (
 	"context"
 	"encoding/xml"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -10,7 +11,7 @@ import (
 )
 
 func TestProbeRejectsInvalidEmail(t *testing.T) {
-	if _, err := Probe(context.Background(), "not-an-email"); err == nil || !strings.Contains(err.Error(), "email address is required") {
+	if _, err := Probe(context.Background(), "not-an-email", false); err == nil || !strings.Contains(err.Error(), "email address is required") {
 		t.Fatalf("Probe error = %v", err)
 	}
 }
@@ -45,20 +46,28 @@ func TestThunderbirdConfigsMapsSocketTypes(t *testing.T) {
 }
 
 func TestAcceptCalDAVWellKnown(t *testing.T) {
+	orig := lookupIP
+	lookupIP = func(context.Context, string) ([]net.IP, error) {
+		return []net.IP{net.ParseIP("8.8.8.8")}, nil
+	}
+	t.Cleanup(func() { lookupIP = orig })
 	base, err := url.Parse("https://example.test/.well-known/caldav")
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := acceptCalDAVWellKnown(base.String(), http.StatusMovedPermanently, "https://cal.example.test/dav/", base)
+	got, err := acceptCalDAVWellKnown(base.String(), http.StatusMovedPermanently, "https://cal.example.test/dav/", base, true)
 	if err != nil || got != "https://cal.example.test/dav/" {
 		t.Fatalf("https redirect = %q, %v", got, err)
 	}
-	if _, err := acceptCalDAVWellKnown(base.String(), http.StatusMovedPermanently, "http://cal.example.test/dav/", base); err == nil || !strings.Contains(err.Error(), "non-HTTPS") {
+	if _, err := acceptCalDAVWellKnown(base.String(), http.StatusMovedPermanently, "http://cal.example.test/dav/", base, true); err == nil || !strings.Contains(err.Error(), "non-HTTPS") {
 		t.Fatalf("http redirect error = %v", err)
 	}
-	got, err = acceptCalDAVWellKnown(base.String(), http.StatusUnauthorized, "", base)
+	got, err = acceptCalDAVWellKnown(base.String(), http.StatusUnauthorized, "", base, true)
 	if err != nil || got != base.String() {
 		t.Fatalf("401 endpoint = %q, %v", got, err)
+	}
+	if _, err := acceptCalDAVWellKnown(base.String(), http.StatusMovedPermanently, "https://127.0.0.1/dav/", base, false); err == nil || !strings.Contains(err.Error(), "special-use") {
+		t.Fatalf("loopback caldav error = %v", err)
 	}
 }
 

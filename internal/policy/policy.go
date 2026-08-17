@@ -81,9 +81,6 @@ func Normalize(cfg model.PolicyConfig) (model.PolicyConfig, error) {
 	default:
 		return model.PolicyConfig{}, fmt.Errorf("mcp_profile must be %q or %q", MCPProfileFull, MCPProfileReadonly)
 	}
-	if profile == MCPProfileFull {
-		profile = ""
-	}
 	return model.PolicyConfig{Deny: deny, MCPProfile: profile}, nil
 }
 
@@ -129,6 +126,9 @@ func EffectiveDeny(cfg model.PolicyConfig) ([]string, error) {
 func Allows(cfg model.PolicyConfig, kind string) error {
 	class, ok := ClassForKind(kind)
 	if !ok {
+		if strings.HasPrefix(kind, "mail.") || strings.HasPrefix(kind, "calendar.") {
+			return fmt.Errorf("policy has no class for write kind %q", kind)
+		}
 		return nil
 	}
 	denied, err := EffectiveDeny(cfg)
@@ -157,8 +157,9 @@ func MCPProfile(cfg model.PolicyConfig, override string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if normalized.MCPProfile == MCPProfileReadonly {
-		return MCPProfileReadonly, nil
+	switch normalized.MCPProfile {
+	case MCPProfileFull, MCPProfileReadonly:
+		return normalized.MCPProfile, nil
 	}
 	if env := strings.TrimSpace(strings.ToLower(os.Getenv("POSTHOUSE_MCP_PROFILE"))); env != "" {
 		switch env {
