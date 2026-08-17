@@ -314,7 +314,7 @@ func (s *Server) registerTools() {
 			return nil, page, err
 		})
 
-	mcp.AddTool(s.mcp, &mcp.Tool{Name: "messages_send_prepare", Title: "Prepare message send", Description: "Prepare a plain-text or HTML email with up to 25 MiB total attachment data through exactly one SMTP connection. HTML is sent as text/html with a text/plain fallback, or as multipart/alternative when both bodies are supplied. Returns a ten-minute opaque token and exact side-effect preview; no message is sent until operation_execute is called.", Annotations: readOnly},
+	mcp.AddTool(s.mcp, &mcp.Tool{Name: "messages_send_prepare", Title: "Prepare message send", Description: "Prepare a plain-text or HTML email with up to 25 MiB total attachment data through exactly one SMTP connection. Text-only is text/plain. HTML-only is multipart/alternative with a derived text/plain fallback. Both bodies are multipart/alternative as supplied. Returns a ten-minute opaque token and exact side-effect preview; no message is sent until operation_execute is called.", Annotations: readOnly},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input sendMessageInput) (*mcp.CallToolResult, model.PreparedOperation, error) {
 			prepared, err := s.service.PrepareSend(ctx, model.SendMessage{ConnectionID: input.Connection, To: input.To, CC: input.CC, BCC: input.BCC, Subject: input.Subject, Text: input.Text, HTML: input.HTML, ReplyTo: input.ReplyTo, InReplyTo: input.InReplyTo, References: input.References, Attachments: mcpAttachments(input.Attachments)})
 			return nil, prepared, err

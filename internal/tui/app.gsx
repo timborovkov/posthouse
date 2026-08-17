@@ -334,7 +334,16 @@ func (p *posthouseApp) confirmModal(ke tui.KeyEvent) {
 	go func() { defer p.wg.Done(); result,err:=p.executeOperation(ctx,token); next:=operationSnapshot{token:token,result:result,err:err}; select { case p.operationUpdates<-next: case <-p.ctx.Done(): } }()
 }
 
-func (p *posthouseApp) cancelModal() { if p.operationCancel!=nil { p.operationCancel(); p.operationCancel=nil }; if p.providerReadCancel!=nil { p.providerReadCancel(); p.providerReadCancel=nil; p.providerReadGeneration.Add(1); p.loading.Set(false) }; p.modal.Set(false); p.pendingToken.Set(""); p.pendingDiscover.Set("") }
+func (p *posthouseApp) cancelModal() {
+	if p.operationCancel != nil { p.operationCancel(); p.operationCancel = nil }
+	if p.providerReadCancel != nil { p.providerReadCancel(); p.providerReadCancel = nil; p.providerReadGeneration.Add(1); p.loading.Set(false) }
+	p.editor.Set(false)
+	p.editorFields = nil
+	p.editorKind.Set("")
+	p.modal.Set(false)
+	p.pendingToken.Set("")
+	p.pendingDiscover.Set("")
+}
 func (p *posthouseApp) applyOperation(next operationSnapshot) { if next.token!=p.executingToken.Get(){return}; p.operationCancel=nil; p.executingToken.Set(""); if next.result.Token=="" {next.result.Token=next.token}; p.lastOperation.Set(next.result); operationError:=""; if next.err!=nil {operationError=next.err.Error()}; p.lastOperationError.Set(operationError); summary:=formatOperationResult(next.result,operationError); canReplaceModal:=p.modal.Get()&&p.pendingToken.Get()==""; if next.err!=nil { p.errorText.Set(summary); if canReplaceModal {p.modalText.Set(summary)} } else if canReplaceModal { p.modalText.Set(summary) }; p.refresh() }
 
 func appendError(current string, err error) string { if current=="" { return err.Error() }; return current+" · "+err.Error() }
@@ -381,7 +390,7 @@ templ (p *posthouseApp) Render() {
 			</div>
 		</div>
 		if p.errorText.Get()!="" { <div class="border-rounded border-red px-1 shrink-0"><span class="text-red">{p.errorText.Get()}</span></div> }
-		<div class="flex shrink-0 px-1 justify-between"><span class="font-dim">Tab areas · j/k move · / search · r refresh · c create · a actions · d discover · n/p page</span><span class="font-dim">s save · ? help · q quit</span></div>
+		<div class="flex shrink-0 px-1 justify-between"><span class="font-dim">Tab areas · j/k move · / search · r refresh · c create · a actions · d discover · n/p page</span><span class="font-dim">built by Tim Borovkov · s save · ? help · q quit</span></div>
 		if p.searching.Get() { <div class="border-rounded px-1 shrink-0"><span class="text-cyan font-bold">Search: </span><span>{p.query.Get()+"_"}</span></div> }
 		<modal open={p.modal} class="justify-center items-center" backdrop="dim" closeOnEscape={false} keyMap={p.modalKeyMap()}>
 			<div class="w-70 border-rounded p-2 flex-col gap-1">

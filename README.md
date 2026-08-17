@@ -12,6 +12,9 @@ Send text or HTML (`--html` / `--html-file`, MCP `html`, TUI body type). The
 TUI is optional: config, CLI, and MCP already cover every operation.
 Recipients are raw addresses; there is no contacts registry.
 
+Built by [Tim Borovkov](https://timb.dev). Free to use under the
+[MIT License](LICENSE).
+
 v0.2. No OAuth, no native Gmail/Microsoft APIs. See [TODO.md](./TODO.md).
 
 ## Install
@@ -51,4 +54,9 @@ something is missing or broken. PRs welcome — see
 [CONTRIBUTING.md](./CONTRIBUTING.md). Do not paste secrets or message/event
 content. Security: [SECURITY.md](./SECURITY.md).
 
-MIT. Domain language: [CONTEXT.md](./CONTEXT.md).
+## License
+
+[MIT](LICENSE) — free to use, copy, modify, and share, including commercially.
+Copyright (c) 2026 [Tim Borovkov](https://timb.dev) and Posthouse contributors.
+
+Domain language: [CONTEXT.md](./CONTEXT.md).

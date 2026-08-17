@@ -13,6 +13,19 @@ import (
 	"github.com/timborovkov/posthouse/internal/service"
 )
 
+func TestHelpCreditsAuthorAndLicense(t *testing.T) {
+	application := testCLI(t, new(bytes.Buffer))
+	if err := application.Run(context.Background(), []string{"help"}); err != nil {
+		t.Fatalf("help returned error: %v", err)
+	}
+	output := application.stdout.(*bytes.Buffer).String()
+	for _, expected := range []string{"Built by Tim Borovkov", "https://timb.dev", "MIT License"} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("help output %q does not contain %q", output, expected)
+		}
+	}
+}
+
 func TestCalendarICSStreamsFileToStdout(t *testing.T) {
 	application := testCLI(t, new(bytes.Buffer))
 	output := application.stdout.(*bytes.Buffer)

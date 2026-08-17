@@ -20,16 +20,31 @@ const (
 )
 
 func (p *posthouseApp) modalKeyMap() tui.KeyMap {
-	if p.editor.Get() {
-		return tui.KeyMap{
-			tui.OnPreemptStop(tui.KeyEscape, func(ke tui.KeyEvent) { p.cancelEditor() }),
-			tui.OnPreemptStop(tui.KeyCtrlS, func(ke tui.KeyEvent) { p.submitEditor() }),
-		}
-	}
+	// Bindings are installed once when the modal mounts, so handlers must
+	// branch on current editor state instead of returning different maps.
 	return tui.KeyMap{
-		tui.OnPreemptStop(tui.KeyEnter, p.confirmModal),
-		tui.OnPreemptStop(tui.KeyEscape, func(ke tui.KeyEvent) { p.cancelModal() }),
-		tui.OnPreemptStop(tui.Rune('s'), func(ke tui.KeyEvent) { p.beginAttachmentSave() }),
+		tui.OnPreemptStop(tui.KeyEnter, func(ke tui.KeyEvent) {
+			if !p.editor.Get() {
+				p.confirmModal(ke)
+			}
+		}),
+		tui.OnPreemptStop(tui.KeyEscape, func(ke tui.KeyEvent) {
+			if p.editor.Get() {
+				p.cancelEditor()
+				return
+			}
+			p.cancelModal()
+		}),
+		tui.OnPreemptStop(tui.KeyCtrlS, func(ke tui.KeyEvent) {
+			if p.editor.Get() {
+				p.submitEditor()
+			}
+		}),
+		tui.OnPreemptStop(tui.Rune('s'), func(ke tui.KeyEvent) {
+			if !p.editor.Get() {
+				p.beginAttachmentSave()
+			}
+		}),
 		tui.OnPreemptStop(tui.Rune('q'), func(ke tui.KeyEvent) { p.cancel(); ke.App().Stop() }),
 	}
 }
@@ -235,6 +250,7 @@ func (p *posthouseApp) submitEditor() {
 			if err == nil {
 				p.editor.Set(false)
 				p.editorFields = nil
+				p.errorText.Set("")
 				p.pendingDiscover.Set(connection.ID)
 				p.modalText.Set("Connection saved\n\nEnter discovers folders and calendars · Esc skips")
 				p.refresh()
@@ -356,6 +372,7 @@ func (p *posthouseApp) submitEditor() {
 			} else {
 				p.editor.Set(false)
 				p.editorFields = nil
+				p.errorText.Set("")
 				p.modalText.Set("Attachment saved\n\n" + path)
 				return
 			}
@@ -383,6 +400,7 @@ func (p *posthouseApp) submitEditor() {
 	}
 	p.editor.Set(false)
 	p.editorFields = nil
+	p.errorText.Set("")
 	p.pendingToken.Set(prepared.Token)
 	p.modalText.Set(formatPreview(prepared))
 }
@@ -432,6 +450,7 @@ func (p *posthouseApp) pageList(delta int) {
 			}
 			p.mailHistory.Set(append(append([]string{}, p.mailHistory.Get()...), p.mailCursor.Get()))
 			p.mailCursor.Set(p.mailNext.Get())
+			p.mailNext.Set("")
 		} else {
 			history := p.mailHistory.Get()
 			if len(history) == 0 {
@@ -439,6 +458,7 @@ func (p *posthouseApp) pageList(delta int) {
 			}
 			p.mailCursor.Set(history[len(history)-1])
 			p.mailHistory.Set(history[:len(history)-1])
+			p.mailNext.Set("")
 		}
 		p.refreshScope("mail")
 	case 3:
@@ -448,6 +468,7 @@ func (p *posthouseApp) pageList(delta int) {
 			}
 			p.eventHistory.Set(append(append([]string{}, p.eventHistory.Get()...), p.eventCursor.Get()))
 			p.eventCursor.Set(p.eventNext.Get())
+			p.eventNext.Set("")
 		} else {
 			history := p.eventHistory.Get()
 			if len(history) == 0 {
@@ -455,6 +476,7 @@ func (p *posthouseApp) pageList(delta int) {
 			}
 			p.eventCursor.Set(history[len(history)-1])
 			p.eventHistory.Set(history[:len(history)-1])
+			p.eventNext.Set("")
 		}
 		p.refreshScope("events")
 	}
@@ -491,27 +513,34 @@ func (p *posthouseApp) startDiscover(id string) {
 	})
 }
 
+func attachmentSaveName(attachment model.Attachment) string {
+	if attachment.Name != "" {
+		return attachment.Name
+	}
+	return "attachment"
+}
+
 func (p *posthouseApp) beginAttachmentSave() {
-	attachment := p.attachment.Get()
-	if attachment.Name == "" && len(p.attachmentData.Get()) == 0 {
-		if p.view.Get() != 2 {
-			return
-		}
+	if p.view.Get() == 2 {
 		detail := p.detail.Get()
 		attachments := detail.Attachments
-		if len(attachments) == 0 {
+		if len(attachments) == 0 || p.selected.Get() >= len(attachments) {
 			return
 		}
 		item := attachments[p.selected.Get()]
+		loaded := p.attachment.Get()
+		if loaded.ID == item.ID && len(p.attachmentData.Get()) > 0 {
+			p.beginEditor("save", []string{attachmentSaveName(item)})
+			return
+		}
 		p.startProviderRead("attachment-save", func(ctx context.Context) providerReadSnapshot {
 			metadata, data, err := p.getAttachment(ctx, detail.ConnectionID, detail.Folder, detail.UID, item.ID)
 			return providerReadSnapshot{attachment: metadata, data: data, err: err}
 		})
 		return
 	}
-	name := attachment.Name
-	if name == "" {
-		name = "attachment"
+	if !p.modal.Get() || len(p.attachmentData.Get()) == 0 {
+		return
 	}
-	p.beginEditor("save", []string{name})
+	p.beginEditor("save", []string{attachmentSaveName(p.attachment.Get())})
 }

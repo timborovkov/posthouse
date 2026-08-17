@@ -780,7 +780,7 @@ func (s *Service) PrepareReply(ctx context.Context, connectionID, folder string,
 		return model.PreparedOperation{}, err
 	}
 	recipients := replyRecipients(original)
-	return s.prepareSendWithConnection(ctx, connection, model.SendMessage{
+	message := model.SendMessage{
 		ConnectionID: connection.ID,
 		To:           recipients,
 		Subject:      prefixedSubject(original.Subject, "Re:"),
@@ -788,7 +788,11 @@ func (s *Service) PrepareReply(ctx context.Context, connectionID, folder string,
 		HTML:         quotedHTML(htmlBody, original.HTML, original.Text),
 		InReplyTo:    original.MessageID,
 		References:   append(append([]string(nil), original.References...), original.MessageID),
-	})
+	}
+	if strings.TrimSpace(text) == "" && strings.TrimSpace(htmlBody) != "" {
+		message.Text = ""
+	}
+	return s.prepareSendWithConnection(ctx, connection, message)
 }
 
 func (s *Service) PrepareForward(ctx context.Context, connectionID, folder string, uid uint32, recipients []string, text, htmlBody string) (model.PreparedOperation, error) {
@@ -807,13 +811,17 @@ func (s *Service) PrepareForward(ctx context.Context, connectionID, folder strin
 	if err != nil {
 		return model.PreparedOperation{}, err
 	}
-	return s.prepareSendWithConnection(ctx, connection, model.SendMessage{
+	message := model.SendMessage{
 		ConnectionID: connection.ID,
 		To:           recipients,
 		Subject:      prefixedSubject(original.Subject, "Fwd:"),
 		Text:         quotedBody(text, original.Text),
 		HTML:         quotedHTML(htmlBody, original.HTML, original.Text),
-	})
+	}
+	if strings.TrimSpace(text) == "" && strings.TrimSpace(htmlBody) != "" {
+		message.Text = ""
+	}
+	return s.prepareSendWithConnection(ctx, connection, message)
 }
 
 func messageAddresses(addresses []model.Address) []string {

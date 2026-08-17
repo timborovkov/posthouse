@@ -565,6 +565,9 @@ func (p *posthouseApp) cancelModal() {
 		p.providerReadGeneration.Add(1)
 		p.loading.Set(false)
 	}
+	p.editor.Set(false)
+	p.editorFields = nil
+	p.editorKind.Set("")
 	p.modal.Set(false)
 	p.pendingToken.Set("")
 	p.pendingDiscover.Set("")
@@ -902,7 +905,7 @@ func (p *posthouseApp) Render(app *tui.App) *tui.Element {
 	)
 	__tui_41.AddChild(__tui_42)
 	__tui_43 := tui.New(
-		tui.WithText("s save · ? help · q quit"),
+		tui.WithText("built by Tim Borovkov · s save · ? help · q quit"),
 		tui.WithTextStyle(tui.NewStyle().Dim()),
 	)
 	__tui_41.AddChild(__tui_43)

@@ -750,7 +750,9 @@ Usage:
   posthouse [--config PATH] tui
 
 All provider writes return a ten-minute prepared token; only "operation execute" performs the side effect.
-Data commands write JSON except "calendar ics", which writes text/calendar to stdout by default. Run "posthouse <command> -h" for flags.`)
+Data commands write JSON except "calendar ics", which writes text/calendar to stdout by default. Run "posthouse <command> -h" for flags.
+
+Built by Tim Borovkov (https://timb.dev). MIT License.`)
 }
 
 type selectorFlags struct {

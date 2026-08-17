@@ -553,6 +553,27 @@ func TestReplyPreparationUsesOneProviderSnapshotBeforeMessageRead(t *testing.T) 
 	}
 }
 
+func TestHTMLOnlyReplyLeavesTextEmptyForDerivedFallback(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	connection := mailConnection("work")
+	connection.Mail.SMTP = model.SMTPConfig{Address: "localhost:3025", Insecure: true}
+	application := serviceWithConnections(t, connection)
+	application.mailGetMessage = func(context.Context, model.Connection, string, uint32) (postmail.FetchedMessage, error) {
+		return postmail.FetchedMessage{Detail: model.MessageDetail{Message: model.Message{MessageID: "original", From: []model.Address{{Email: "sender@example.test"}}, Subject: "subject"}, Text: "original", HTML: "<p>original</p>"}, UIDValidity: 7}, nil
+	}
+	prepared, err := application.PrepareReply(context.Background(), "work", "INBOX", 1, "", "<p>Thanks</p>")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text, _ := prepared.Preview["text"].(string); text != "" {
+		t.Fatalf("html-only reply preview text = %q", text)
+	}
+	htmlBody, _ := prepared.Preview["html"].(string)
+	if !strings.Contains(htmlBody, "<p>Thanks</p>") {
+		t.Fatalf("html-only reply preview html = %q", htmlBody)
+	}
+}
+
 func TestPreparedOperationResolvesOnlyRequiredProvider(t *testing.T) {
 	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
 	t.Setenv("MISSING_PROVIDER_SECRET", "")

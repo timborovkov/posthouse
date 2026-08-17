@@ -217,6 +217,27 @@ func TestComposeHTMLBodyTypeReachesPreview(t *testing.T) {
 	}
 }
 
+func TestMountedModalKeyMapCancelsEditorAfterOpen(t *testing.T) {
+	app := testApp(t)
+	defer app.close()
+	frozen := app.modalKeyMap()
+	app.beginEditor("mail", []string{"work", "send", "", "", "", "", "text", "", ""})
+	dispatch(frozen, tui.KeyEvent{Key: tui.KeyEscape})
+	if app.editor.Get() || app.modal.Get() {
+		t.Fatal("mounted modal keymap did not cancel editor")
+	}
+}
+
+func TestCancelModalClearsEditorState(t *testing.T) {
+	app := testApp(t)
+	defer app.close()
+	app.beginEditor("mail", []string{"work", "send", "", "", "", "", "text", "", ""})
+	app.cancelModal()
+	if app.editor.Get() || app.modal.Get() || app.editorKind.Get() != "" {
+		t.Fatal("cancelModal left editor state")
+	}
+}
+
 func TestComposeEditorBindsFieldStateAndCancelsFromModalKeys(t *testing.T) {
 	app := testApp(t)
 	defer app.close()
@@ -231,6 +252,37 @@ func TestComposeEditorBindsFieldStateAndCancelsFromModalKeys(t *testing.T) {
 	dispatch(app.modalKeyMap(), tui.KeyEvent{Key: tui.KeyEscape})
 	if app.editor.Get() || app.modal.Get() {
 		t.Fatal("escape did not cancel editor")
+	}
+}
+
+func TestAttachmentSaveUsesSelectedMessageAttachment(t *testing.T) {
+	app := testApp(t)
+	defer app.close()
+	if app.refreshCancel != nil {
+		app.refreshCancel()
+		app.wg.Wait()
+	}
+	app.view.Set(2)
+	app.detail.Set(model.MessageDetail{
+		Message:     model.Message{ConnectionID: "work", Folder: "INBOX", UID: 1},
+		Attachments: []model.Attachment{{ID: "one", Name: "a.txt"}, {ID: "two", Name: "b.txt"}},
+	})
+	app.selected.Set(1)
+	app.attachment.Set(model.Attachment{ID: "one", Name: "a.txt"})
+	app.attachmentData.Set([]byte("old"))
+	fetched := make(chan string, 1)
+	app.getAttachment = func(_ context.Context, _, _ string, _ uint32, id string) (model.Attachment, []byte, error) {
+		fetched <- id
+		return model.Attachment{ID: id, Name: "b.txt"}, []byte("new"), nil
+	}
+	app.beginAttachmentSave()
+	select {
+	case id := <-fetched:
+		if id != "two" {
+			t.Fatalf("fetched %q, want selected attachment two", id)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("did not fetch the selected attachment")
 	}
 }
 
@@ -407,8 +459,12 @@ func TestMailPagingUsesCursorStackAndSearchResets(t *testing.T) {
 	app.mailCursor.Set("")
 	app.mailNext.Set("cursor-2")
 	app.pageList(1)
-	if app.mailCursor.Get() != "cursor-2" || len(app.mailHistory.Get()) != 1 || app.mailHistory.Get()[0] != "" {
-		t.Fatalf("next page cursor=%q history=%v", app.mailCursor.Get(), app.mailHistory.Get())
+	if app.mailCursor.Get() != "cursor-2" || app.mailNext.Get() != "" || len(app.mailHistory.Get()) != 1 || app.mailHistory.Get()[0] != "" {
+		t.Fatalf("next page cursor=%q next=%q history=%v", app.mailCursor.Get(), app.mailNext.Get(), app.mailHistory.Get())
+	}
+	app.pageList(1)
+	if app.mailCursor.Get() != "cursor-2" {
+		t.Fatalf("second next page advanced without a cursor cursor=%q", app.mailCursor.Get())
 	}
 	app.mailNext.Set("")
 	app.pageList(-1)

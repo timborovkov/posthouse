@@ -168,3 +168,7 @@ unset POSTHOUSE_CACHE_KEY_NEW
 ```
 
 Then restart anything still running with the old key.
+
+## License
+
+[MIT](./LICENSE). Built by [Tim Borovkov](https://timb.dev).
