@@ -1,0 +1,36 @@
+name: Something is missing
+description: A capability, docs gap, or idea you expected to exist
+title: "[Missing]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Incomplete ideas are welcome. You do not need a design or a patch.
+
+        Please do **not** include passwords, tokens, or private message/event content.
+  - type: textarea
+    id: missing
+    attributes:
+      label: What is missing
+      description: What did you want to do, or what was hard to find?
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why it matters
+      description: Optional. Who would this help, and what do you do today instead?
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Mail
+        - Calendar
+        - MCP / agents
+        - TUI
+        - CLI
+        - Install / docs
+        - Cache / safety
+        - Not sure
