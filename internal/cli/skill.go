@@ -27,28 +27,34 @@ func (c *CLI) skill(args []string) error {
 		if err := flags.Parse(args[1:]); err != nil {
 			return err
 		}
-		destination := *dir
-		if destination == "" && *agent != "" {
-			resolved, err := skill.AgentDirectory(*agent)
+		var destinations []string
+		if *dir != "" {
+			destinations = []string{*dir}
+		} else if *agent != "" {
+			resolved, err := skill.AgentDirectories(*agent)
 			if err != nil {
 				return err
 			}
-			destination = resolved
+			destinations = resolved
 		}
 		selected := flags.Args()
 		if *all {
 			selected = append(selected, "all")
 		}
-		result, err := skill.Install(destination, selected)
+		result, err := skill.InstallAll(destinations, selected)
 		if err != nil {
 			return err
 		}
-		return writeJSON(c.stdout, map[string]any{
-			"ok":        true,
-			"directory": destination,
-			"installed": result.Installed,
-			"removed":   result.Removed,
-		})
+		payload := map[string]any{
+			"ok":          true,
+			"directory":   destinations[0],
+			"directories": destinations,
+			"installed":   result.Installed,
+		}
+		if len(result.Removed) > 0 {
+			payload["removed"] = result.Removed
+		}
+		return writeJSON(c.stdout, payload)
 	default:
 		return fmt.Errorf("unknown skill command %q", args[0])
 	}

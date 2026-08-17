@@ -76,8 +76,26 @@ func Install(destination string, ids []string) (InstallResult, error) {
 	return result, nil
 }
 
+// InstallAll writes the selected skills into every destination directory and
+// prunes retired skill folders in each. Destinations must be non-empty.
+func InstallAll(destinations []string, ids []string) (InstallResult, error) {
+	var combined InstallResult
+	if len(destinations) == 0 {
+		return combined, fmt.Errorf("skill install requires a destination directory")
+	}
+	for _, destination := range destinations {
+		result, err := Install(destination, ids)
+		if err != nil {
+			return combined, err
+		}
+		combined.Installed = append(combined.Installed, result.Installed...)
+		combined.Removed = append(combined.Removed, result.Removed...)
+	}
+	return combined, nil
+}
+
 func pruneRetired(destination string) ([]string, error) {
-	var removed []string
+	removed := make([]string, 0)
 	for _, id := range retiredIDs {
 		dir := filepath.Join(destination, "posthouse-"+id)
 		info, err := os.Stat(dir)
@@ -99,25 +117,36 @@ func pruneRetired(destination string) ([]string, error) {
 }
 
 func AgentDirectory(agent string) (string, error) {
+	dirs, err := AgentDirectories(agent)
+	if err != nil {
+		return "", err
+	}
+	return dirs[0], nil
+}
+
+// AgentDirectories returns install targets for --agent. Codex writes the current
+// discovery path first and also refreshes ~/.codex/skills for older clients.
+func AgentDirectories(agent string) ([]string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return "", fmt.Errorf("home directory: %w", err)
+		return nil, fmt.Errorf("home directory: %w", err)
 	}
 	switch strings.ToLower(strings.TrimSpace(agent)) {
 	case "claude":
-		return filepath.Join(home, ".claude", "skills"), nil
+		return []string{filepath.Join(home, ".claude", "skills")}, nil
 	case "cursor":
-		return filepath.Join(home, ".cursor", "skills"), nil
+		return []string{filepath.Join(home, ".cursor", "skills")}, nil
 	case "codex":
-		// Current Codex discovery path (USER scope). Older builds also scanned
-		// ~/.codex/skills; pass --dir there if needed.
-		return filepath.Join(home, ".agents", "skills"), nil
+		return []string{
+			filepath.Join(home, ".agents", "skills"),
+			filepath.Join(home, ".codex", "skills"),
+		}, nil
 	case "hermes":
-		return filepath.Join(home, ".hermes", "skills"), nil
+		return []string{filepath.Join(home, ".hermes", "skills")}, nil
 	case "":
-		return "", fmt.Errorf("choose --agent claude|cursor|codex|hermes or pass --dir")
+		return nil, fmt.Errorf("choose --agent claude|cursor|codex|hermes or pass --dir")
 	default:
-		return "", fmt.Errorf("unknown agent %q; use claude, cursor, codex, hermes, or --dir", agent)
+		return nil, fmt.Errorf("unknown agent %q; use claude, cursor, codex, hermes, or --dir", agent)
 	}
 }
 

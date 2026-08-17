@@ -103,12 +103,48 @@ func TestInstallAllAndAgentDirectory(t *testing.T) {
 	if err != nil || !strings.Contains(path, string(filepath.Separator)+".claude"+string(filepath.Separator)+"skills") {
 		t.Fatalf("claude dir = %q, %v", path, err)
 	}
+	codexDirs, err := AgentDirectories("codex")
+	if err != nil || len(codexDirs) != 2 {
+		t.Fatalf("codex dirs = %#v, %v", codexDirs, err)
+	}
+	if !strings.Contains(codexDirs[0], string(filepath.Separator)+".agents"+string(filepath.Separator)+"skills") {
+		t.Fatalf("codex primary = %q", codexDirs[0])
+	}
+	if !strings.Contains(codexDirs[1], string(filepath.Separator)+".codex"+string(filepath.Separator)+"skills") {
+		t.Fatalf("codex legacy = %q", codexDirs[1])
+	}
 	codex, err := AgentDirectory("codex")
-	if err != nil || !strings.Contains(codex, string(filepath.Separator)+".agents"+string(filepath.Separator)+"skills") {
+	if err != nil || codex != codexDirs[0] {
 		t.Fatalf("codex dir = %q, %v", codex, err)
 	}
 	if _, err := AgentDirectory("unknown"); err == nil {
 		t.Fatal("expected unknown agent error")
+	}
+}
+
+func TestInstallAllWritesEveryDestination(t *testing.T) {
+	primary := t.TempDir()
+	legacy := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(legacy, "posthouse-cli"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(legacy, "posthouse-cli", "SKILL.md"), []byte("stale"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	result, err := InstallAll([]string{primary, legacy}, []string{"mail"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Installed) != 2 {
+		t.Fatalf("installed = %#v", result.Installed)
+	}
+	if len(result.Removed) != 1 || !strings.Contains(result.Removed[0], "posthouse-cli") {
+		t.Fatalf("removed = %#v", result.Removed)
+	}
+	for _, dir := range []string{primary, legacy} {
+		if _, err := os.Stat(filepath.Join(dir, "posthouse-mail", "SKILL.md")); err != nil {
+			t.Fatalf("missing mail in %s: %v", dir, err)
+		}
 	}
 }
 
@@ -137,6 +173,9 @@ func TestSkillFrontmatterNamesMatchInstallDirs(t *testing.T) {
 	}
 	if !strings.Contains(string(calendar), "collection_id") {
 		t.Fatal("calendar skill must document collection_id")
+	}
+	if !strings.Contains(string(calendar), `"href"`) || !strings.Contains(string(calendar), `"etag"`) {
+		t.Fatal("calendar skill must document update identity fields")
 	}
 	if strings.Contains(string(calendar), `"collection"`) {
 		t.Fatal("calendar skill must not use ambiguous collection field")

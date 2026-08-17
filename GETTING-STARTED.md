@@ -122,7 +122,7 @@ posthouse skill install --agent claude --all        # connections, mail, calenda
 posthouse skill list
 ```
 
-Five skills, one job each: `connections`, `mail`, `calendar`, plus `mcp` / `rest` for remote transports. Re-running install overwrites shipped files and deletes retired folders (`posthouse-cli`, `posthouse-email-inboxes`, `posthouse-email-send`). Codex installs into `~/.agents/skills`.
+Five skills, one job each: `connections`, `mail`, `calendar`, plus `mcp` / `rest` for remote transports. Re-running install overwrites shipped files and deletes retired folders (`posthouse-cli`, `posthouse-email-inboxes`, `posthouse-email-send`). `--agent codex` installs into `~/.agents/skills` and also refreshes `~/.codex/skills`.
 
 `--dir PATH` copies into any other agent skill folder. Claude marketplace plugins are a later option; skills work today.
 

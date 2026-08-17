@@ -35,7 +35,7 @@ posthouse calendar update --connection acme --file event.json
 posthouse calendar delete --connection acme --collection COLLECTION_ID --href HREF --etag ETAG
 ```
 
-Event JSON uses RFC3339 times and `collection_id` from `connection discover` (plus `id`/`href`/`etag` when updating):
+Create JSON (RFC3339 times; `collection_id` from `connection discover`):
 
 ```json
 {
@@ -46,7 +46,20 @@ Event JSON uses RFC3339 times and `collection_id` from `connection discover` (pl
 }
 ```
 
-Updates/deletes are ETag-guarded.
+Update JSON must include the list/get identity fields and a **strong** ETag (weak `W/"…"` values are rejected):
+
+```json
+{
+  "id": "EVENT_ID",
+  "title": "Planning",
+  "start": "2026-08-17T09:00:00+03:00",
+  "end": "2026-08-17T10:00:00+03:00",
+  "collection_id": "COLLECTION_ID",
+  "href": "/calendars/COLLECTION_ID/EVENT_ID.ics",
+  "etag": "\"etag-value\""
+}
+```
+
 
 ## ICS (no provider write)
 
