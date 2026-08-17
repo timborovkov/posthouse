@@ -3,7 +3,7 @@
 [![CI](https://github.com/timborovkov/posthouse/actions/workflows/ci.yml/badge.svg)](https://github.com/timborovkov/posthouse/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-**One local switchboard for mail, calendars, and agents.**
+**One local switchboard across your mail and calendars — ready for your agents.**
 
 You juggle work and personal mailboxes, a few calendars, and maybe an agent
 that needs to read them. Providers do not speak the same language. Posthouse
