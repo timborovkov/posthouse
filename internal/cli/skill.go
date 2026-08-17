@@ -23,7 +23,7 @@ func (c *CLI) skill(args []string) error {
 		flags.SetOutput(c.stderr)
 		dir := flags.String("dir", "", "destination skill directory")
 		agent := flags.String("agent", "", "install into a known agent skill directory: claude, cursor, codex, or hermes")
-		all := flags.Bool("all", false, "install cli, rest, and mcp skills")
+		all := flags.Bool("all", false, "install every shipped skill")
 		if err := flags.Parse(args[1:]); err != nil {
 			return err
 		}

@@ -33,7 +33,7 @@ func Install(destination string, ids []string) ([]string, error) {
 		return nil, fmt.Errorf("skill install requires a destination directory")
 	}
 	if len(ids) == 0 {
-		return nil, fmt.Errorf("select at least one skill: cli, rest, mcp, or --all")
+		return nil, fmt.Errorf("select at least one skill: %s, or --all", strings.Join(skills.IDs, ", "))
 	}
 	selected, err := normalizeIDs(ids)
 	if err != nil {

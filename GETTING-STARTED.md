@@ -109,7 +109,7 @@ Pick the surface that matches how you run Posthouse:
 
 | You have | Teach the agent |
 | --- | --- |
-| CLI on this machine | `posthouse skill install --agent claude cli` (or `cursor` / `codex` / `hermes`) |
+| CLI on this machine | `posthouse skill install --agent claude connections email-inboxes email-send calendar` (or `cursor` / `codex` / `hermes`) |
 | Local MCP | `posthouse mcp stdio` and the `mcp` skill |
 | Server URL | `rest` and/or `mcp` skills, plus `POSTHOUSE_ACCESS_KEY` |
 
@@ -119,6 +119,8 @@ Install every shipped skill:
 posthouse skill install --agent claude --all
 posthouse skill list
 ```
+
+Shipped CLI skills are focused so agents load only what they need: `connections` (add/label/update/remove), `email-inboxes`, `email-send`, and `calendar`, plus `mcp` / `rest` for remote surfaces.
 
 `--dir PATH` copies into any other agent skill folder. Claude marketplace plugins are a later option; skills work today.
 

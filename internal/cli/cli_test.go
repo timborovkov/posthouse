@@ -173,17 +173,17 @@ func TestSetupWritesEnvAndSkillInstall(t *testing.T) {
 
 	skillDir := filepath.Join(t.TempDir(), "skills")
 	application.stdout = new(bytes.Buffer)
-	if err := application.Run(context.Background(), []string{"skill", "install", "--dir", skillDir, "cli"}); err != nil {
+	if err := application.Run(context.Background(), []string{"skill", "install", "--dir", skillDir, "email-inboxes"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(filepath.Join(skillDir, "posthouse-cli", "SKILL.md")); err != nil {
+	if _, err := os.Stat(filepath.Join(skillDir, "posthouse-email-inboxes", "SKILL.md")); err != nil {
 		t.Fatal(err)
 	}
 	application.stdout = new(bytes.Buffer)
 	if err := application.Run(context.Background(), []string{"skill", "list"}); err != nil {
 		t.Fatal(err)
 	}
-	if listed := application.stdout.(*bytes.Buffer).String(); !strings.Contains(listed, `"id": "mcp"`) {
+	if listed := application.stdout.(*bytes.Buffer).String(); !strings.Contains(listed, `"id": "mcp"`) || !strings.Contains(listed, `"id": "connections"`) {
 		t.Fatalf("skill list = %s", listed)
 	}
 }

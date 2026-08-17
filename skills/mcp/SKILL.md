@@ -1,11 +1,11 @@
 ---
 name: posthouse-mcp
-description: Configure and call Posthouse MCP tools over stdio (local) or Streamable HTTP (localhost or a private server). Use when an MCP client such as Claude, Cursor, Codex, or Hermes should operate mail and calendar connections through Posthouse.
+description: Configure and call Posthouse MCP tools over stdio (local) or Streamable HTTP (localhost or a private server). Use when an MCP client such as Claude, Cursor, Codex, or Hermes should operate mail and calendar through MCP tools rather than the `posthouse` CLI skills.
 ---
 
 # Posthouse MCP
 
-Posthouse exposes typed MCP tools. It is not a hosted SaaS. Choose stdio on the same machine, or Streamable HTTP against a personal `posthouse serve` deployment.
+Posthouse exposes typed MCP tools. It is not a hosted SaaS. Choose stdio on the same machine, or Streamable HTTP against a personal `posthouse serve` deployment. Prefer the focused CLI skills (`posthouse-connections`, `posthouse-email-inboxes`, `posthouse-email-send`, `posthouse-calendar`) when the agent can run `posthouse` locally instead of MCP.
 
 ## Local stdio
 

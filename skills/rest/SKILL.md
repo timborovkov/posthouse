@@ -1,11 +1,11 @@
 ---
 name: posthouse-rest
-description: Call a self-hosted Posthouse REST API for mail and calendar operations. Use when Posthouse is running as `posthouse serve` on localhost or a private server and the user wants HTTP JSON instead of the CLI.
+description: Call a self-hosted Posthouse REST API for mail and calendar operations. Use when Posthouse is running as `posthouse serve` on localhost or a private server and the user wants HTTP JSON instead of local CLI skills.
 ---
 
 # Posthouse REST API
 
-Posthouse is a personal deployment, not a multi-tenant SaaS. The HTTP process serves REST at `/v1` and Streamable MCP at `/mcp`.
+Posthouse is a personal deployment, not a multi-tenant SaaS. The HTTP process serves REST at `/v1` and Streamable MCP at `/mcp`. Prefer CLI skills when `posthouse` runs on the same machine.
 
 ## Auth
 
