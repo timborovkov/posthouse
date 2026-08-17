@@ -29,7 +29,7 @@ posthouse connection list
 posthouse connection doctor CONNECTION
 posthouse mail list --category work --label primary --unread
 posthouse mail search --query TEXT --page-size 25
-posthouse mail get --connection CONNECTION --folder INBOX --uid UID
+posthouse mail get --connection CONNECTION --id ID
 posthouse mail send --connection CONNECTION --to addr --subject S --body-file FILE
 posthouse mail send --connection CONNECTION --to addr --subject S --html-file FILE.html
 posthouse operation show TOKEN
