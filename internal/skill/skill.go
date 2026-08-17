@@ -1,0 +1,125 @@
+package skill
+
+import (
+	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/timborovkov/posthouse/skills"
+)
+
+type Info struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+}
+
+func List() ([]Info, error) {
+	result := make([]Info, 0, len(skills.IDs))
+	for _, id := range skills.IDs {
+		body, err := skills.FS.ReadFile(id + "/SKILL.md")
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, Info{ID: id, Name: "posthouse-" + id, Description: skillDescription(string(body))})
+	}
+	return result, nil
+}
+
+func Install(destination string, ids []string) ([]string, error) {
+	if destination == "" {
+		return nil, fmt.Errorf("skill install requires a destination directory")
+	}
+	if len(ids) == 0 {
+		return nil, fmt.Errorf("select at least one skill: cli, rest, mcp, or --all")
+	}
+	selected, err := normalizeIDs(ids)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(destination, 0o755); err != nil {
+		return nil, fmt.Errorf("create skill directory: %w", err)
+	}
+	installed := make([]string, 0, len(selected))
+	for _, id := range selected {
+		body, err := skills.FS.ReadFile(id + "/SKILL.md")
+		if err != nil {
+			return nil, err
+		}
+		dir := filepath.Join(destination, "posthouse-"+id)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return nil, err
+		}
+		path := filepath.Join(dir, "SKILL.md")
+		if err := os.WriteFile(path, body, 0o644); err != nil {
+			return nil, fmt.Errorf("write %s: %w", path, err)
+		}
+		installed = append(installed, path)
+	}
+	return installed, nil
+}
+
+func AgentDirectory(agent string) (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("home directory: %w", err)
+	}
+	switch strings.ToLower(strings.TrimSpace(agent)) {
+	case "claude":
+		return filepath.Join(home, ".claude", "skills"), nil
+	case "cursor":
+		return filepath.Join(home, ".cursor", "skills"), nil
+	case "codex":
+		return filepath.Join(home, ".codex", "skills"), nil
+	case "hermes":
+		return filepath.Join(home, ".hermes", "skills"), nil
+	case "":
+		return "", fmt.Errorf("choose --agent claude|cursor|codex|hermes or pass --dir")
+	default:
+		return "", fmt.Errorf("unknown agent %q; use claude, cursor, codex, hermes, or --dir", agent)
+	}
+}
+
+func normalizeIDs(ids []string) ([]string, error) {
+	seen := map[string]bool{}
+	var selected []string
+	for _, id := range ids {
+		id = strings.ToLower(strings.TrimSpace(id))
+		id = strings.TrimPrefix(id, "posthouse-")
+		if id == "all" {
+			return append([]string{}, skills.IDs...), nil
+		}
+		ok := false
+		for _, known := range skills.IDs {
+			if id == known {
+				ok = true
+				break
+			}
+		}
+		if !ok {
+			return nil, fmt.Errorf("unknown skill %q; available: %s", id, strings.Join(skills.IDs, ", "))
+		}
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		selected = append(selected, id)
+	}
+	return selected, nil
+}
+
+func skillDescription(body string) string {
+	for _, line := range strings.Split(body, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "description:") {
+			return strings.TrimSpace(strings.TrimPrefix(line, "description:"))
+		}
+	}
+	return ""
+}
+
+func SkillFS() fs.FS {
+	return skills.FS
+}

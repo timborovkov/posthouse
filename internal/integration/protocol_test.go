@@ -160,7 +160,7 @@ func ensureCalendar(t *testing.T, endpoint, collectionPath, username, password s
 		t.Fatalf("MKCALENDAR: %v", err)
 	}
 	defer response.Body.Close()
-	if response.StatusCode != http.StatusCreated && response.StatusCode != http.StatusMethodNotAllowed {
+	if response.StatusCode != http.StatusCreated && response.StatusCode != http.StatusMethodNotAllowed && response.StatusCode != http.StatusConflict {
 		t.Fatalf("MKCALENDAR status %s", response.Status)
 	}
 }

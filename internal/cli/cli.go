@@ -6,7 +6,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"log/slog"
 	"mime"
 	"os"
 	"os/signal"
@@ -63,6 +62,12 @@ func (c *CLI) Run(ctx context.Context, args []string) error {
 		return c.sync(ctx, args[1:])
 	case "mcp":
 		return c.mcp(ctx, args[1:])
+	case "serve":
+		return c.serve(ctx, args[1:])
+	case "setup":
+		return c.setup(args[1:])
+	case "skill", "skills":
+		return c.skill(args[1:])
 	case "tui":
 		return c.tui()
 	default:
@@ -602,29 +607,6 @@ func calendarListRange(start, end, cursor string, explicitStart, explicitEnd boo
 	return startTime, endTime, nil
 }
 
-func (c *CLI) mcp(ctx context.Context, args []string) error {
-	if len(args) == 0 {
-		return fmt.Errorf("usage: posthouse mcp <stdio|http>")
-	}
-	server := mcpserver.New(c.service)
-	switch args[0] {
-	case "stdio":
-		return server.RunStdio(ctx)
-	case "http":
-		flags := flag.NewFlagSet("mcp http", flag.ContinueOnError)
-		flags.SetOutput(c.stderr)
-		address := flags.String("address", "127.0.0.1:8791", "listen address")
-		allowContainerListener := flags.Bool("allow-container-listener", false, "allow cleartext non-loopback binding inside an externally loopback- or TLS-constrained container network")
-		if err := flags.Parse(args[1:]); err != nil {
-			return err
-		}
-		logger := slog.New(slog.NewJSONHandler(c.stderr, nil))
-		return server.RunHTTP(ctx, *address, os.Getenv("POSTHOUSE_MCP_TOKEN"), *allowContainerListener, logger)
-	default:
-		return fmt.Errorf("unknown MCP transport %q", args[0])
-	}
-}
-
 func (c *CLI) operation(ctx context.Context, args []string) error {
 	if len(args) != 2 || (args[0] != "show" && args[0] != "execute") {
 		return fmt.Errorf("usage: posthouse operation <show|execute> <token>")
@@ -747,11 +729,15 @@ Usage:
   posthouse [--config PATH] sync
   posthouse [--config PATH] cache status|clear|rekey
   posthouse [--config PATH] mcp stdio|http
+  posthouse [--config PATH] serve
+  posthouse [--config PATH] setup
+  posthouse [--config PATH] skill list|install
   posthouse [--config PATH] tui
 
+Posthouse is a personal CLI, TUI, MCP server, and REST API — not a hosted SaaS.
 All provider writes return a ten-minute prepared token; only "operation execute" performs the side effect.
 Data commands write JSON except "calendar ics", which writes text/calendar to stdout by default. Run "posthouse <command> -h" for flags.
-
+See GETTING-STARTED.md for a first-run path, or INSTALLATION-AND-USAGE-GUIDE.md for CLI, MCP, REST, and Docker.
 Built by Tim Borovkov (https://timb.dev). MIT License.`)
 }
 

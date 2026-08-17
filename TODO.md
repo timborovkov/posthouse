@@ -25,6 +25,7 @@ Publisher-owned desktop/public OAuth clients; Gmail API + Graph as extra backend
 ## Later hardening
 
 - Broaden generic-server interoperability fixtures and fuzz MIME/iCalendar parsing.
-- Add scoped HTTP authorization and independent read/write credentials.
+- Add scoped HTTP authorization and independent read/write credentials (a single access key with brute-force lockout is shipped).
 - External security review, SBOM/signing, vulnerability gates, and recovery documentation.
 - Optional provider presets and OAuth without weakening generic protocol support.
+- Marketplace plugins for Claude, Hermes, and ChatGPT; today agents install `posthouse skill` files.
