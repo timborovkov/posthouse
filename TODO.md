@@ -16,7 +16,9 @@
 
 ## After v0.2: native Gmail and Microsoft Graph
 
-See [handoffs/publisher-gmail-microsoft.md](./handoffs/publisher-gmail-microsoft.md) for the Google/Microsoft app-registration steps. Publisher-owned desktop/public OAuth clients; Gmail API + Graph as extra backends; IMAP/CalDAV remain for generic connections. Users consent in a browser; they do not create Cloud projects. Refresh tokens use existing keychain/env refs. Public message identity becomes opaque `id` so search can compose IMAP + Gmail + Graph into one page. No Posthouse token proxy, no IMAP XOAUTH2 for these two vendors, no branded protocol presets.
+Implementing brief: [handoffs/native-gmail-microsoft.md](./handoffs/native-gmail-microsoft.md). Publisher registration: [handoffs/publisher-gmail-microsoft.md](./handoffs/publisher-gmail-microsoft.md). Delete `handoffs/` when this ships.
+
+Publisher-owned desktop/public OAuth clients; Gmail API + Graph as extra backends; IMAP/CalDAV remain for generic connections. Users consent in a browser; they do not create Cloud projects. Refresh tokens use existing keychain/env refs. Public message identity becomes opaque `id` so search can compose IMAP + Gmail + Graph into one page. No Posthouse token proxy, no IMAP XOAUTH2 for these two vendors, no branded protocol presets.
 
 ## Later hardening
 

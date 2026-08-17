@@ -1,5 +1,7 @@
 # Publisher checklist — Gmail API and Microsoft Graph
 
+Temporary. Delete this file and `handoffs/` when native Gmail and Microsoft connections ship.
+
 This is maintainer work for adding native Gmail and Microsoft connections after v0.2. Operators never create Google Cloud or Entra projects. They click Allow in a browser. Posthouse is not a SaaS: there is no backend and no hosted OAuth callback.
 
 ## You already have
