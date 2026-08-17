@@ -112,8 +112,9 @@ type ConnectionPage struct {
 
 type Message struct {
 	ConnectionID   string    `json:"connection_id"`
-	Folder         string    `json:"folder"`
-	UID            uint32    `json:"uid"`
+	ID             string    `json:"id"`
+	Folder         string    `json:"folder,omitempty"`
+	UID            uint32    `json:"uid,omitempty"`
 	MessageID      string    `json:"message_id,omitempty"`
 	From           []Address `json:"from,omitempty"`
 	To             []Address `json:"to,omitempty"`

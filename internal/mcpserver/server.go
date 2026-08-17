@@ -159,8 +159,9 @@ func mcpAttachments(inputs []mcpAttachmentInput) []model.AttachmentInput {
 
 type messageReplyInput struct {
 	Connection string `json:"connection"`
+	ID         string `json:"id,omitempty" jsonschema:"opaque message id from messages_search; preferred over uid"`
 	Folder     string `json:"folder,omitempty"`
-	UID        uint32 `json:"uid"`
+	UID        uint32 `json:"uid,omitempty" jsonschema:"deprecated IMAP-only alias for id"`
 	Text       string `json:"text,omitempty"`
 }
 
@@ -172,8 +173,9 @@ type messageForwardInput struct {
 type messageDraftInput struct {
 	Connection string          `json:"connection"`
 	Action     string          `json:"action" jsonschema:"create, update, or delete"`
+	ID         string          `json:"id,omitempty" jsonschema:"opaque draft id from messages_search; required for update and delete"`
 	Folder     string          `json:"folder,omitempty"`
-	UID        uint32          `json:"uid,omitempty"`
+	UID        uint32          `json:"uid,omitempty" jsonschema:"deprecated IMAP-only alias for id"`
 	Message    mcpDraftMessage `json:"message,omitempty"`
 }
 
@@ -187,6 +189,18 @@ type mcpDraftMessage struct {
 	InReplyTo   string               `json:"in_reply_to,omitempty"`
 	References  []string             `json:"references,omitempty"`
 	Attachments []mcpAttachmentInput `json:"attachments,omitempty"`
+}
+
+func (input messageReplyInput) locator() service.MessageLocator {
+	return service.MessageLocator{ID: input.ID, Folder: input.Folder, UID: input.UID}
+}
+
+func (input messageDraftInput) locator() service.MessageLocator {
+	return service.MessageLocator{ID: input.ID, Folder: input.Folder, UID: input.UID}
+}
+
+func (input messageGetInput) locator() service.MessageLocator {
+	return service.MessageLocator{ID: input.ID, Folder: input.Folder, UID: input.UID}
 }
 
 func (input mcpDraftMessage) model() model.SendMessage {
@@ -203,8 +217,9 @@ type operationInput struct {
 
 type messageGetInput struct {
 	Connection string `json:"connection"`
+	ID         string `json:"id,omitempty" jsonschema:"opaque message id from messages_search; preferred over uid"`
 	Folder     string `json:"folder,omitempty"`
-	UID        uint32 `json:"uid"`
+	UID        uint32 `json:"uid,omitempty" jsonschema:"deprecated IMAP-only alias for id"`
 	Mode       string `json:"mode,omitempty" jsonschema:"empty for live-first stale fallback, offline for cache-only, or refresh for live-only"`
 }
 
@@ -227,8 +242,9 @@ type attachmentChunkOutput struct {
 type messageActionInput struct {
 	Connection  string `json:"connection"`
 	Action      string `json:"action" jsonschema:"mark, move, archive, or trash"`
+	ID          string `json:"id,omitempty" jsonschema:"opaque message id from messages_search; preferred over uid"`
 	Folder      string `json:"folder,omitempty"`
-	UID         uint32 `json:"uid"`
+	UID         uint32 `json:"uid,omitempty" jsonschema:"deprecated IMAP-only alias for id"`
 	Destination string `json:"destination,omitempty"`
 	Seen        *bool  `json:"seen,omitempty"`
 	Flagged     *bool  `json:"flagged,omitempty"`
@@ -294,7 +310,7 @@ func (s *Server) registerTools() {
 			return nil, page, err
 		})
 
-	mcp.AddTool(s.mcp, &mcp.Tool{Name: "messages_search", Title: "Search messages", Description: "List or search messages across selected IMAP connections, up to 100 per page. Pass next_cursor back unchanged with identical filters; cursors validate each mailbox UID namespace. Offline full-text fallback searches available encrypted cached headers and bodies and returns an offline_search_incomplete source warning when uncached content may be omitted.", Annotations: readOnly},
+	mcp.AddTool(s.mcp, &mcp.Tool{Name: "messages_search", Title: "Search messages", Description: "List or search messages across selected mail connections, up to 100 per page. Each message has an opaque id plus connection_id; folder is mailbox metadata. Pass next_cursor back unchanged with identical filters. Offline full-text fallback searches available encrypted cached headers and bodies and returns an offline_search_incomplete source warning when uncached content may be omitted.", Annotations: readOnly},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input messageSearchInput) (*mcp.CallToolResult, model.MessagePage, error) {
 			since, err := optionalTime(input.Since)
 			if err != nil {
@@ -317,30 +333,30 @@ func (s *Server) registerTools() {
 			return nil, prepared, err
 		})
 
-	mcp.AddTool(s.mcp, &mcp.Tool{Name: "messages_reply_prepare", Title: "Prepare message reply", Description: "Fetch one provider message and prepare a threaded plain-text reply through the same exact connection, honoring Reply-To. No message is sent until operation_execute.", Annotations: readOnly},
+	mcp.AddTool(s.mcp, &mcp.Tool{Name: "messages_reply_prepare", Title: "Prepare message reply", Description: "Fetch one provider message by opaque id and prepare a threaded plain-text reply through the same exact connection, honoring Reply-To. No message is sent until operation_execute.", Annotations: readOnly},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input messageReplyInput) (*mcp.CallToolResult, model.PreparedOperation, error) {
-			prepared, err := s.service.PrepareReply(ctx, input.Connection, input.Folder, input.UID, input.Text)
+			prepared, err := s.service.PrepareReply(ctx, input.Connection, input.locator(), input.Text)
 			return nil, prepared, err
 		})
 
-	mcp.AddTool(s.mcp, &mcp.Tool{Name: "messages_forward_prepare", Title: "Prepare message forward", Description: "Fetch one provider message and prepare a plain-text forward through the same exact connection. No message is sent until operation_execute.", Annotations: readOnly},
+	mcp.AddTool(s.mcp, &mcp.Tool{Name: "messages_forward_prepare", Title: "Prepare message forward", Description: "Fetch one provider message by opaque id and prepare a plain-text forward through the same exact connection. No message is sent until operation_execute.", Annotations: readOnly},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input messageForwardInput) (*mcp.CallToolResult, model.PreparedOperation, error) {
-			prepared, err := s.service.PrepareForward(ctx, input.Connection, input.Folder, input.UID, input.To, input.Text)
+			prepared, err := s.service.PrepareForward(ctx, input.Connection, input.locator(), input.To, input.Text)
 			return nil, prepared, err
 		})
 
-	mcp.AddTool(s.mcp, &mcp.Tool{Name: "messages_draft_prepare", Title: "Prepare provider draft mutation", Description: "Prepare create, update, or non-expunging delete of one provider-side draft through exactly one IMAP connection; attachment data is limited to 25 MiB total.", Annotations: readOnly},
+	mcp.AddTool(s.mcp, &mcp.Tool{Name: "messages_draft_prepare", Title: "Prepare provider draft mutation", Description: "Prepare create, update, or non-expunging delete of one provider-side draft through exactly one mail connection; identify existing drafts by opaque id. Attachment data is limited to 25 MiB total.", Annotations: readOnly},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input messageDraftInput) (*mcp.CallToolResult, model.PreparedOperation, error) {
-			prepared, err := s.service.PrepareDraft(ctx, input.Connection, "mail.draft."+input.Action, input.Folder, input.UID, input.Message.model())
+			prepared, err := s.service.PrepareDraft(ctx, input.Connection, "mail.draft."+input.Action, input.locator(), input.Message.model())
 			return nil, prepared, err
 		})
 
-	mcp.AddTool(s.mcp, &mcp.Tool{Name: "messages_get", Title: "Get message", Description: "Fetch and decode one complete MIME message from an exact connection and UID, including safe HTML, text, threading headers, and attachment metadata.", Annotations: readOnly},
+	mcp.AddTool(s.mcp, &mcp.Tool{Name: "messages_get", Title: "Get message", Description: "Fetch and decode one complete MIME message from an exact connection and opaque message id, including safe HTML, text, threading headers, and attachment metadata.", Annotations: readOnly},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input messageGetInput) (*mcp.CallToolResult, model.MessageDetail, error) {
 			if err := validateReadMode(input.Mode); err != nil {
 				return nil, model.MessageDetail{}, err
 			}
-			detail, err := s.service.GetMessageModeContext(ctx, input.Connection, input.Folder, input.UID, input.Mode)
+			detail, err := s.service.GetMessageModeContext(ctx, input.Connection, input.locator(), input.Mode)
 			return nil, detail, err
 		})
 
@@ -361,7 +377,7 @@ func (s *Server) registerTools() {
 			if input.Limit < 1 || input.Limit > 1<<20 {
 				return nil, attachmentChunkOutput{}, fmt.Errorf("limit must be between 1 and 1048576")
 			}
-			attachment, data, snapshotCursor, err := s.service.GetAttachmentSnapshotMode(ctx, input.Connection, input.Folder, input.UID, input.AttachmentID, input.Mode, input.Cursor)
+			attachment, data, snapshotCursor, err := s.service.GetAttachmentSnapshotMode(ctx, input.Connection, input.locator(), input.AttachmentID, input.Mode, input.Cursor)
 			if err != nil {
 				return nil, attachmentChunkOutput{}, err
 			}
@@ -382,7 +398,7 @@ func (s *Server) registerTools() {
 
 	mcp.AddTool(s.mcp, &mcp.Tool{Name: "messages_action_prepare", Title: "Prepare message action", Description: "Prepare a mark, move, archive, or trash action for exactly one provider message. No provider state changes until operation_execute.", Annotations: readOnly},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input messageActionInput) (*mcp.CallToolResult, model.PreparedOperation, error) {
-			prepared, err := s.service.PrepareMailAction(ctx, input.Connection, "mail."+input.Action, service.MailAction{Folder: input.Folder, UID: input.UID, Destination: input.Destination, Seen: input.Seen, Flagged: input.Flagged})
+			prepared, err := s.service.PrepareMailAction(ctx, input.Connection, "mail."+input.Action, service.MailAction{ID: input.ID, Folder: input.Folder, UID: input.UID, Destination: input.Destination, Seen: input.Seen, Flagged: input.Flagged})
 			return nil, prepared, err
 		})
 

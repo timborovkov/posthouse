@@ -138,6 +138,7 @@ func GetContext(ctx context.Context, connection model.Connection, folder string,
 	result.Detail.ConnectionID = connection.ID
 	result.Detail.Folder = folder
 	result.Detail.UID = uid
+	result.Detail.ID = EncodeIMAPID(folder, selected.UIDValidity, uid)
 	result.Detail.ReceivedAt = items[0].InternalDate
 	result.Detail.Unread = !slices.Contains(items[0].Flags, imap.FlagSeen)
 	result.Detail.Flagged = slices.Contains(items[0].Flags, imap.FlagFlagged)

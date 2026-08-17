@@ -199,6 +199,7 @@ func SearchContext(ctx context.Context, connection model.Connection, options Sea
 			}
 		}
 	}
+	StampIMAPMessages(messages, options.Folder, selected.UIDValidity)
 	return SearchResult{Messages: messages, UIDValidity: selected.UIDValidity, UIDNext: uint32(selected.UIDNext), HasMore: hasMore}, nil
 }
 

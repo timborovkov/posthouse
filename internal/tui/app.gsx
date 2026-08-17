@@ -71,8 +71,8 @@ type posthouseApp struct {
 	providerReadUpdates chan providerReadSnapshot
 	executeOperation func(context.Context,string) (model.OperationResult,error)
 	doctorConnection func(context.Context,string) (model.DoctorResult,error)
-	getMessage func(context.Context,string,string,uint32) (model.MessageDetail,error)
-	getAttachment func(context.Context,string,string,uint32,string) (model.Attachment,[]byte,error)
+	getMessage func(context.Context,string,service.MessageLocator) (model.MessageDetail,error)
+	getAttachment func(context.Context,string,service.MessageLocator,string) (model.Attachment,[]byte,error)
 	ctx context.Context
 	cancel context.CancelFunc
 	refreshCancel context.CancelFunc
@@ -224,11 +224,11 @@ func (p *posthouseApp) openSelected(ke tui.KeyEvent) {
 	case 1:
 		items := p.messages.Get(); if len(items)==0 { return }
 		item := items[p.selected.Get()]
-		p.startProviderRead("message",func(ctx context.Context) providerReadSnapshot { detail,err:=p.getMessage(ctx,item.ConnectionID,item.Folder,item.UID); return providerReadSnapshot{detail:detail,err:err} })
+		p.startProviderRead("message",func(ctx context.Context) providerReadSnapshot { detail,err:=p.getMessage(ctx,item.ConnectionID,messageLocator(item)); return providerReadSnapshot{detail:detail,err:err} })
 	case 2:
 		detail:=p.detail.Get(); attachments:=detail.Attachments; if len(attachments)==0{return}
 		attachment:=attachments[p.selected.Get()]
-		p.startProviderRead("attachment",func(ctx context.Context) providerReadSnapshot { metadata,data,err:=p.getAttachment(ctx,detail.ConnectionID,detail.Folder,detail.UID,attachment.ID); return providerReadSnapshot{attachment:metadata,data:data,err:err} })
+		p.startProviderRead("attachment",func(ctx context.Context) providerReadSnapshot { metadata,data,err:=p.getAttachment(ctx,detail.ConnectionID,messageLocator(detail.Message),attachment.ID); return providerReadSnapshot{attachment:metadata,data:data,err:err} })
 	}
 }
 
@@ -296,8 +296,8 @@ func (p *posthouseApp) submitEditor() {
 	} else if p.editorKind.Get()=="action" {
 		item,ok:=p.selectedMessage()
 		if !ok { err=fmt.Errorf("selected message is no longer available") } else {
-			action:=strings.ToLower(strings.TrimSpace(values[0])); payload:=service.MailAction{Folder:item.Folder,UID:item.UID}; kind:="mail."+action
-			switch action { case "reply": prepared,err=p.service.PrepareReply(p.ctx,item.ConnectionID,item.Folder,item.UID,values[2]); case "forward": prepared,err=p.service.PrepareForward(p.ctx,item.ConnectionID,item.Folder,item.UID,splitValues(values[1]),values[2]); case "mark-read": value:=true; payload.Seen=&value; kind="mail.mark"; case "mark-unread": value:=false; payload.Seen=&value; kind="mail.mark"; case "flag": value:=true; payload.Flagged=&value; kind="mail.mark"; case "unflag": value:=false; payload.Flagged=&value; kind="mail.mark"; case "move": payload.Destination=values[1]; case "archive","trash": default: err=fmt.Errorf("unknown action %q",action) }
+			action:=strings.ToLower(strings.TrimSpace(values[0])); loc:=messageLocator(item); payload:=service.MailAction{ID:loc.ID,Folder:loc.Folder,UID:loc.UID}; kind:="mail."+action
+			switch action { case "reply": prepared,err=p.service.PrepareReply(p.ctx,item.ConnectionID,loc,values[2]); case "forward": prepared,err=p.service.PrepareForward(p.ctx,item.ConnectionID,loc,splitValues(values[1]),values[2]); case "mark-read": value:=true; payload.Seen=&value; kind="mail.mark"; case "mark-unread": value:=false; payload.Seen=&value; kind="mail.mark"; case "flag": value:=true; payload.Flagged=&value; kind="mail.mark"; case "unflag": value:=false; payload.Flagged=&value; kind="mail.mark"; case "move": payload.Destination=values[1]; case "archive","trash": default: err=fmt.Errorf("unknown action %q",action) }
 			if err==nil && action!="reply" && action!="forward" { prepared,err=p.service.PrepareMailAction(p.ctx,item.ConnectionID,kind,payload) }
 		}
 	} else if p.editorKind.Get()=="event-action" {
@@ -306,7 +306,7 @@ func (p *posthouseApp) submitEditor() {
 			if action=="delete" { prepared,err=p.service.PrepareCalendarDelete(p.ctx,event.ConnectionID,event.CollectionID,event.Href,event.ETag,event.RecurrenceID) } else if action=="update" || action=="update-series" { if action=="update-series" && event.RecurrenceID!="" { err=fmt.Errorf("cannot replace a recurring series from an expanded occurrence; refresh and edit the series master") } else { var start,end time.Time; if start,err=time.Parse(time.RFC3339,values[2]); err==nil { if end,err=time.Parse(time.RFC3339,values[3]); err==nil { event.Title=values[1]; event.Start=start; event.End=end; prepared,err=p.service.PrepareCalendarWrite(p.ctx,event.ConnectionID,"calendar.update",event) } } } } else { err=fmt.Errorf("unknown event action %q",action) }
 		}
 	} else if p.editorKind.Get()=="mail" {
-		if len(values)!=6 || values[0]=="" { err=fmt.Errorf("connection is required") } else { message:=model.SendMessage{ConnectionID:values[0],To:splitValues(values[2]),Subject:values[3],Text:values[4]}; for _,path:=range splitValues(values[5]) { message.Attachments=append(message.Attachments,model.AttachmentInput{Path:path}) }; mode:=strings.ToLower(strings.TrimSpace(values[1])); if mode=="draft" { prepared,err=p.service.PrepareDraft(p.ctx,values[0],"mail.draft.create","",0,message) } else if mode=="send" || mode=="" { prepared,err=p.service.PrepareSend(p.ctx,message) } else { err=fmt.Errorf("mode must be send or draft") } }
+		if len(values)!=6 || values[0]=="" { err=fmt.Errorf("connection is required") } else { message:=model.SendMessage{ConnectionID:values[0],To:splitValues(values[2]),Subject:values[3],Text:values[4]}; for _,path:=range splitValues(values[5]) { message.Attachments=append(message.Attachments,model.AttachmentInput{Path:path}) }; mode:=strings.ToLower(strings.TrimSpace(values[1])); if mode=="draft" { prepared,err=p.service.PrepareDraft(p.ctx,values[0],"mail.draft.create",service.MessageLocator{},message) } else if mode=="send" || mode=="" { prepared,err=p.service.PrepareSend(p.ctx,message) } else { err=fmt.Errorf("mode must be send or draft") } }
 	} else {
 		var start,end time.Time
 		if len(values)!=5 || values[0]=="" || values[1]=="" || values[2]=="" { err=fmt.Errorf("connection, collection, and title are required") } else if start,err=time.Parse(time.RFC3339,values[3]); err==nil { if end,err=time.Parse(time.RFC3339,values[4]); err==nil { prepared,err=p.service.PrepareCalendarWrite(p.ctx,values[0],"calendar.create",model.Event{ID:fmt.Sprintf("posthouse-%d",time.Now().UnixNano()),CollectionID:values[1],Title:values[2],Start:start,End:end}) } }
@@ -319,7 +319,8 @@ func (p *posthouseApp) defaultConnection(capability string) string { for _,conne
 func splitValues(value string) []string { var result []string; for _,item:=range strings.Split(value,",") { if item=strings.TrimSpace(item); item!="" { result=append(result,item) } }; return result }
 func connectionsHaveCapability(connections []model.Connection, capability string) bool { for _,connection:=range connections { if slices.Contains(connection.Capabilities,capability) { return true } }; return false }
 func (p *posthouseApp) defaultCalendarTarget() (string,string) { for _,connection:=range p.connections.Get() { if connection.Calendar==nil || !slices.Contains(connection.Capabilities,"calendar.write") { continue }; for _,collection:=range connection.Calendar.Collections { if !collection.ReadOnly { return connection.ID,collection.ID } }; return connection.ID,"" }; return "","" }
-func (p *posthouseApp) selectedMessage() (model.Message,bool) { if p.view.Get()==2 && p.detail.Get().UID!=0 { return p.detail.Get().Message,true }; if p.view.Get()==1 { items:=p.messages.Get(); if len(items)>0 && p.selected.Get()<len(items) { return items[p.selected.Get()],true } }; return model.Message{},false }
+func (p *posthouseApp) selectedMessage() (model.Message,bool) { if p.view.Get()==2 && (p.detail.Get().ID!="" || p.detail.Get().UID!=0) { return p.detail.Get().Message,true }; if p.view.Get()==1 { items:=p.messages.Get(); if len(items)>0 && p.selected.Get()<len(items) { return items[p.selected.Get()],true } }; return model.Message{},false }
+func messageLocator(message model.Message) service.MessageLocator { return service.MessageLocator{ID:message.ID,Folder:message.Folder,UID:message.UID} }
 
 func (p *posthouseApp) confirmModal(ke tui.KeyEvent) {
 	if p.executingToken.Get()!="" { return }

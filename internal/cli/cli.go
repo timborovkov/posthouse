@@ -219,25 +219,26 @@ func (c *CLI) mail(ctx context.Context, args []string) error {
 		flags := flag.NewFlagSet("mail get", flag.ContinueOnError)
 		flags.SetOutput(c.stderr)
 		connection := flags.String("connection", "", "exact connection")
-		folder := flags.String("folder", "INBOX", "IMAP folder")
-		uid := flags.Uint64("uid", 0, "message UID")
+		id := flags.String("id", "", "opaque message id from mail list or search")
+		folder := flags.String("folder", "", "mailbox folder; unused when --id encodes it")
+		uid := flags.Uint64("uid", 0, "deprecated IMAP-only UID alias for --id")
 		offline := flags.Bool("offline", false, "read only from encrypted cache")
 		refresh := flags.Bool("refresh", false, "require a live provider read without stale fallback")
 		if err := flags.Parse(args[1:]); err != nil {
 			return err
 		}
-		if *connection == "" || *uid == 0 {
-			return fmt.Errorf("mail get requires --connection and --uid")
-		}
-		messageUID, err := checkedUID(*uid)
+		loc, err := parseMessageLocator(*id, *folder, *uid)
 		if err != nil {
-			return err
+			return fmt.Errorf("mail get: %w", err)
+		}
+		if *connection == "" {
+			return fmt.Errorf("mail get requires --connection and --id")
 		}
 		mode, err := readMode(*offline, *refresh)
 		if err != nil {
 			return err
 		}
-		detail, err := c.service.GetMessageModeContext(ctx, *connection, *folder, messageUID, mode)
+		detail, err := c.service.GetMessageModeContext(ctx, *connection, loc, mode)
 		if err != nil {
 			return err
 		}
@@ -246,8 +247,9 @@ func (c *CLI) mail(ctx context.Context, args []string) error {
 		flags := flag.NewFlagSet("mail attachment", flag.ContinueOnError)
 		flags.SetOutput(c.stderr)
 		connection := flags.String("connection", "", "exact connection")
-		folder := flags.String("folder", "INBOX", "IMAP folder")
-		uid := flags.Uint64("uid", 0, "message UID")
+		messageID := flags.String("message-id", "", "opaque message id from mail list or search")
+		folder := flags.String("folder", "", "mailbox folder; unused when --message-id encodes it")
+		uid := flags.Uint64("uid", 0, "deprecated IMAP-only UID alias for --message-id")
 		id := flags.String("id", "", "attachment ID from mail get")
 		output := flags.String("output", "-", "output path, or - for stdout")
 		force := flags.Bool("force", false, "replace output file")
@@ -256,18 +258,18 @@ func (c *CLI) mail(ctx context.Context, args []string) error {
 		if err := flags.Parse(args[1:]); err != nil {
 			return err
 		}
-		if *connection == "" || *uid == 0 || *id == "" {
-			return fmt.Errorf("mail attachment requires --connection, --uid, and --id")
-		}
-		messageUID, err := checkedUID(*uid)
+		loc, err := parseMessageLocator(*messageID, *folder, *uid)
 		if err != nil {
-			return err
+			return fmt.Errorf("mail attachment: %w", err)
+		}
+		if *connection == "" || *id == "" {
+			return fmt.Errorf("mail attachment requires --connection, --message-id or --uid, and --id")
 		}
 		mode, err := readMode(*offline, *refresh)
 		if err != nil {
 			return err
 		}
-		attachment, data, err := c.service.GetAttachmentMode(ctx, *connection, *folder, messageUID, *id, mode)
+		attachment, data, err := c.service.GetAttachmentByLocator(ctx, *connection, loc, *id, mode)
 		if err != nil {
 			return err
 		}
@@ -284,8 +286,9 @@ func (c *CLI) mail(ctx context.Context, args []string) error {
 		flags := flag.NewFlagSet("mail "+args[0], flag.ContinueOnError)
 		flags.SetOutput(c.stderr)
 		connection := flags.String("connection", "", "exact connection")
-		folder := flags.String("folder", "INBOX", "IMAP folder")
-		uid := flags.Uint64("uid", 0, "message UID")
+		id := flags.String("id", "", "opaque message id from mail list or search")
+		folder := flags.String("folder", "", "mailbox folder; unused when --id encodes it")
+		uid := flags.Uint64("uid", 0, "deprecated IMAP-only UID alias for --id")
 		body := flags.String("body", "", "plain-text body to place before the quoted message")
 		bodyFile := flags.String("body-file", "", "body file, or - for stdin")
 		var to stringList
@@ -293,12 +296,12 @@ func (c *CLI) mail(ctx context.Context, args []string) error {
 		if err := flags.Parse(args[1:]); err != nil {
 			return err
 		}
-		if *connection == "" || *uid == 0 {
-			return fmt.Errorf("mail %s requires --connection and --uid", args[0])
+		if *connection == "" {
+			return fmt.Errorf("mail %s requires --connection and --id", args[0])
 		}
-		messageUID, err := checkedUID(*uid)
+		loc, err := parseMessageLocator(*id, *folder, *uid)
 		if err != nil {
-			return err
+			return fmt.Errorf("mail %s: %w", args[0], err)
 		}
 		if *bodyFile != "" {
 			data, err := readInput(*bodyFile)
@@ -309,12 +312,12 @@ func (c *CLI) mail(ctx context.Context, args []string) error {
 		}
 		var prepared model.PreparedOperation
 		if args[0] == "reply" {
-			prepared, err = c.service.PrepareReply(ctx, *connection, *folder, messageUID, *body)
+			prepared, err = c.service.PrepareReply(ctx, *connection, loc, *body)
 		} else {
 			if len(to) == 0 {
 				return fmt.Errorf("mail forward requires at least one --to")
 			}
-			prepared, err = c.service.PrepareForward(ctx, *connection, *folder, messageUID, to, *body)
+			prepared, err = c.service.PrepareForward(ctx, *connection, loc, to, *body)
 		}
 		if err != nil {
 			return err
@@ -324,19 +327,17 @@ func (c *CLI) mail(ctx context.Context, args []string) error {
 		flags := flag.NewFlagSet("mail mark", flag.ContinueOnError)
 		flags.SetOutput(c.stderr)
 		connection := flags.String("connection", "", "exact connection")
-		folder := flags.String("folder", "INBOX", "IMAP folder")
-		uid := flags.Uint64("uid", 0, "message UID")
+		id := flags.String("id", "", "opaque message id from mail list or search")
+		folder := flags.String("folder", "", "mailbox folder; unused when --id encodes it")
+		uid := flags.Uint64("uid", 0, "deprecated IMAP-only UID alias for --id")
 		read, unread := flags.Bool("read", false, "mark read"), flags.Bool("unread", false, "mark unread")
 		flagged, unflagged := flags.Bool("flagged", false, "flag message"), flags.Bool("unflagged", false, "remove flag")
 		if err := flags.Parse(args[1:]); err != nil {
 			return err
 		}
-		if *connection == "" || *uid == 0 || (*read && *unread) || (*flagged && *unflagged) || (!*read && !*unread && !*flagged && !*unflagged) {
+		loc, err := parseMessageLocator(*id, *folder, *uid)
+		if err != nil || *connection == "" || (*read && *unread) || (*flagged && *unflagged) || (!*read && !*unread && !*flagged && !*unflagged) {
 			return fmt.Errorf("mail mark requires target and one unambiguous state change")
-		}
-		messageUID, err := checkedUID(*uid)
-		if err != nil {
-			return err
 		}
 		var seenValue, flagValue *bool
 		if *read != *unread {
@@ -347,7 +348,7 @@ func (c *CLI) mail(ctx context.Context, args []string) error {
 			value := *flagged
 			flagValue = &value
 		}
-		prepared, err := c.service.PrepareMailAction(ctx, *connection, "mail.mark", service.MailAction{Folder: *folder, UID: messageUID, Seen: seenValue, Flagged: flagValue})
+		prepared, err := c.service.PrepareMailAction(ctx, *connection, "mail.mark", service.MailAction{ID: loc.ID, Folder: loc.Folder, UID: loc.UID, Seen: seenValue, Flagged: flagValue})
 		if err != nil {
 			return err
 		}
@@ -356,21 +357,22 @@ func (c *CLI) mail(ctx context.Context, args []string) error {
 		flags := flag.NewFlagSet("mail "+args[0], flag.ContinueOnError)
 		flags.SetOutput(c.stderr)
 		connection := flags.String("connection", "", "exact connection")
-		folder := flags.String("folder", "INBOX", "source folder")
-		uid := flags.Uint64("uid", 0, "message UID")
+		id := flags.String("id", "", "opaque message id from mail list or search")
+		folder := flags.String("folder", "", "source folder; unused when --id encodes it")
+		uid := flags.Uint64("uid", 0, "deprecated IMAP-only UID alias for --id")
 		destination := flags.String("destination", "", "destination folder for move")
 		if err := flags.Parse(args[1:]); err != nil {
 			return err
 		}
-		if *connection == "" || *uid == 0 {
-			return fmt.Errorf("mail %s requires --connection and --uid", args[0])
+		if *connection == "" {
+			return fmt.Errorf("mail %s requires --connection and --id", args[0])
 		}
-		messageUID, err := checkedUID(*uid)
+		loc, err := parseMessageLocator(*id, *folder, *uid)
 		if err != nil {
-			return err
+			return fmt.Errorf("mail %s: %w", args[0], err)
 		}
 		kind := "mail." + args[0]
-		prepared, err := c.service.PrepareMailAction(ctx, *connection, kind, service.MailAction{Folder: *folder, UID: messageUID, Destination: *destination})
+		prepared, err := c.service.PrepareMailAction(ctx, *connection, kind, service.MailAction{ID: loc.ID, Folder: loc.Folder, UID: loc.UID, Destination: *destination})
 		if err != nil {
 			return err
 		}
@@ -383,8 +385,9 @@ func (c *CLI) mail(ctx context.Context, args []string) error {
 		flags := flag.NewFlagSet("mail draft "+args[1], flag.ContinueOnError)
 		flags.SetOutput(c.stderr)
 		connection := flags.String("connection", "", "exact connection")
-		folder := flags.String("folder", "", "drafts folder")
-		uid := flags.Uint64("uid", 0, "existing draft UID")
+		id := flags.String("id", "", "opaque draft id from mail list or search")
+		folder := flags.String("folder", "", "drafts folder; unused when --id encodes it")
+		uid := flags.Uint64("uid", 0, "deprecated IMAP-only UID alias for --id")
 		file := flags.String("file", "", "draft message JSON file, or -")
 		if err := flags.Parse(args[2:]); err != nil {
 			return err
@@ -405,11 +408,18 @@ func (c *CLI) mail(ctx context.Context, args []string) error {
 				return fmt.Errorf("decode draft: %w", err)
 			}
 		}
-		messageUID, err := checkedUID(*uid)
-		if err != nil {
-			return err
+		loc := service.MessageLocator{ID: strings.TrimSpace(*id), Folder: *folder}
+		if *uid != 0 {
+			messageUID, err := checkedUID(*uid)
+			if err != nil {
+				return err
+			}
+			loc.UID = messageUID
 		}
-		prepared, err := c.service.PrepareDraft(ctx, *connection, kind, *folder, messageUID, message)
+		if args[1] != "create" && loc.ID == "" && loc.UID == 0 {
+			return fmt.Errorf("mail draft %s requires --id", args[1])
+		}
+		prepared, err := c.service.PrepareDraft(ctx, *connection, kind, loc, message)
 		if err != nil {
 			return err
 		}
@@ -850,6 +860,21 @@ func parseOptionalTime(value string) (time.Time, error) {
 		return time.Time{}, nil
 	}
 	return time.Parse(time.RFC3339, value)
+}
+
+func parseMessageLocator(id, folder string, uid uint64) (service.MessageLocator, error) {
+	loc := service.MessageLocator{ID: strings.TrimSpace(id), Folder: folder}
+	if uid != 0 {
+		parsed, err := checkedUID(uid)
+		if err != nil {
+			return service.MessageLocator{}, err
+		}
+		loc.UID = parsed
+	}
+	if loc.ID == "" && loc.UID == 0 {
+		return service.MessageLocator{}, fmt.Errorf("message --id is required (deprecated IMAP --uid is still accepted)")
+	}
+	return loc, nil
 }
 
 func checkedUID(value uint64) (uint32, error) {

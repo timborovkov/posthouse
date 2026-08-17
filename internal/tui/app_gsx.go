@@ -73,8 +73,8 @@ type posthouseApp struct {
 	providerReadUpdates    chan providerReadSnapshot
 	executeOperation       func(context.Context, string) (model.OperationResult, error)
 	doctorConnection       func(context.Context, string) (model.DoctorResult, error)
-	getMessage             func(context.Context, string, string, uint32) (model.MessageDetail, error)
-	getAttachment          func(context.Context, string, string, uint32, string) (model.Attachment, []byte, error)
+	getMessage             func(context.Context, string, service.MessageLocator) (model.MessageDetail, error)
+	getAttachment          func(context.Context, string, service.MessageLocator, string) (model.Attachment, []byte, error)
 	ctx                    context.Context
 	cancel                 context.CancelFunc
 	refreshCancel          context.CancelFunc
@@ -332,7 +332,7 @@ func (p *posthouseApp) openSelected(ke tui.KeyEvent) {
 		}
 		item := items[p.selected.Get()]
 		p.startProviderRead("message", func(ctx context.Context) providerReadSnapshot {
-			detail, err := p.getMessage(ctx, item.ConnectionID, item.Folder, item.UID)
+			detail, err := p.getMessage(ctx, item.ConnectionID, messageLocator(item))
 			return providerReadSnapshot{detail: detail, err: err}
 		})
 	case 2:
@@ -343,7 +343,7 @@ func (p *posthouseApp) openSelected(ke tui.KeyEvent) {
 		}
 		attachment := attachments[p.selected.Get()]
 		p.startProviderRead("attachment", func(ctx context.Context) providerReadSnapshot {
-			metadata, data, err := p.getAttachment(ctx, detail.ConnectionID, detail.Folder, detail.UID, attachment.ID)
+			metadata, data, err := p.getAttachment(ctx, detail.ConnectionID, messageLocator(detail.Message), attachment.ID)
 			return providerReadSnapshot{attachment: metadata, data: data, err: err}
 		})
 	}
@@ -529,13 +529,14 @@ func (p *posthouseApp) submitEditor() {
 			err = fmt.Errorf("selected message is no longer available")
 		} else {
 			action := strings.ToLower(strings.TrimSpace(values[0]))
-			payload := service.MailAction{Folder: item.Folder, UID: item.UID}
+			loc := messageLocator(item)
+			payload := service.MailAction{ID: loc.ID, Folder: loc.Folder, UID: loc.UID}
 			kind := "mail." + action
 			switch action {
 			case "reply":
-				prepared, err = p.service.PrepareReply(p.ctx, item.ConnectionID, item.Folder, item.UID, values[2])
+				prepared, err = p.service.PrepareReply(p.ctx, item.ConnectionID, loc, values[2])
 			case "forward":
-				prepared, err = p.service.PrepareForward(p.ctx, item.ConnectionID, item.Folder, item.UID, splitValues(values[1]), values[2])
+				prepared, err = p.service.PrepareForward(p.ctx, item.ConnectionID, loc, splitValues(values[1]), values[2])
 			case "mark-read":
 				value := true
 				payload.Seen = &value
@@ -599,7 +600,7 @@ func (p *posthouseApp) submitEditor() {
 			}
 			mode := strings.ToLower(strings.TrimSpace(values[1]))
 			if mode == "draft" {
-				prepared, err = p.service.PrepareDraft(p.ctx, values[0], "mail.draft.create", "", 0, message)
+				prepared, err = p.service.PrepareDraft(p.ctx, values[0], "mail.draft.create", service.MessageLocator{}, message)
 			} else if mode == "send" || mode == "" {
 				prepared, err = p.service.PrepareSend(p.ctx, message)
 			} else {
@@ -669,7 +670,7 @@ func (p *posthouseApp) defaultCalendarTarget() (string, string) {
 }
 
 func (p *posthouseApp) selectedMessage() (model.Message, bool) {
-	if p.view.Get() == 2 && p.detail.Get().UID != 0 {
+	if p.view.Get() == 2 && (p.detail.Get().ID != "" || p.detail.Get().UID != 0) {
 		return p.detail.Get().Message, true
 	}
 	if p.view.Get() == 1 {
@@ -679,6 +680,10 @@ func (p *posthouseApp) selectedMessage() (model.Message, bool) {
 		}
 	}
 	return model.Message{}, false
+}
+
+func messageLocator(message model.Message) service.MessageLocator {
+	return service.MessageLocator{ID: message.ID, Folder: message.Folder, UID: message.UID}
 }
 
 func (p *posthouseApp) confirmModal(ke tui.KeyEvent) {

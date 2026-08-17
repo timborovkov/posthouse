@@ -83,13 +83,13 @@ posthouse mail list --category work --label primary --unread
 posthouse mail search --query renewal --page-size 25
 posthouse calendar list --collection team --start 2026-08-01T00:00:00Z
 
-posthouse mail get --connection work --folder INBOX --uid 42
+posthouse mail get --connection work --id MESSAGE_ID
 posthouse mail send --connection work --to teammate@example.test --subject Status --body-file status.txt
 posthouse operation show 'TOKEN'
 posthouse operation execute 'TOKEN'
 
-posthouse mail reply --connection work --folder INBOX --uid 42 --body 'Thanks'
-posthouse mail archive --connection work --folder INBOX --uid 42
+posthouse mail reply --connection work --id MESSAGE_ID --body 'Thanks'
+posthouse mail archive --connection work --id MESSAGE_ID
 
 posthouse calendar create --connection work --file event.json
 posthouse calendar ics --title Planning --start 2026-08-17T09:00:00+03:00 --end 2026-08-17T10:00:00+03:00 --output planning.ics

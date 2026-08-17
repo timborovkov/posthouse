@@ -120,14 +120,14 @@ func TestProviderReadsRunOffEventLoopAndAreCancellable(t *testing.T) {
 			case "message":
 				app.view.Set(1)
 				app.messages.Set([]model.Message{{ConnectionID: "work", Folder: "INBOX", UID: 1}})
-				app.getMessage = func(ctx context.Context, _, _ string, _ uint32) (model.MessageDetail, error) {
+				app.getMessage = func(ctx context.Context, _ string, _ service.MessageLocator) (model.MessageDetail, error) {
 					wait(ctx)
 					return model.MessageDetail{}, ctx.Err()
 				}
 			case "attachment":
 				app.view.Set(2)
 				app.detail.Set(model.MessageDetail{Message: model.Message{ConnectionID: "work", Folder: "INBOX", UID: 1}, Attachments: []model.Attachment{{ID: "one"}}})
-				app.getAttachment = func(ctx context.Context, _, _ string, _ uint32, _ string) (model.Attachment, []byte, error) {
+				app.getAttachment = func(ctx context.Context, _ string, _ service.MessageLocator, _ string) (model.Attachment, []byte, error) {
 					wait(ctx)
 					return model.Attachment{}, nil, ctx.Err()
 				}

@@ -33,7 +33,7 @@ An opaque, query-bound continuation token that resumes a list or search after it
 _Avoid_: Offset, page number, bookmark
 
 **Message**:
-An email item received from or sent through a mail-capable connection.
+An email item received from or sent through a mail-capable connection. Public identity is the connection plus an opaque `id`; `folder` is mailbox display metadata, and RFC `message_id` remains the header.
 _Avoid_: Mail, email
 
 **Event**:

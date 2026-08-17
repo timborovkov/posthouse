@@ -194,6 +194,36 @@ func TestSearchMessagesCompositeCursor(t *testing.T) {
 	}
 }
 
+func TestSearchAndGetRoundTripOpaqueMessageID(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	application := serviceWithConnections(t, mailConnection("work"))
+	application.mailSearch = func(_ model.Connection, _ postmail.SearchOptions) (postmail.SearchResult, error) {
+		return postmail.SearchResult{Messages: []model.Message{{ConnectionID: "work", Folder: "INBOX", UID: 42, Subject: "renewal"}}, UIDValidity: 9, UIDNext: 43}, nil
+	}
+	application.mailGetMessage = func(_ context.Context, connection model.Connection, folder string, uid uint32) (postmail.FetchedMessage, error) {
+		if folder != "INBOX" || uid != 42 {
+			t.Fatalf("get %s/%d", folder, uid)
+		}
+		return postmail.FetchedMessage{Detail: model.MessageDetail{Message: model.Message{ConnectionID: connection.ID, Folder: folder, UID: uid, Subject: "renewal"}, Text: "body"}, UIDValidity: 9}, nil
+	}
+	page, err := application.SearchMessages(model.Selector{}, postmail.SearchOptions{}, 10, "")
+	if err != nil || len(page.Messages) != 1 {
+		t.Fatalf("search page = %#v, %v", page, err)
+	}
+	wantID := postmail.EncodeIMAPID("INBOX", 9, 42)
+	if page.Messages[0].ID != wantID || page.Messages[0].UID != 42 {
+		t.Fatalf("search identity = %#v", page.Messages[0])
+	}
+	byID, err := application.GetMessageModeContext(context.Background(), "work", MessageLocator{ID: page.Messages[0].ID}, "")
+	if err != nil || byID.ID != wantID || byID.UID != 42 || byID.Text != "body" {
+		t.Fatalf("get by id = %#v, %v", byID, err)
+	}
+	byUID, err := application.GetMessageMode("work", "INBOX", 42, "")
+	if err != nil || byUID.ID != wantID || byUID.UID != 42 {
+		t.Fatalf("get by deprecated uid = %#v, %v", byUID, err)
+	}
+}
+
 func TestSearchMessagesOfflineCachePaginatesMergedLiveTraversal(t *testing.T) {
 	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
 	application := serviceWithConnections(t, mailConnection("work"))
@@ -518,7 +548,7 @@ func TestReplyPreparationUsesOneProviderSnapshotBeforeMessageRead(t *testing.T) 
 		t.Setenv("PASSWORD", "rotated-during-read")
 		return postmail.FetchedMessage{Detail: model.MessageDetail{Message: model.Message{MessageID: "original", From: []model.Address{{Email: "sender@example.test"}}, Subject: "subject"}, Text: "original"}, UIDValidity: 7}, nil
 	}
-	prepared, err := application.PrepareReply(context.Background(), "work", "INBOX", 1, "reply")
+	prepared, err := application.PrepareReply(context.Background(), "work", MessageLocator{Folder: "INBOX", UID: 1}, "reply")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1314,7 +1344,7 @@ func TestDraftPreconditionRefreshPropagatesCancellation(t *testing.T) {
 		<-ctx.Done()
 		return postmail.MessagePrecondition{}, ctx.Err()
 	}
-	prepared, err := application.PrepareDraft(context.Background(), "work", "mail.draft.update", "Drafts", 7, model.SendMessage{To: []string{"person@example.test"}, Subject: "draft", Text: "body"})
+	prepared, err := application.PrepareDraft(context.Background(), "work", "mail.draft.update", MessageLocator{Folder: "Drafts", UID: 7}, model.SendMessage{To: []string{"person@example.test"}, Subject: "draft", Text: "body"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1340,7 +1370,7 @@ func TestIMAPMutationTransportLossPersistsUncertainStatus(t *testing.T) {
 	application.mailMarkDeleted = func(model.Connection, string, uint32, postmail.MessagePrecondition) error {
 		return &postmail.UncertainMutationError{Err: errors.New("connection closed")}
 	}
-	prepared, err := application.PrepareDraft(context.Background(), "work", "mail.draft.delete", "Drafts", 7, model.SendMessage{})
+	prepared, err := application.PrepareDraft(context.Background(), "work", "mail.draft.delete", MessageLocator{Folder: "Drafts", UID: 7}, model.SendMessage{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1561,7 +1591,7 @@ func TestAttachmentContinuationKeepsOriginalUIDValiditySnapshot(t *testing.T) {
 		return model.Attachment{ID: "file", Name: "report.pdf"}, []byte(fmt.Sprintf("content-%d", uidValidity)), uidValidity, nil
 	}
 	ctx := context.Background()
-	_, firstData, cursor, err := application.GetAttachmentSnapshotMode(ctx, "work", "INBOX", 7, "file", "", "")
+	_, firstData, cursor, err := application.GetAttachmentSnapshotMode(ctx, "work", MessageLocator{Folder: "INBOX", UID: 7}, "file", "", "")
 	if err != nil || cursor == "" || string(firstData) != "content-11" || fetches != 1 {
 		t.Fatalf("first snapshot chunk data=%q cursor=%q fetches=%d err=%v", firstData, cursor, fetches, err)
 	}
@@ -1569,7 +1599,7 @@ func TestAttachmentContinuationKeepsOriginalUIDValiditySnapshot(t *testing.T) {
 	if _, data, err := application.GetAttachmentMode(ctx, "work", "INBOX", 7, "file", "refresh"); err != nil || string(data) != "content-12" {
 		t.Fatalf("replacement mailbox fetch data=%q err=%v", data, err)
 	}
-	attachment, continuedData, continuedCursor, err := application.GetAttachmentSnapshotMode(ctx, "work", "INBOX", 7, "file", "", cursor)
+	attachment, continuedData, continuedCursor, err := application.GetAttachmentSnapshotMode(ctx, "work", MessageLocator{Folder: "INBOX", UID: 7}, "file", "", cursor)
 	if err != nil || attachment.Stale || string(continuedData) != "content-11" || continuedCursor != cursor || fetches != 2 {
 		t.Fatalf("continuation mixed snapshots: attachment=%#v data=%q cursor=%q fetches=%d err=%v", attachment, continuedData, continuedCursor, fetches, err)
 	}
@@ -1582,7 +1612,7 @@ func TestAttachmentSnapshotCarriesFetchedUIDValidity(t *testing.T) {
 		return model.Attachment{ID: "file"}, []byte("old bytes"), 11, nil
 	}
 	ctx := context.Background()
-	_, data, snapshot, err := application.getAttachmentModeSnapshot(ctx, "work", "INBOX", 7, "file", "refresh")
+	_, data, snapshot, err := application.getAttachmentModeSnapshot(ctx, "work", MessageLocator{Folder: "INBOX", UID: 7}, "file", "refresh")
 	if err != nil || snapshot.UIDValidity != 11 || string(data) != "old bytes" {
 		t.Fatalf("fetched snapshot = %#v %q, %v", snapshot, data, err)
 	}
@@ -1614,7 +1644,7 @@ func TestAttachmentSnapshotReturnsCursorlessDataAfterCacheEviction(t *testing.T)
 	application.mailGetAttachment = func(context.Context, model.Connection, string, uint32, string) (model.Attachment, []byte, uint32, error) {
 		return model.Attachment{ID: "file"}, []byte("fetched bytes"), 11, nil
 	}
-	attachment, data, cursor, err := application.GetAttachmentSnapshotMode(context.Background(), "work", "INBOX", 7, "file", "refresh", "")
+	attachment, data, cursor, err := application.GetAttachmentSnapshotMode(context.Background(), "work", MessageLocator{Folder: "INBOX", UID: 7}, "file", "refresh", "")
 	if err != nil || attachment.ID != "file" || string(data) != "fetched bytes" || cursor != "" {
 		t.Fatalf("cursorless fetched attachment = %#v %q %q, %v", attachment, data, cursor, err)
 	}
@@ -1717,12 +1747,12 @@ func TestMessageFetchReceivesContextAndRejectsOldMailboxCache(t *testing.T) {
 		}
 		return postmail.FetchedMessage{}, errors.New("new mailbox message missing")
 	}
-	if detail, err := application.GetMessageModeContext(context.Background(), "work", "INBOX", 7, ""); err == nil || detail.Subject == "old mailbox" {
+	if detail, err := application.GetMessageModeContext(context.Background(), "work", MessageLocator{Folder: "INBOX", UID: 7}, ""); err == nil || detail.Subject == "old mailbox" {
 		t.Fatalf("UIDVALIDITY mismatch returned old body %#v: %v", detail, err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := application.GetMessageModeContext(ctx, "work", "INBOX", 7, "refresh"); !errors.Is(err, context.Canceled) {
+	if _, err := application.GetMessageModeContext(ctx, "work", MessageLocator{Folder: "INBOX", UID: 7}, "refresh"); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled message fetch returned %v", err)
 	}
 }
@@ -1907,7 +1937,7 @@ func TestFailedDraftDeleteDoesNotClaimDeletion(t *testing.T) {
 	application.mailMarkDeleted = func(model.Connection, string, uint32, postmail.MessagePrecondition) error {
 		return fmt.Errorf("provider rejected delete")
 	}
-	prepared, err := application.PrepareDraft(context.Background(), "work", "mail.draft.delete", "Drafts", 7, model.SendMessage{})
+	prepared, err := application.PrepareDraft(context.Background(), "work", "mail.draft.delete", MessageLocator{Folder: "Drafts", UID: 7}, model.SendMessage{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1959,7 +1989,7 @@ func TestAppendTransportFailureIsUncertain(t *testing.T) {
 	application.mailAppend = func(model.Connection, string, model.SendMessage, []imap.Flag) (uint32, error) {
 		return 0, &postmail.UncertainAppendError{Err: fmt.Errorf("connection closed")}
 	}
-	prepared, err := application.PrepareDraft(context.Background(), "work", "mail.draft.create", "Drafts", 0, model.SendMessage{})
+	prepared, err := application.PrepareDraft(context.Background(), "work", "mail.draft.create", MessageLocator{Folder: "Drafts"}, model.SendMessage{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2138,7 +2168,7 @@ func TestPrepareDraftPreviewIncludesEverySerializedField(t *testing.T) {
 	connection.Mail.Folders.Drafts = "Drafts"
 	application := serviceWithConnections(t, connection)
 	message := model.SendMessage{To: []string{"to@example.test"}, CC: []string{"cc@example.test"}, BCC: []string{"bcc@example.test"}, Subject: "subject", Text: "body", ReplyTo: "reply@example.test", InReplyTo: "parent", References: []string{"one", "two"}}
-	prepared, err := application.PrepareDraft(context.Background(), "work", "mail.draft.create", "Drafts", 0, message)
+	prepared, err := application.PrepareDraft(context.Background(), "work", "mail.draft.create", MessageLocator{Folder: "Drafts"}, message)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2247,7 +2277,7 @@ func TestDraftUpdateCleanupFailurePreservesAppendedUIDAsUncertain(t *testing.T) 
 	application.mailMarkDeleted = func(model.Connection, string, uint32, postmail.MessagePrecondition) error {
 		return fmt.Errorf("concurrent modification")
 	}
-	prepared, err := application.PrepareDraft(context.Background(), "work", "mail.draft.update", "Drafts", 5, model.SendMessage{Subject: "replacement"})
+	prepared, err := application.PrepareDraft(context.Background(), "work", "mail.draft.update", MessageLocator{Folder: "Drafts", UID: 5}, model.SendMessage{Subject: "replacement"})
 	if err != nil {
 		t.Fatal(err)
 	}
