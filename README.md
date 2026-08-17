@@ -63,7 +63,7 @@ connection, with a ten-minute prepare → preview → execute flow.
 | **TUI** | Keyboard-first daily loop; optional — same operations as CLI/MCP. |
 | **MCP** | Local `stdio` or Streamable HTTP for Claude, Cursor, Codex, Hermes, … |
 | **REST** | `/v1` on a personal `posthouse serve` (access key required). |
-| **Agent skills** | `posthouse skill install --agent …` ships CLI / MCP / REST skill files. |
+| **Agent skills** | `posthouse skill install --agent …` ships `connections` / `mail` / `calendar` (plus `mcp` / `rest`). |
 
 Recipients are raw addresses (no contacts registry). The TUI is optional.
 
@@ -74,7 +74,16 @@ go install github.com/timborovkov/posthouse/cmd/posthouse@latest
 posthouse tui
 ```
 
-First connection, agents, Docker, Railway:
+Teach a local agent the CLI skills (Codex, Claude, Cursor, Hermes):
+
+```sh
+posthouse skill install --agent codex connections mail calendar
+posthouse skill list
+```
+
+Add `--all` (or `mcp` / `rest`) when the agent should also use MCP or the HTTP API. Re-running install refreshes files and removes retired skill folders (`cli`, `email-inboxes`, `email-send`). `--agent codex` installs into `~/.agents/skills` and also refreshes `~/.codex/skills` for older Codex builds.
+
+Non-technical path (first connection, agents, private server):
 [GETTING-STARTED.md](./GETTING-STARTED.md).
 
 Full CLI, MCP, REST, and deploy detail:

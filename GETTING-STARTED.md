@@ -110,16 +110,20 @@ Pick the surface that matches how you run Posthouse:
 
 | You have | Teach the agent |
 | --- | --- |
-| CLI on this machine | `posthouse skill install --agent claude cli` (or `cursor` / `codex` / `hermes`) |
+| CLI on this machine | `posthouse skill install --agent claude connections mail calendar` (or `cursor` / `codex` / `hermes`) |
 | Local MCP | `posthouse mcp stdio` and the `mcp` skill |
 | Server URL | `rest` and/or `mcp` skills, plus `POSTHOUSE_ACCESS_KEY` |
 
-Install every shipped skill:
+Default local install is the CLI trio. Add transports only when needed:
 
 ```sh
-posthouse skill install --agent claude --all
+posthouse skill install --agent claude connections mail calendar
+posthouse skill install --agent claude mcp          # or: rest
+posthouse skill install --agent claude --all        # connections, mail, calendar, rest, mcp
 posthouse skill list
 ```
+
+Five skills, one job each: `connections`, `mail`, `calendar`, plus `mcp` / `rest` for remote transports. Re-running install overwrites shipped files and deletes retired folders (`posthouse-cli`, `posthouse-email-inboxes`, `posthouse-email-send`). `--agent codex` installs into `~/.agents/skills` and also refreshes `~/.codex/skills`.
 
 `--dir PATH` copies into any other agent skill folder. Claude marketplace plugins are a later option; skills work today.
 

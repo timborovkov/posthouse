@@ -247,7 +247,7 @@
               </tr>
               <tr>
                 <td>Agent skills</td>
-                <td><code>posthouse skill install --agent …</code> ships CLI / MCP / REST skill files.</td>
+                <td><code>posthouse skill install --agent …</code> ships <code>connections</code> / <code>mail</code> / <code>calendar</code> (plus <code>mcp</code> / <code>rest</code>).</td>
               </tr>
             </tbody>
           </table>
@@ -385,13 +385,16 @@ posthouse tui</code></pre>
               <code>--agent</code> accepts <code>claude</code>, <code>cursor</code>,
               <code>codex</code>, or <code>hermes</code>.
             </p>
-            <pre><code>posthouse skill install --agent claude --all
+            <pre><code>posthouse skill install --agent claude connections mail calendar
 posthouse skill list
-# or copy into any folder: posthouse skill install --dir PATH cli mcp rest</code></pre>
+# transports when needed:
+# posthouse skill install --agent claude mcp
+# posthouse skill install --agent claude --all
+# or: posthouse skill install --dir PATH connections mail calendar</code></pre>
             <p>Pick the surface that matches how you run Posthouse:</p>
             <ul>
-              <li>CLI on this machine → install the <code>cli</code> skill (or <code>--all</code>)</li>
-              <li>Local MCP → <code>posthouse mcp stdio</code> + <code>mcp</code> skill</li>
+              <li>CLI on this machine → <code>connections mail calendar</code></li>
+              <li>Local MCP → <code>posthouse mcp stdio</code> + the <code>mcp</code> skill</li>
               <li>Server URL → <code>rest</code> and/or <code>mcp</code> skills + <code>POSTHOUSE_ACCESS_KEY</code></li>
             </ul>
           </div>
@@ -401,7 +404,7 @@ posthouse skill list
           <summary><span class="setup-title">Claude</span></summary>
           <div class="setup-body">
             <p>Install the CLI first (above), then skills:</p>
-            <pre><code>posthouse skill install --agent claude --all</code></pre>
+            <pre><code>posthouse skill install --agent claude connections mail calendar</code></pre>
             <p>Register local MCP stdio in your MCP client config (no access key):</p>
             <pre><code>{
   "mcpServers": {
@@ -423,7 +426,7 @@ posthouse skill list
           <summary><span class="setup-title">Codex</span></summary>
           <div class="setup-body">
             <p>Install the Posthouse binary, then skills and the same MCP stdio config pattern as Claude:</p>
-            <pre><code>posthouse skill install --agent codex --all</code></pre>
+            <pre><code>posthouse skill install --agent codex connections mail calendar</code></pre>
             <pre><code>{
   "mcpServers": {
     "posthouse": {
@@ -442,7 +445,7 @@ posthouse skill list
               Install the CLI, then Hermes skills. Hermes calls the same MCP tools
               (<code>messages_search</code>, prepare/execute, and so on.
             </p>
-            <pre><code>posthouse skill install --agent hermes --all</code></pre>
+            <pre><code>posthouse skill install --agent hermes connections mail calendar</code></pre>
             <p>Local stdio (same JSON shape as Claude/Codex), or remote HTTPS:</p>
             <pre><code># Local: posthouse mcp stdio via the MCP client config
 # Remote MCP:
@@ -455,7 +458,7 @@ posthouse skill list
           <summary><span class="setup-title">Cursor</span></summary>
           <div class="setup-body">
             <p>Install the CLI, then Cursor skills and an MCP server entry:</p>
-            <pre><code>posthouse skill install --agent cursor --all</code></pre>
+            <pre><code>posthouse skill install --agent cursor connections mail calendar</code></pre>
             <pre><code>{
   "mcpServers": {
     "posthouse": {
@@ -618,7 +621,7 @@ curl -sS https://mail.example.com/healthz</code></pre>
               skills and the URL — not local <code>stdio</code>.
             </p>
             <pre><code>posthouse skill install --agent claude rest mcp
-# (or cursor / codex / hermes)</code></pre>
+# (or cursor / codex / hermes; add connections mail calendar if the agent also runs the CLI)</code></pre>
             <pre><code># MCP over HTTPS
 URL:     https://YOUR-HOST/mcp
 Header:  Authorization: Bearer &lt;POSTHOUSE_ACCESS_KEY&gt;
