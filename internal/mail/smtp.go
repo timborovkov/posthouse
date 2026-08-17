@@ -312,38 +312,54 @@ func writeMessage(writer io.Writer, identity model.Identity, from string, messag
 		return fmt.Errorf("generate message ID: %w", err)
 	}
 	if len(message.Attachments) == 0 {
-		var inline gomail.InlineHeader
-		inline.Set("Content-Type", `text/plain; charset="utf-8"`)
-		part, err := gomail.CreateSingleInlineWriter(writer, header)
+		if strings.TrimSpace(message.HTML) == "" {
+			var inline gomail.InlineHeader
+			inline.Set("Content-Type", `text/plain; charset="utf-8"`)
+			part, err := gomail.CreateSingleInlineWriter(writer, header)
+			if err != nil {
+				return fmt.Errorf("create message body: %w", err)
+			}
+			_, writeErr := io.WriteString(part, normalizeBody(message.Text))
+			closeErr := part.Close()
+			if writeErr != nil {
+				return writeErr
+			}
+			return closeErr
+		}
+		alternative, err := gomail.CreateInlineWriter(writer, header)
 		if err != nil {
-			return fmt.Errorf("create message body: %w", err)
+			return fmt.Errorf("create alternative message: %w", err)
 		}
-		_, writeErr := io.WriteString(part, normalizeBody(message.Text))
-		closeErr := part.Close()
-		if writeErr != nil {
-			return writeErr
+		if err := writeTextAndHTML(alternative.CreatePart, message); err != nil {
+			_ = alternative.Close()
+			return err
 		}
-		return closeErr
+		return alternative.Close()
 	}
 	multipart, err := gomail.CreateWriter(writer, header)
 	if err != nil {
 		return fmt.Errorf("create multipart message: %w", err)
 	}
-	var inline gomail.InlineHeader
-	inline.Set("Content-Type", `text/plain; charset="utf-8"`)
-	body, err := multipart.CreateSingleInline(inline)
-	if err != nil {
-		_ = multipart.Close()
-		return fmt.Errorf("create message body: %w", err)
-	}
-	if _, err := io.WriteString(body, normalizeBody(message.Text)); err != nil {
-		_ = body.Close()
-		_ = multipart.Close()
-		return err
-	}
-	if err := body.Close(); err != nil {
-		_ = multipart.Close()
-		return err
+	if strings.TrimSpace(message.HTML) == "" {
+		if err := writeInlinePart(multipart.CreateSingleInline, `text/plain; charset="utf-8"`, message.Text); err != nil {
+			_ = multipart.Close()
+			return err
+		}
+	} else {
+		alternative, err := multipart.CreateInline()
+		if err != nil {
+			_ = multipart.Close()
+			return fmt.Errorf("create alternative body: %w", err)
+		}
+		if err := writeTextAndHTML(alternative.CreatePart, message); err != nil {
+			_ = alternative.Close()
+			_ = multipart.Close()
+			return err
+		}
+		if err := alternative.Close(); err != nil {
+			_ = multipart.Close()
+			return err
+		}
 	}
 	for _, attachment := range message.Attachments {
 		name := attachment.Name
@@ -390,6 +406,32 @@ func writeMessage(writer io.Writer, identity model.Identity, from string, messag
 		}
 	}
 	return multipart.Close()
+}
+
+func writeTextAndHTML(create func(gomail.InlineHeader) (io.WriteCloser, error), message model.SendMessage) error {
+	text := message.Text
+	if strings.TrimSpace(text) == "" {
+		text = htmlToText(message.HTML)
+	}
+	if err := writeInlinePart(create, `text/plain; charset="utf-8"`, text); err != nil {
+		return err
+	}
+	return writeInlinePart(create, `text/html; charset="utf-8"`, message.HTML)
+}
+
+func writeInlinePart(create func(gomail.InlineHeader) (io.WriteCloser, error), contentType, body string) error {
+	var inline gomail.InlineHeader
+	inline.Set("Content-Type", contentType)
+	part, err := create(inline)
+	if err != nil {
+		return fmt.Errorf("create %s body: %w", contentType, err)
+	}
+	_, writeErr := io.WriteString(part, normalizeBody(body))
+	closeErr := part.Close()
+	if writeErr != nil {
+		return writeErr
+	}
+	return closeErr
 }
 
 func setAddresses(header *gomail.Header, key string, values []string) error {

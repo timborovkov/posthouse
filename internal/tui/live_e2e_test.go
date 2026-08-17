@@ -45,7 +45,7 @@ func TestTUISendSearchAndCreateEventAgainstGenericServers(t *testing.T) {
 	waitSnapshot(t, app)
 
 	subject := fmt.Sprintf("TUI surface mail %d", time.Now().UnixNano())
-	app.beginEditor("mail", []string{"work", "send", "personal@personal.test", subject, "tui body", ""})
+	app.beginEditor("mail", []string{"work", "send", "personal@personal.test", "", "", subject, "text", "tui body", ""})
 	app.submitEditor()
 	if app.pendingToken.Get() == "" {
 		t.Fatalf("TUI send prepare failed: %s", app.errorText.Get())

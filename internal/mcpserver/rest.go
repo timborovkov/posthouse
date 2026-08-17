@@ -192,7 +192,7 @@ func (s *Server) restMailSend(writer http.ResponseWriter, request *http.Request)
 	if !decodeJSON(writer, request, &input) {
 		return
 	}
-	prepared, err := s.service.PrepareSend(request.Context(), model.SendMessage{ConnectionID: input.Connection, To: input.To, CC: input.CC, BCC: input.BCC, Subject: input.Subject, Text: input.Text, ReplyTo: input.ReplyTo, InReplyTo: input.InReplyTo, References: input.References, Attachments: mcpAttachments(input.Attachments)})
+	prepared, err := s.service.PrepareSend(request.Context(), model.SendMessage{ConnectionID: input.Connection, To: input.To, CC: input.CC, BCC: input.BCC, Subject: input.Subject, Text: input.Text, HTML: input.HTML, ReplyTo: input.ReplyTo, InReplyTo: input.InReplyTo, References: input.References, Attachments: mcpAttachments(input.Attachments)})
 	writeResult(writer, prepared, err)
 }
 
@@ -201,7 +201,7 @@ func (s *Server) restMailReply(writer http.ResponseWriter, request *http.Request
 	if !decodeJSON(writer, request, &input) {
 		return
 	}
-	prepared, err := s.service.PrepareReply(request.Context(), input.Connection, input.Folder, input.UID, input.Text)
+	prepared, err := s.service.PrepareReply(request.Context(), input.Connection, input.Folder, input.UID, input.Text, input.HTML)
 	writeResult(writer, prepared, err)
 }
 
@@ -210,7 +210,7 @@ func (s *Server) restMailForward(writer http.ResponseWriter, request *http.Reque
 	if !decodeJSON(writer, request, &input) {
 		return
 	}
-	prepared, err := s.service.PrepareForward(request.Context(), input.Connection, input.Folder, input.UID, input.To, input.Text)
+	prepared, err := s.service.PrepareForward(request.Context(), input.Connection, input.Folder, input.UID, input.To, input.Text, input.HTML)
 	writeResult(writer, prepared, err)
 }
 

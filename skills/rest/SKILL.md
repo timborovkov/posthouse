@@ -35,7 +35,7 @@ Do not send filesystem attachment `path` fields. Use base64 `data` on attachment
 ```sh
 curl -sS -H "Authorization: Bearer $POSTHOUSE_ACCESS_KEY" "$POSTHOUSE_URL/v1/connections"
 curl -sS -H "Authorization: Bearer $POSTHOUSE_ACCESS_KEY" -H "Content-Type: application/json" \
-  -d '{"connection":"work","to":["teammate@example.test"],"subject":"Status","text":"Update"}' \
+  -d '{"connection":"work","to":["teammate@example.test"],"subject":"Status","text":"Update","html":"<p>Update</p>"}' \
   "$POSTHOUSE_URL/v1/mail/send"
 ```
 

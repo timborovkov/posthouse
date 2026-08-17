@@ -88,6 +88,9 @@ func TestServerListsAndCallsReadOnlyConnectionTool(t *testing.T) {
 		if strings.Contains(string(schema), `"path"`) {
 			t.Fatalf("remote attachment schema exposes host filesystem paths: %s", schema)
 		}
+		if !strings.Contains(string(schema), `"html"`) {
+			t.Fatalf("%s schema lacks html body field: %s", tool.Name, schema)
+		}
 	}
 	attachmentSchema, _ := json.Marshal(attachmentTool.InputSchema)
 	if !strings.Contains(string(attachmentSchema), `"cursor"`) {

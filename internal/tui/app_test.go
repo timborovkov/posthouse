@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -53,7 +54,7 @@ func TestModalEscapeNeverExecutesPendingToken(t *testing.T) {
 	defer app.close()
 	app.modal.Set(true)
 	app.pendingToken.Set("opaque")
-	dispatch(app.KeyMap(), tui.KeyEvent{Key: tui.KeyEscape})
+	dispatch(app.modalKeyMap(), tui.KeyEvent{Key: tui.KeyEscape})
 	if app.modal.Get() || app.pendingToken.Get() != "" {
 		t.Fatal("escape did not cancel pending modal")
 	}
@@ -79,7 +80,7 @@ func TestOperationExecutionRunsOffEventLoopAndIsCancellable(t *testing.T) {
 	if app.executingToken.Get() != "opaque" || app.pendingToken.Get() != "" || !app.modal.Get() {
 		t.Fatalf("execution state token=%q pending=%q modal=%v", app.executingToken.Get(), app.pendingToken.Get(), app.modal.Get())
 	}
-	dispatch(app.KeyMap(), tui.KeyEvent{Key: tui.KeyEscape})
+	dispatch(app.modalKeyMap(), tui.KeyEvent{Key: tui.KeyEscape})
 	if app.modal.Get() {
 		t.Fatal("Escape did not close executing operation modal")
 	}
@@ -189,38 +190,99 @@ func TestPartialSourceErrorsAreVisible(t *testing.T) {
 func TestComposePreparesExactPreviewBeforeConfirmation(t *testing.T) {
 	app := testAppWithMailConnection(t)
 	defer app.close()
-	app.beginEditor("mail", []string{"work", "send", "person@example.test", "Status", "Private body", ""})
+	app.beginEditor("mail", []string{"work", "send", "person@example.test", "cc@example.test", "", "Status", "text", "Private body", ""})
 	app.submitEditor()
 	if app.editor.Get() || !app.modal.Get() || app.pendingToken.Get() == "" {
 		t.Fatalf("compose state editor=%v modal=%v token=%q error=%q", app.editor.Get(), app.modal.Get(), app.pendingToken.Get(), app.errorText.Get())
 	}
 	preview := app.modalText.Get()
-	for _, expected := range []string{"Connection: work", "operator@example.test", "person@example.test", "Status"} {
+	for _, expected := range []string{"Connection: work", "operator@example.test", "person@example.test", "cc@example.test", "Status", "Private body"} {
 		if !strings.Contains(preview, expected) {
 			t.Fatalf("preview %q does not contain %q", preview, expected)
 		}
 	}
-	dispatch(app.KeyMap(), tui.KeyEvent{Key: tui.KeyEscape})
+	dispatch(app.modalKeyMap(), tui.KeyEvent{Key: tui.KeyEscape})
 	if app.modal.Get() || app.pendingToken.Get() != "" {
 		t.Fatal("escape did not cancel the real prepared operation modal")
 	}
 }
 
-func TestComposeEditorIsKeyboardNavigableAndCancellable(t *testing.T) {
+func TestComposeHTMLBodyTypeReachesPreview(t *testing.T) {
+	app := testAppWithMailConnection(t)
+	defer app.close()
+	app.beginEditor("mail", []string{"work", "send", "person@example.test", "", "bcc@example.test", "Status", "html", "<p>Hello</p>", ""})
+	app.submitEditor()
+	if app.pendingToken.Get() == "" || !strings.Contains(app.modalText.Get(), "<p>Hello</p>") || !strings.Contains(app.modalText.Get(), "bcc@example.test") {
+		t.Fatalf("html preview token=%q modal=%q error=%q", app.pendingToken.Get(), app.modalText.Get(), app.errorText.Get())
+	}
+}
+
+func TestMountedModalKeyMapCancelsEditorAfterOpen(t *testing.T) {
 	app := testApp(t)
 	defer app.close()
-	app.beginEditor("mail", []string{"work", "", "", ""})
-	dispatch(app.KeyMap(), tui.KeyEvent{Key: tui.KeyRune, Rune: 'a'})
-	if app.editorValues.Get()[0] != "worka" {
-		t.Fatalf("editor value = %q", app.editorValues.Get()[0])
+	frozen := app.modalKeyMap()
+	app.beginEditor("mail", []string{"work", "send", "", "", "", "", "text", "", ""})
+	dispatch(frozen, tui.KeyEvent{Key: tui.KeyEscape})
+	if app.editor.Get() || app.modal.Get() {
+		t.Fatal("mounted modal keymap did not cancel editor")
 	}
-	dispatch(app.KeyMap(), tui.KeyEvent{Key: tui.KeyTab})
-	if app.editorStep.Get() != 1 {
-		t.Fatalf("editor step = %d", app.editorStep.Get())
+}
+
+func TestCancelModalClearsEditorState(t *testing.T) {
+	app := testApp(t)
+	defer app.close()
+	app.beginEditor("mail", []string{"work", "send", "", "", "", "", "text", "", ""})
+	app.cancelModal()
+	if app.editor.Get() || app.modal.Get() || app.editorKind.Get() != "" {
+		t.Fatal("cancelModal left editor state")
 	}
-	dispatch(app.KeyMap(), tui.KeyEvent{Key: tui.KeyEscape})
+}
+
+func TestComposeEditorBindsFieldStateAndCancelsFromModalKeys(t *testing.T) {
+	app := testApp(t)
+	defer app.close()
+	app.beginEditor("mail", []string{"work", "send", "", "", "", "", "text", "", ""})
+	if len(app.editorFields) != 9 || app.editorValue(0) != "work" || !app.editorFieldIsBody(7) {
+		t.Fatalf("editor fields=%d body=%v value=%q", len(app.editorFields), app.editorFieldIsBody(7), app.editorValue(0))
+	}
+	app.editorFields[0].Set("work-mail")
+	if app.editorValue(0) != "work-mail" {
+		t.Fatalf("editor value = %q", app.editorValue(0))
+	}
+	dispatch(app.modalKeyMap(), tui.KeyEvent{Key: tui.KeyEscape})
 	if app.editor.Get() || app.modal.Get() {
 		t.Fatal("escape did not cancel editor")
+	}
+}
+
+func TestAttachmentSaveUsesSelectedMessageAttachment(t *testing.T) {
+	app := testApp(t)
+	defer app.close()
+	if app.refreshCancel != nil {
+		app.refreshCancel()
+		app.wg.Wait()
+	}
+	app.view.Set(2)
+	app.detail.Set(model.MessageDetail{
+		Message:     model.Message{ConnectionID: "work", Folder: "INBOX", UID: 1},
+		Attachments: []model.Attachment{{ID: "one", Name: "a.txt"}, {ID: "two", Name: "b.txt"}},
+	})
+	app.selected.Set(1)
+	app.attachment.Set(model.Attachment{ID: "one", Name: "a.txt"})
+	app.attachmentData.Set([]byte("old"))
+	fetched := make(chan string, 1)
+	app.getAttachment = func(_ context.Context, _, _ string, _ uint32, id string) (model.Attachment, []byte, error) {
+		fetched <- id
+		return model.Attachment{ID: id, Name: "b.txt"}, []byte("new"), nil
+	}
+	app.beginAttachmentSave()
+	select {
+	case id := <-fetched:
+		if id != "two" {
+			t.Fatalf("fetched %q, want selected attachment two", id)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("did not fetch the selected attachment")
 	}
 }
 
@@ -259,11 +321,11 @@ func TestCanceledRefreshSnapshotCannotReplaceCurrentState(t *testing.T) {
 	app.refreshGeneration.Store(10)
 	app.loading.Set(true)
 	app.messages.Set([]model.Message{{Subject: "current"}})
-	app.applySnapshot(snapshot{generation: 9, messages: []model.Message{{Subject: "stale"}}})
+	app.applySnapshot(snapshot{generation: 9, scope: "mail", messages: []model.Message{{Subject: "stale"}}})
 	if got := app.messages.Get(); len(got) != 1 || got[0].Subject != "current" || !app.loading.Get() {
 		t.Fatalf("stale snapshot changed state: %#v loading=%v", got, app.loading.Get())
 	}
-	app.applySnapshot(snapshot{generation: 10, messages: []model.Message{{Subject: "fresh"}}})
+	app.applySnapshot(snapshot{generation: 10, scope: "mail", messages: []model.Message{{Subject: "fresh"}}})
 	if got := app.messages.Get(); len(got) != 1 || got[0].Subject != "fresh" || app.loading.Get() {
 		t.Fatalf("current snapshot state: %#v loading=%v", got, app.loading.Get())
 	}
@@ -277,9 +339,154 @@ func TestConnectionEditorSupportsSMTPOnlyOnboarding(t *testing.T) {
 	if app.errorText.Get() != "" {
 		t.Fatalf("SMTP-only onboarding failed: %s", app.errorText.Get())
 	}
+	if app.pendingDiscover.Get() != "smtp" || !strings.Contains(app.modalText.Get(), "Enter discovers") {
+		t.Fatalf("onboarding did not offer discover: pending=%q modal=%q", app.pendingDiscover.Get(), app.modalText.Get())
+	}
 	connections, err := app.service.Connections(model.Selector{})
 	if err != nil || len(connections) != 1 || connections[0].Mail == nil || connections[0].Mail.SMTP.Address != "smtp.example.test:465" || connectionsHaveCapability(connections, "mail.read") {
 		t.Fatalf("connections=%#v err=%v", connections, err)
+	}
+}
+
+func TestDiscoverIsInjectableCancellableAndOfferedAfterOnboard(t *testing.T) {
+	app := testApp(t)
+	defer app.close()
+	started, canceled := make(chan struct{}), make(chan struct{})
+	app.view.Set(0)
+	app.connections.Set([]model.Connection{{ID: "work"}})
+	app.discoverConnection = func(ctx context.Context, id string) (model.Connection, error) {
+		if id != "work" {
+			t.Fatalf("discover id=%q", id)
+		}
+		close(started)
+		<-ctx.Done()
+		close(canceled)
+		return model.Connection{}, ctx.Err()
+	}
+	app.discoverSelected()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("discover did not start")
+	}
+	app.cancelModal()
+	select {
+	case <-canceled:
+	case <-time.After(time.Second):
+		t.Fatal("discover was not canceled")
+	}
+}
+
+func TestOnboardEnterStartsDiscoverFromModalKeys(t *testing.T) {
+	app := testApp(t)
+	defer app.close()
+	started := make(chan struct{})
+	app.discoverConnection = func(ctx context.Context, id string) (model.Connection, error) {
+		if id != "smtp" {
+			t.Fatalf("discover id=%q", id)
+		}
+		close(started)
+		return model.Connection{ID: id}, nil
+	}
+	app.beginEditor("connection", []string{"smtp", "SMTP", "work", "sender@example.test", "sender@example.test", "SMTP_PASSWORD", "", "smtp.example.test:465", "", "", ""})
+	app.submitEditor()
+	dispatch(app.modalKeyMap(), tui.KeyEvent{Key: tui.KeyEnter})
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("Enter after onboard did not start discover")
+	}
+}
+
+func TestRFC3339MarksValidAndInvalidTimes(t *testing.T) {
+	app := testApp(t)
+	defer app.close()
+	app.beginEditor("event", []string{"work", "team", "Planning", "2026-08-17T09:00:00Z", "not-a-time"})
+	if app.rfc3339Mark(3) != "✓" || app.rfc3339Mark(4) != "×" || app.rfc3339Error(4) == "" || app.rfc3339Error(3) != "" {
+		t.Fatalf("marks start=%q end=%q error=%q", app.rfc3339Mark(3), app.rfc3339Mark(4), app.rfc3339Error(4))
+	}
+	app.editorFields[4].Set("")
+	if app.rfc3339Mark(4) != "" || app.rfc3339Error(4) != "" {
+		t.Fatalf("empty end should wait for submit mark=%q error=%q", app.rfc3339Mark(4), app.rfc3339Error(4))
+	}
+	app.submitEditor()
+	if app.pendingToken.Get() != "" || !strings.Contains(app.errorText.Get(), "RFC3339") {
+		t.Fatalf("invalid time error=%q token=%q", app.errorText.Get(), app.pendingToken.Get())
+	}
+}
+
+func TestAttachmentSaveWritesSecureFileAndRefusesOverwrite(t *testing.T) {
+	app := testApp(t)
+	defer app.close()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "report.txt")
+	app.attachment.Set(model.Attachment{Name: "report.txt"})
+	app.attachmentData.Set([]byte("payload"))
+	app.beginEditor("save", []string{path})
+	app.submitEditor()
+	if app.errorText.Get() != "" {
+		t.Fatalf("save failed: %s", app.errorText.Get())
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || string(data) != "payload" {
+		t.Fatalf("saved %q %v", data, err)
+	}
+	info, err := os.Stat(path)
+	if err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("permissions %v %v", info, err)
+	}
+	app.attachmentData.Set([]byte("other"))
+	app.beginEditor("save", []string{path})
+	app.submitEditor()
+	if !strings.Contains(app.errorText.Get(), "already exists") {
+		t.Fatalf("overwrite error=%q", app.errorText.Get())
+	}
+	dispatch(app.modalKeyMap(), tui.KeyEvent{Key: tui.KeyEscape})
+	if app.editor.Get() {
+		t.Fatal("escape did not cancel save editor")
+	}
+}
+
+func TestMailPagingUsesCursorStackAndSearchResets(t *testing.T) {
+	app := testApp(t)
+	defer app.close()
+	if app.refreshCancel != nil {
+		app.refreshCancel()
+		app.wg.Wait()
+	}
+	app.view.Set(1)
+	app.messages.Set([]model.Message{{Subject: "one"}})
+	app.mailCursor.Set("")
+	app.mailNext.Set("cursor-2")
+	app.pageList(1)
+	if app.mailCursor.Get() != "cursor-2" || app.mailNext.Get() != "" || len(app.mailHistory.Get()) != 1 || app.mailHistory.Get()[0] != "" {
+		t.Fatalf("next page cursor=%q next=%q history=%v", app.mailCursor.Get(), app.mailNext.Get(), app.mailHistory.Get())
+	}
+	app.pageList(1)
+	if app.mailCursor.Get() != "cursor-2" {
+		t.Fatalf("second next page advanced without a cursor cursor=%q", app.mailCursor.Get())
+	}
+	app.mailNext.Set("")
+	app.pageList(-1)
+	if app.mailCursor.Get() != "" || len(app.mailHistory.Get()) != 0 {
+		t.Fatalf("previous page cursor=%q history=%v", app.mailCursor.Get(), app.mailHistory.Get())
+	}
+	app.mailCursor.Set("stale")
+	app.mailHistory.Set([]string{""})
+	app.resetMailPaging()
+	if app.mailCursor.Get() != "" || len(app.mailHistory.Get()) != 0 {
+		t.Fatalf("search reset cursor=%q history=%v", app.mailCursor.Get(), app.mailHistory.Get())
+	}
+	app.view.Set(3)
+	app.eventCursor.Set("")
+	app.eventNext.Set("events-2")
+	app.pageList(1)
+	if app.eventCursor.Get() != "events-2" || len(app.eventHistory.Get()) != 1 {
+		t.Fatalf("agenda next page cursor=%q history=%v", app.eventCursor.Get(), app.eventHistory.Get())
+	}
+	app.resetEventPaging()
+	if app.eventCursor.Get() != "" || len(app.eventHistory.Get()) != 0 {
+		t.Fatalf("agenda reset cursor=%q history=%v", app.eventCursor.Get(), app.eventHistory.Get())
 	}
 }
 

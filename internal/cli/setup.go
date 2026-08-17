@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/timborovkov/posthouse/internal/httpauth"
+	"github.com/timborovkov/posthouse/internal/safeio"
 )
 
 func (c *CLI) setup(args []string) error {
@@ -46,7 +47,7 @@ func (c *CLI) setup(args []string) error {
 		"POSTHOUSE_ACCESS_KEY=" + accessKey + "\n"
 
 	if *writeEnv != "" {
-		path, err := writeSecureFile(*writeEnv, []byte(body), *force)
+		path, err := safeio.WriteFile(*writeEnv, []byte(body), *force)
 		if err != nil {
 			return err
 		}

@@ -90,13 +90,27 @@ Config v1 is migrated atomically to v2 on load and backed up as `*.v1.bak`.
 
 ## Terminal app
 
+The TUI is optional. Config files plus env/keychain secrets, CLI, and MCP
+already cover every operation; use the TUI for by-hand setup and tweaking.
+Recipients are raw addresses. There is no contacts registry and no WYSIWYG
+HTML editor.
+
 ```sh
 posthouse tui
 ```
 
-`Tab` between areas, arrows or `j`/`k` to move, `/` search, `r` refresh,
-`c` compose, `a` actions, `Enter` confirm, `Esc` back, `?` help, `q` quit.
-Writes still go through a preview before anything hits the provider.
+`Tab` / `Shift+Tab` cycle areas and form fields, arrows or `j`/`k` to move,
+`/` search, `r` refresh the current page, `c` compose or create, `a` actions,
+`d` discover the selected connection, `s` save a loaded attachment (0600,
+never overwrite), `n` / `PageDown` and `p` / `PageUp` page inbox (25) and
+agenda (100) with opaque cursors, `Enter` open/confirm/prepare, `Esc` back,
+`?` help, `q` quit.
+
+Compose includes To, optional CC/BCC, subject, body type (`text` default, or
+`html`), a body textarea, and attachment paths. Choosing `html` sends the
+textarea as HTML; paste markup. Agenda times are RFC3339 with a visible
+example and live valid/invalid markers. Writes still go through a preview
+before anything hits the provider.
 
 ## Writes
 
@@ -114,6 +128,7 @@ posthouse calendar list --collection team --start 2026-08-01T00:00:00Z
 
 posthouse mail get --connection work --folder INBOX --uid 42
 posthouse mail send --connection work --to teammate@example.test --subject Status --body-file status.txt
+posthouse mail send --connection work --to teammate@example.test --subject Status --html-file status.html
 posthouse operation show 'TOKEN'
 posthouse operation execute 'TOKEN'
 
@@ -128,6 +143,9 @@ posthouse cache status
 
 `--offline` uses only the local cache. `--refresh` requires a live read.
 `posthouse <command> -h` for flags. Attachments on send/draft: 25 MiB max.
+HTML send uses `--html` / `--html-file` (and MCP `html`); text-only stays
+`text/plain`, HTML-only gets a derived plain fallback, both become
+`multipart/alternative`.
 
 ## MCP and REST
 

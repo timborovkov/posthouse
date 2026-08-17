@@ -9,6 +9,10 @@ Reads can span connections; every write is previewed, then executed on exactly
 one connection. It is not a hosted SaaS: you run it on your laptop or on a
 machine you control.
 
+Send text or HTML (`--html` / `--html-file`, MCP `html`, TUI body type). The
+TUI is optional: config, CLI, and MCP already cover every operation.
+Recipients are raw addresses; there is no contacts registry.
+
 Built by [Tim Borovkov](https://timb.dev). Free to use under the
 [MIT License](LICENSE).
 

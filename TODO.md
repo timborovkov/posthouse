@@ -10,7 +10,9 @@
 
 - OAuth and native Gmail/Microsoft APIs.
 - Live-provider certification gates for Fastmail, iCloud, Google, or Microsoft.
-- HTML composition, contacts, permanent IMAP expunge, and background-daemon sync.
+- A contacts registry or recipient picker (recipients stay raw addresses).
+- A WYSIWYG HTML editor (HTML is a sendable body type, not a rich composer).
+- Permanent IMAP expunge and background-daemon sync.
 - Server-side CalDAV scheduling/free-busy and attendee-response processing.
 - Provider notifications or other external push integrations.
 

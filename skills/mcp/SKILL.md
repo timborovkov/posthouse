@@ -42,7 +42,7 @@ Failed auth is rate-limited; do not spray tokens. `/healthz` is liveness; `/read
 
 Read-only: `connections_list`, `connection_doctor`, `messages_search`, `messages_get`, `messages_attachment_get`, `events_list`, `event_ics_generate`, `operation_show`, `cache_status`.
 
-Prepare-only (no provider side effect): `messages_send_prepare`, `messages_reply_prepare`, `messages_forward_prepare`, `messages_draft_prepare`, `messages_action_prepare`, `event_create_prepare`, `event_update_prepare`, `event_delete_prepare`.
+Prepare-only (no provider side effect): `messages_send_prepare`, `messages_reply_prepare`, `messages_forward_prepare`, `messages_draft_prepare`, `messages_action_prepare`, `event_create_prepare`, `event_update_prepare`, `event_delete_prepare`. Send, reply, forward, and draft accept optional `html` alongside `text`.
 
 Destructive and idempotent: `operation_execute`. `sync` refreshes encrypted local cache.
 

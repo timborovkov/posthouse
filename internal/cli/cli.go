@@ -3,7 +3,6 @@ package cli
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -20,6 +19,7 @@ import (
 	postmail "github.com/timborovkov/posthouse/internal/mail"
 	"github.com/timborovkov/posthouse/internal/mcpserver"
 	"github.com/timborovkov/posthouse/internal/model"
+	"github.com/timborovkov/posthouse/internal/safeio"
 	"github.com/timborovkov/posthouse/internal/service"
 	tuiapp "github.com/timborovkov/posthouse/internal/tui"
 )
@@ -280,7 +280,7 @@ func (c *CLI) mail(ctx context.Context, args []string) error {
 			_, err = c.stdout.Write(data)
 			return err
 		}
-		path, err := writeSecureFile(*output, data, *force)
+		path, err := safeio.WriteFile(*output, data, *force)
 		if err != nil {
 			return err
 		}
@@ -292,7 +292,9 @@ func (c *CLI) mail(ctx context.Context, args []string) error {
 		folder := flags.String("folder", "INBOX", "IMAP folder")
 		uid := flags.Uint64("uid", 0, "message UID")
 		body := flags.String("body", "", "plain-text body to place before the quoted message")
-		bodyFile := flags.String("body-file", "", "body file, or - for stdin")
+		bodyFile := flags.String("body-file", "", "plain-text body file, or - for stdin")
+		htmlBody := flags.String("html", "", "HTML body to place before the quoted message")
+		htmlFile := flags.String("html-file", "", "HTML body file, or - for stdin")
 		var to stringList
 		flags.Var(&to, "to", "forward recipient; repeat or comma-separate")
 		if err := flags.Parse(args[1:]); err != nil {
@@ -305,21 +307,17 @@ func (c *CLI) mail(ctx context.Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		if *bodyFile != "" {
-			data, err := readInput(*bodyFile)
-			if err != nil {
-				return err
-			}
-			*body = string(data)
+		if err := loadComposeBodies(body, bodyFile, htmlBody, htmlFile); err != nil {
+			return err
 		}
 		var prepared model.PreparedOperation
 		if args[0] == "reply" {
-			prepared, err = c.service.PrepareReply(ctx, *connection, *folder, messageUID, *body)
+			prepared, err = c.service.PrepareReply(ctx, *connection, *folder, messageUID, *body, *htmlBody)
 		} else {
 			if len(to) == 0 {
 				return fmt.Errorf("mail forward requires at least one --to")
 			}
-			prepared, err = c.service.PrepareForward(ctx, *connection, *folder, messageUID, to, *body)
+			prepared, err = c.service.PrepareForward(ctx, *connection, *folder, messageUID, to, *body, *htmlBody)
 		}
 		if err != nil {
 			return err
@@ -696,7 +694,9 @@ func (c *CLI) parseCompose(args []string, name string) (model.SendMessage, error
 	flags.Var(&attachmentPaths, "attachment", "attachment path; repeat")
 	subject := flags.String("subject", "", "message subject")
 	body := flags.String("body", "", "plain-text body")
-	bodyFile := flags.String("body-file", "", "body file, or - for stdin")
+	bodyFile := flags.String("body-file", "", "plain-text body file, or - for stdin")
+	htmlBody := flags.String("html", "", "HTML body")
+	htmlFile := flags.String("html-file", "", "HTML body file, or - for stdin")
 	replyTo := flags.String("reply-to", "", "Reply-To address")
 	if err := flags.Parse(args); err != nil {
 		return model.SendMessage{}, err
@@ -704,14 +704,10 @@ func (c *CLI) parseCompose(args []string, name string) (model.SendMessage, error
 	if *connection == "" || len(to)+len(cc)+len(bcc) == 0 {
 		return model.SendMessage{}, fmt.Errorf("%s requires --connection and at least one recipient", name)
 	}
-	if *bodyFile != "" {
-		data, err := readInput(*bodyFile)
-		if err != nil {
-			return model.SendMessage{}, err
-		}
-		*body = string(data)
+	if err := loadComposeBodies(body, bodyFile, htmlBody, htmlFile); err != nil {
+		return model.SendMessage{}, err
 	}
-	message := model.SendMessage{ConnectionID: *connection, To: to, CC: cc, BCC: bcc, Subject: *subject, Text: *body, ReplyTo: *replyTo}
+	message := model.SendMessage{ConnectionID: *connection, To: to, CC: cc, BCC: bcc, Subject: *subject, Text: *body, HTML: *htmlBody, ReplyTo: *replyTo}
 	for _, path := range attachmentPaths {
 		message.Attachments = append(message.Attachments, model.AttachmentInput{Path: path, Name: filepath.Base(path), ContentType: mime.TypeByExtension(filepath.Ext(path))})
 	}
@@ -791,39 +787,28 @@ func readInput(path string) ([]byte, error) {
 }
 
 func writeICSFile(path string, data string, force bool) (string, error) {
-	return writeSecureFile(path, []byte(data), force)
+	return safeio.WriteFile(path, []byte(data), force)
 }
 
-func writeSecureFile(path string, data []byte, force bool) (string, error) {
-	flags := os.O_WRONLY | os.O_CREATE
-	if force {
-		flags |= os.O_TRUNC
-	} else {
-		flags |= os.O_EXCL
+func loadComposeBodies(body, bodyFile, htmlBody, htmlFile *string) error {
+	if *bodyFile != "" && *htmlFile != "" && *bodyFile == "-" && *htmlFile == "-" {
+		return fmt.Errorf("--body-file and --html-file cannot both read stdin")
 	}
-	file, err := os.OpenFile(path, flags, 0o600)
-	if err != nil {
-		if errors.Is(err, os.ErrExist) {
-			return "", fmt.Errorf("output file %s already exists; pass --force to replace it", path)
+	if *bodyFile != "" {
+		data, err := readInput(*bodyFile)
+		if err != nil {
+			return err
 		}
-		return "", fmt.Errorf("create output file: %w", err)
+		*body = string(data)
 	}
-	if err := file.Chmod(0o600); err != nil {
-		_ = file.Close()
-		return "", fmt.Errorf("secure output file: %w", err)
+	if *htmlFile != "" {
+		data, err := readInput(*htmlFile)
+		if err != nil {
+			return err
+		}
+		*htmlBody = string(data)
 	}
-	if _, err := file.Write(data); err != nil {
-		_ = file.Close()
-		return "", fmt.Errorf("write output file: %w", err)
-	}
-	if err := file.Close(); err != nil {
-		return "", fmt.Errorf("close output file: %w", err)
-	}
-	absolute, err := filepath.Abs(path)
-	if err != nil {
-		return path, nil
-	}
-	return absolute, nil
+	return nil
 }
 
 func writeJSON(writer io.Writer, value any) error {
