@@ -160,6 +160,7 @@ a:hover {
 .shot {
   display: block;
   width: 100%;
+  max-width: 100%;
   height: auto;
   border-radius: 0.55rem;
   border: 1px solid var(--line);
