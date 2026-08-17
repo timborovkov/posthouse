@@ -80,7 +80,11 @@ func TestRESTSyncAcceptsEmptyBody(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler, err := New(service.New(store)).HTTPHandler(testAccessKey, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server, err := New(service.New(store), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler, err := server.HTTPHandler(testAccessKey, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,7 +159,11 @@ func testHTTPHandler(t *testing.T) http.Handler {
 	}, false); err != nil {
 		t.Fatal(err)
 	}
-	handler, err := New(application).HTTPHandler(testAccessKey, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server, err := New(application, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler, err := server.HTTPHandler(testAccessKey, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
