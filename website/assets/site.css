@@ -47,6 +47,23 @@ a:hover {
   color: var(--accent);
 }
 
+a:focus-visible,
+.btn:focus-visible,
+.nav a:focus-visible,
+.brand:focus-visible,
+.setup-block > summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+.setup-title {
+  font: inherit;
+}
+
+.btn:focus-visible {
+  outline-offset: 2px;
+}
+
 .wrap {
   width: min(1080px, calc(100% - 2.5rem));
   margin-inline: auto;

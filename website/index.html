@@ -307,7 +307,7 @@
         <p class="setup-group">On your machine</p>
 
         <details class="setup-block" id="setup-cli" open>
-          <summary>Install the CLI</summary>
+          <summary><span class="setup-title">Install the CLI</span></summary>
           <div class="setup-body">
             <p>Needs Go 1.26.6+. Put <code>$(go env GOPATH)/bin</code> on your <code>PATH</code> if needed.</p>
             <pre><code>curl -fsSL https://raw.githubusercontent.com/timborovkov/posthouse/main/scripts/install.sh | sh
@@ -324,9 +324,10 @@ make build
         </details>
 
         <details class="setup-block" id="setup-secrets" open>
-          <summary>Create local secrets</summary>
+          <summary><span class="setup-title">Create local secrets</span></summary>
           <div class="setup-body">
-            <pre><code>posthouse setup
+            <pre><code>mkdir -p "$HOME/.config/posthouse"
+posthouse setup
 # or write a mode-0600 env file:
 posthouse setup --write-env "$HOME/.config/posthouse/env"
 chmod 600 "$HOME/.config/posthouse/env"
@@ -340,7 +341,7 @@ set -a; . "$HOME/.config/posthouse/env"; set +a</code></pre>
         </details>
 
         <details class="setup-block" id="setup-connection" open>
-          <summary>Add a mailbox and calendar</summary>
+          <summary><span class="setup-title">Add a mailbox and calendar</span></summary>
           <div class="setup-body">
             <p>
               Copy
@@ -360,7 +361,7 @@ posthouse connection doctor acme</code></pre>
         </details>
 
         <details class="setup-block" id="setup-yourself">
-          <summary>Use it yourself (CLI / TUI)</summary>
+          <summary><span class="setup-title">Use it yourself (CLI / TUI)</span></summary>
           <div class="setup-body">
             <pre><code>posthouse mail list --category work --label primary --unread
 posthouse mail search --query renewal --page-size 25
@@ -377,7 +378,7 @@ posthouse tui</code></pre>
         <p class="setup-group">Agents</p>
 
         <details class="setup-block" id="setup-skills">
-          <summary>Agent skills (shared pattern)</summary>
+          <summary><span class="setup-title">Agent skills (shared pattern)</span></summary>
           <div class="setup-body">
             <p>
               Skills teach CLI, MCP, and REST — including prepare-before-execute.
@@ -397,13 +398,12 @@ posthouse skill list
         </details>
 
         <details class="setup-block" id="setup-claude">
-          <summary>Claude</summary>
+          <summary><span class="setup-title">Claude</span></summary>
           <div class="setup-body">
-            <p>Install the CLI first (above), then skills and/or MCP stdio:</p>
-            <pre><code>posthouse skill install --agent claude --all
-
-# MCP client config (stdio — no access key)
-{
+            <p>Install the CLI first (above), then skills:</p>
+            <pre><code>posthouse skill install --agent claude --all</code></pre>
+            <p>Register local MCP stdio in your MCP client config (no access key):</p>
+            <pre><code>{
   "mcpServers": {
     "posthouse": {
       "command": "/absolute/path/to/posthouse",
@@ -420,46 +420,62 @@ posthouse skill list
         </details>
 
         <details class="setup-block" id="setup-codex">
-          <summary>Codex</summary>
+          <summary><span class="setup-title">Codex</span></summary>
           <div class="setup-body">
-            <p>Install the Posthouse binary, then:</p>
-            <pre><code>posthouse skill install --agent codex --all
-# point Codex MCP at the same binary:
-posthouse mcp stdio</code></pre>
+            <p>Install the Posthouse binary, then skills and the same MCP stdio config pattern as Claude:</p>
+            <pre><code>posthouse skill install --agent codex --all</code></pre>
+            <pre><code>{
+  "mcpServers": {
+    "posthouse": {
+      "command": "/absolute/path/to/posthouse",
+      "args": ["mcp", "stdio"]
+    }
+  }
+}</code></pre>
           </div>
         </details>
 
         <details class="setup-block" id="setup-hermes">
-          <summary>Hermes</summary>
+          <summary><span class="setup-title">Hermes</span></summary>
           <div class="setup-body">
             <p>
               Install the CLI, then Hermes skills. Hermes calls the same MCP tools
               (<code>messages_search</code>, prepare/execute, and so on.
             </p>
-            <pre><code>posthouse skill install --agent hermes --all
-# Local:
-posthouse mcp stdio
-# Remote: https://your-host/mcp
-#   Authorization: Bearer &lt;POSTHOUSE_ACCESS_KEY&gt;</code></pre>
+            <pre><code>posthouse skill install --agent hermes --all</code></pre>
+            <p>Local stdio (same JSON shape as Claude/Codex), or remote HTTPS:</p>
+            <pre><code># Local: posthouse mcp stdio via the MCP client config
+# Remote MCP:
+#   URL:    https://your-host/mcp
+#   Header: Authorization: Bearer &lt;POSTHOUSE_ACCESS_KEY&gt;</code></pre>
           </div>
         </details>
 
         <details class="setup-block" id="setup-cursor">
-          <summary>Cursor</summary>
+          <summary><span class="setup-title">Cursor</span></summary>
           <div class="setup-body">
             <p>Install the CLI, then Cursor skills and an MCP server entry:</p>
-            <pre><code>posthouse skill install --agent cursor --all
-
-# MCP: stdio (local) or HTTP (private server)
-# stdio command/args: posthouse · mcp · stdio
-# HTTP: https://your-host/mcp + Bearer POSTHOUSE_ACCESS_KEY</code></pre>
+            <pre><code>posthouse skill install --agent cursor --all</code></pre>
+            <pre><code>{
+  "mcpServers": {
+    "posthouse": {
+      "command": "/absolute/path/to/posthouse",
+      "args": ["mcp", "stdio"]
+    }
+  }
+}</code></pre>
+            <p>
+              For a private server instead, point Cursor at
+              <code>https://your-host/mcp</code> with
+              <code>Authorization: Bearer &lt;POSTHOUSE_ACCESS_KEY&gt;</code>.
+            </p>
           </div>
         </details>
 
         <p class="setup-group" id="setup-deploy">Private server</p>
 
         <details class="setup-block" id="setup-railway" open>
-          <summary>Deploy on Railway</summary>
+          <summary><span class="setup-title">Deploy on Railway</span></summary>
           <div class="setup-body">
             <p>
               Your own Posthouse process on Railway — not a multi-tenant SaaS.
@@ -479,18 +495,18 @@ posthouse mcp stdio
               </li>
               <li>
                 Generate secrets locally, then paste them into Railway Variables:
-              </li>
-            </ol>
-            <pre><code>posthouse setup
+                <pre><code>posthouse setup
 # copy the printed POSTHOUSE_CACHE_KEY and POSTHOUSE_ACCESS_KEY</code></pre>
-            <p>Set at least:</p>
-            <pre><code>POSTHOUSE_CACHE_KEY=…          # required (headless)
+              </li>
+              <li>
+                Set at least:
+                <pre><code>POSTHOUSE_CACHE_KEY=…          # required (headless)
 POSTHOUSE_ACCESS_KEY=…         # ≥16 chars; required for /mcp and /v1
 POSTHOUSE_TRUST_PROXY=1        # Railway edge is your TLS proxy
 # plus every provider secret your config references, e.g.:
 ACME_MAIL_PASSWORD=…
 ACME_CALENDAR_PASSWORD=…</code></pre>
-            <ol start="5">
+              </li>
               <li>
                 Deploy. Railway injects <code>PORT</code>; Posthouse listens on
                 <code>0.0.0.0:$PORT</code>. Open a public HTTPS domain on the service.
@@ -503,16 +519,19 @@ ACME_CALENDAR_PASSWORD=…</code></pre>
                 >
                 as <code>/data/config.json</code>.
               </li>
-              <li>Point agents / HTTP clients at the public host:</li>
-            </ol>
-            <pre><code>MCP:  https://YOUR-RAILWAY-HOST/mcp
+              <li>
+                Point agents / HTTP clients at the public host.
+                <code>/healthz</code> is unauthenticated; <code>/mcp</code> and
+                <code>/v1</code> need the access key:
+                <pre><code>MCP:  https://YOUR-RAILWAY-HOST/mcp
 REST: https://YOUR-RAILWAY-HOST/v1
 Header: Authorization: Bearer &lt;POSTHOUSE_ACCESS_KEY&gt;
 
-curl -sS -H "Authorization: Bearer $POSTHOUSE_ACCESS_KEY" \
-  https://YOUR-RAILWAY-HOST/healthz
+curl -sS https://YOUR-RAILWAY-HOST/healthz
 curl -sS -H "Authorization: Bearer $POSTHOUSE_ACCESS_KEY" \
   https://YOUR-RAILWAY-HOST/v1</code></pre>
+              </li>
+            </ol>
             <p>
               Keep bearer auth on. Railway’s HTTPS is the reverse proxy;
               <code>POSTHOUSE_TRUST_PROXY=1</code> makes failed-login lockout key
@@ -522,7 +541,7 @@ curl -sS -H "Authorization: Bearer $POSTHOUSE_ACCESS_KEY" \
         </details>
 
         <details class="setup-block" id="setup-docker">
-          <summary>Docker Compose (VPS / homelab)</summary>
+          <summary><span class="setup-title">Docker Compose (VPS / homelab)</span></summary>
           <div class="setup-body">
             <p>
               Same HTTP surface as Railway: Streamable MCP at <code>/mcp</code>,
@@ -531,12 +550,17 @@ curl -sS -H "Authorization: Bearer $POSTHOUSE_ACCESS_KEY" \
             </p>
             <pre><code>git clone https://github.com/timborovkov/posthouse
 cd posthouse
+# with a local posthouse binary:
+mkdir -p "$HOME/.config/posthouse"
 posthouse setup --write-env .env
+# or without a binary yet:
+# cp .env.example .env
 # edit .env: POSTHOUSE_CACHE_KEY, POSTHOUSE_ACCESS_KEY, provider passwords
 docker compose up --build -d
 # host: 127.0.0.1:8791 → container :8791
+curl -sS http://127.0.0.1:8791/healthz
 curl -sS -H "Authorization: Bearer $POSTHOUSE_ACCESS_KEY" \
-  http://127.0.0.1:8791/healthz</code></pre>
+  http://127.0.0.1:8791/v1</code></pre>
             <p>Expose remotely only behind TLS (Caddy, nginx, Traefik, …):</p>
             <pre><code># reverse-proxy https://mail.example.com → 127.0.0.1:8791
 # then set on the container:
@@ -555,7 +579,7 @@ docker compose -f docker-compose.yml -f docker-compose.private.yml up --build -d
         </details>
 
         <details class="setup-block" id="setup-vps">
-          <summary>Any VPS (binary + reverse proxy)</summary>
+          <summary><span class="setup-title">Any VPS (binary + reverse proxy)</span></summary>
           <div class="setup-body">
             <p>
               Install the CLI on the server, write secrets, then run
@@ -564,8 +588,9 @@ docker compose -f docker-compose.yml -f docker-compose.private.yml up --build -d
             <pre><code># on the VPS
 curl -fsSL https://raw.githubusercontent.com/timborovkov/posthouse/main/scripts/install.sh | sh
 sudo mkdir -p /etc/posthouse /var/lib/posthouse
+sudo chown "$USER":"$USER" /etc/posthouse /var/lib/posthouse
 posthouse setup --write-env /etc/posthouse/env
-sudo chmod 600 /etc/posthouse/env
+chmod 600 /etc/posthouse/env
 # put connections in /var/lib/posthouse/config.json
 set -a; . /etc/posthouse/env; set +a
 posthouse --config /var/lib/posthouse/config.json serve --address 127.0.0.1:8791</code></pre>
@@ -579,21 +604,22 @@ posthouse --config /var/lib/posthouse/config.json serve --address 127.0.0.1:8791
             </p>
             <pre><code>MCP:  https://mail.example.com/mcp
 REST: https://mail.example.com/v1
-Authorization: Bearer &lt;POSTHOUSE_ACCESS_KEY&gt;</code></pre>
+Authorization: Bearer &lt;POSTHOUSE_ACCESS_KEY&gt;
+
+curl -sS https://mail.example.com/healthz</code></pre>
           </div>
         </details>
 
         <details class="setup-block" id="setup-remote-agents">
-          <summary>Point an agent at your server</summary>
+          <summary><span class="setup-title">Point an agent at your server</span></summary>
           <div class="setup-body">
             <p>
               After Railway, Docker, or a VPS is up, teach the agent the HTTP
               skills and the URL — not local <code>stdio</code>.
             </p>
             <pre><code>posthouse skill install --agent claude rest mcp
-# (or cursor / codex / hermes)
-
-# MCP over HTTPS
+# (or cursor / codex / hermes)</code></pre>
+            <pre><code># MCP over HTTPS
 URL:     https://YOUR-HOST/mcp
 Header:  Authorization: Bearer &lt;POSTHOUSE_ACCESS_KEY&gt;
 
@@ -612,8 +638,11 @@ curl -sS -H "Authorization: Bearer $POSTHOUSE_ACCESS_KEY" \
           <a href="https://github.com/timborovkov/posthouse/blob/main/LICENSE">MIT License</a>.
           Mail and calendar data live in a local encrypted cache you control.
           There is no backend that receives your mailbox. See
-          <a href="privacy.html">Privacy</a> for the full statement used with
-          Google and Microsoft OAuth verification.
+          <a href="privacy.html">Privacy</a> for the full statement (including
+          forward-looking Google/Microsoft OAuth verification language).
+          Host this <code>website/</code> folder on a domain you own (canonicals
+          assume <code>https://posthouse.timb.dev/</code>) before pasting those
+          URLs into a consent screen.
         </p>
       </section>
     </main>

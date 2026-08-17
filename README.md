@@ -80,8 +80,9 @@ First connection, agents, Docker, Railway:
 Full CLI, MCP, REST, and deploy detail:
 [INSTALLATION-AND-USAGE-GUIDE.md](./INSTALLATION-AND-USAGE-GUIDE.md).
 
-Setup guides on the site: [website/#setup](./website/index.html#setup)
-(CLI, agents, [Railway](./website/index.html#setup-railway), Docker, VPS).
+Setup guides: [GETTING-STARTED.md](./GETTING-STARTED.md) (authoritative commands)
+and the foldable [website/](./website/) pages (deploy on your domain; see
+`#setup-railway` for Railway).
 
 ## Develop
 

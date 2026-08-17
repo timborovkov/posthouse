@@ -719,7 +719,7 @@ func (c *CLI) tui() error {
 }
 
 func (c *CLI) usage() {
-	_, _ = fmt.Fprintln(c.stdout, `Posthouse — one agent-friendly interface for all your mail and calendars
+	_, _ = fmt.Fprintln(c.stdout, `Posthouse — one local switchboard across your mail and calendars — ready for your agents
 
 Usage:
   posthouse [--config PATH] connection list|add|update|remove|discover|doctor|secret

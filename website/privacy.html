@@ -6,7 +6,7 @@
     <title>Privacy — Posthouse</title>
     <meta
       name="description"
-      content="Posthouse privacy policy: local-first mail and calendar software. No Posthouse backend. OAuth tokens and mailbox data stay on your machine."
+      content="Posthouse privacy policy: local-first mail and calendar software. No Posthouse backend. Mailbox data stays on your machine. Prepared for future Google/Microsoft OAuth verification."
     />
     <meta name="author" content="Tim Borovkov" />
     <meta name="robots" content="index,follow" />
@@ -59,8 +59,10 @@
       <h2>What Posthouse is</h2>
       <p>
         A personal CLI, MCP server, REST API, and optional terminal UI for
-        operating mail and calendar connections (IMAP/SMTP, CalDAV, ICS feeds,
-        and — when enabled — optional Google and Microsoft sign-in on device).
+        operating mail and calendar connections. Today that means IMAP/SMTP,
+        CalDAV, and ICS feeds. Optional Google and Microsoft sign-in on device
+        is planned and not shipped in v0.2; this page is written so those
+        flows can pass publisher verification when they land.
       </p>
 
       <h2>Where your data lives</h2>
@@ -75,14 +77,14 @@
           calendar content to Posthouse servers (there are none).
         </li>
         <li>
-          Provider credentials and OAuth tokens are stored in your
-          <strong>OS keychain</strong> or in an environment variable you set —
-          not in a Posthouse-hosted vault.
+          Provider credentials (and, when OAuth ships, refresh tokens) are stored
+          in your <strong>OS keychain</strong> or in an environment variable you
+          set — not in a Posthouse-hosted vault.
         </li>
         <li>
-          Live providers (your mail host, Google, Microsoft, etc.) remain the
-          source of truth. The local cache is for bounded offline reads and
-          sync state, not a permanent archive.
+          Live providers (your mail host, and later Google or Microsoft if you
+          connect them) remain the source of truth. The local cache is for
+          bounded offline reads and sync state, not a permanent archive.
         </li>
       </ul>
 
@@ -96,9 +98,10 @@
 
       <h2>Google API services</h2>
       <p>
-        When you choose to sign in with Google, Posthouse requests only the
-        Gmail and Calendar scopes needed to operate your connection on your
-        device. Gmail data is not used to train models.
+        Native Google sign-in is not available in v0.2. When it is enabled and
+        you choose to connect Gmail or Google Calendar, Posthouse will request
+        only the Gmail and Calendar scopes needed to operate that connection on
+        your device. Gmail data is not used to train models.
       </p>
       <p>
         Posthouse’s use of information received from Google APIs adheres to the
@@ -109,10 +112,11 @@
 
       <h2>Microsoft</h2>
       <p>
-        When you choose to sign in with Microsoft, Posthouse uses Microsoft
-        Graph with delegated permissions on your device. Tokens stay local as
-        described above. Posthouse does not operate a hosted OAuth redirect or
-        token proxy.
+        Native Microsoft sign-in is not available in v0.2. When it is enabled and
+        you choose to connect Outlook / Microsoft 365, Posthouse will use
+        Microsoft Graph with delegated permissions on your device. Tokens stay
+        local as described above. Posthouse does not operate a hosted OAuth
+        redirect or token proxy.
       </p>
 
       <h2>What we do not collect</h2>
@@ -140,7 +144,7 @@
         Built by
         <a href="https://timb.dev">Tim Borovkov</a>
         ·
-        <a href="/">posthouse.timb.dev</a>
+        <a href="/">Home</a>
         ·
         <a href="https://github.com/timborovkov/posthouse">GitHub</a>
       </p>
