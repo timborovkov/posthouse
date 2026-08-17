@@ -1,46 +1,50 @@
 ---
 name: posthouse-cli
-description: Operate Posthouse mail and calendar connections from the local CLI. Use when the user has Posthouse installed on this machine and wants list, search, send, or calendar writes through `posthouse` commands.
+description: Operate Posthouse mail and calendar from the local CLI. Use when Posthouse is installed on this machine. Do not try to log the user into Gmail or Microsoft yourself.
 ---
 
 # Posthouse CLI
 
-Posthouse is a local-first switchboard for multiple mail and calendar connections. It is not a hosted SaaS. Prefer this skill when you can run `posthouse` on the same machine.
+Posthouse is the user's mail and calendar switchboard on this machine. It is not a hosted SaaS.
+
+If there are no connections, tell the user to follow GETTING-STARTED.md (connect Gmail/Microsoft with `posthouse connection auth`, or IMAP with an app password). Never ask them to paste a refresh token or create a Google Cloud project.
 
 ## Vocabulary
 
-- **Connection**: one authenticated provider endpoint (mail and/or calendar). Never say account or inbox.
-- **Selector**: intersection of connection names, category, labels, and capabilities. Reads may fan out. Writes never do.
-- **Prepared operation**: opaque ten-minute token. Preparation does not send mail or mutate CalDAV. Only `posthouse operation execute TOKEN` performs the side effect.
+- **Connection**: one connected mailbox or calendar. Never say account or inbox.
+- **Selector**: names, category, labels, capabilities. Reads may span connections. Writes never do.
+- **Prepared operation**: ten-minute token. Nothing is sent until `posthouse operation execute TOKEN`.
 
 ## Safety
 
-- Never log, print, or commit passwords, `POSTHOUSE_CACHE_KEY`, or access keys.
-- Every write needs `--connection` (exact ID or unique name). Do not guess.
-- Show the prepared preview to the user and wait for confirmation before `operation execute`.
-- Repeated execute returns the original result. Uncertain SMTP after DATA is never retried automatically.
+- Never log passwords, `POSTHOUSE_CACHE_KEY`, access keys, or refresh tokens.
+- Every write needs `--connection`. Do not guess.
+- Show the preview and wait for confirmation before `operation execute`.
 
-## Commands
+## Connect (only if the user asked to add a mailbox)
 
-Data commands emit JSON except `calendar ics`, which emits `text/calendar` unless `--output` is set.
+```sh
+posthouse connection add --kind gmail --email you@gmail.com
+posthouse connection auth gmail-work
+posthouse connection add --kind microsoft --email you@outlook.com
+posthouse connection auth microsoft-work
+```
+
+On a server, add `--device` to `auth`. A link and code print; the user Allow's on their phone.
+
+## Daily commands
 
 ```sh
 posthouse connection list
 posthouse connection doctor CONNECTION
-posthouse mail list --category work --label primary --unread
+posthouse mail list --category work --unread
 posthouse mail search --query TEXT --page-size 25
 posthouse mail get --connection CONNECTION --id ID
 posthouse mail send --connection CONNECTION --to addr --subject S --body-file FILE
-posthouse mail send --connection CONNECTION --to addr --subject S --html-file FILE.html
 posthouse operation show TOKEN
 posthouse operation execute TOKEN
 posthouse calendar list --connection CONNECTION --start RFC3339 --end RFC3339
-posthouse calendar create --connection CONNECTION --file event.json
-posthouse sync
-posthouse cache status
 posthouse tui
 ```
 
-Use `--offline` for cache-only reads and `--refresh` to refuse stale fallback. Pass `--cursor` from `next_cursor` with identical filters.
-
-If Posthouse is deployed on a remote server instead, use the `posthouse-rest` or `posthouse-mcp` skill.
+If Posthouse runs on a remote server, use the `posthouse-mcp` or `posthouse-rest` skill instead.

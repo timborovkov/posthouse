@@ -69,14 +69,10 @@ func (c *CLI) setup(args []string) error {
 
 func setupNextSteps() []string {
 	return []string{
-		"Install the CLI if needed: scripts/install.sh   or   go install github.com/timborovkov/posthouse/cmd/posthouse@latest",
-		"Copy examples/connection.json, put the app password in an environment variable, then: posthouse connection add --file connection.json",
-		"Check the connection: posthouse connection discover ID && posthouse connection doctor ID",
-		"Use it yourself: posthouse tui",
-		"Give an agent local tools: posthouse mcp stdio   and/or   posthouse skill install --agent claude --all",
-		"Or serve MCP + REST on this machine: export the keys above, then posthouse serve",
-		"Private-cloud Docker: copy .env.example to .env, paste the keys, docker compose up --build",
-		"Read GETTING-STARTED.md, then INSTALLATION-AND-USAGE-GUIDE.md for CLI, MCP, REST, and Docker",
+		"Read GETTING-STARTED.md — connect Gmail or Microsoft, then point Hermes or Codex at Posthouse",
+		"This computer: posthouse connection add --kind gmail --email you@gmail.com && posthouse connection auth gmail-work",
+		"Then: posthouse skill install --agent hermes --all   (or codex / claude / cursor) and posthouse mcp stdio",
+		"Server: posthouse serve, then connection auth ... --device (link + code on your phone)",
 	}
 }
 

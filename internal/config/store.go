@@ -14,6 +14,7 @@ import (
 
 	"github.com/timborovkov/posthouse/internal/filelock"
 	"github.com/timborovkov/posthouse/internal/model"
+	"github.com/timborovkov/posthouse/internal/safeio"
 	"github.com/zalando/go-keyring"
 )
 
@@ -21,6 +22,13 @@ const (
 	currentVersion  = 2
 	keyringService  = "posthouse"
 	defaultMaxBytes = int64(2 << 30)
+)
+
+var (
+	keyringGet        = keyring.Get
+	keyringSet        = keyring.Set
+	keyringDelete     = keyring.Delete
+	defaultSecretsDir string
 )
 
 type Store struct {
@@ -38,7 +46,9 @@ func New(path string) (*Store, error) {
 		}
 		path = filepath.Join(root, "posthouse", "config.json")
 	}
-	return &Store{path: path}, nil
+	store := &Store{path: path}
+	defaultSecretsDir = filepath.Join(filepath.Dir(path), "secrets")
+	return store, nil
 }
 
 func (s *Store) Path() string {
@@ -553,31 +563,109 @@ func ResolveSecret(ref model.SecretRef) (string, error) {
 		return Secret(ref.Env)
 	}
 	if ref.Keychain != "" {
-		value, err := keyring.Get(keyringService, ref.Keychain)
+		value, err := keyringGet(keyringService, ref.Keychain)
+		if err == nil && value != "" {
+			return value, nil
+		}
+		fallback, fallbackErr := readFallbackSecret(ref.Keychain)
+		if fallbackErr == nil && fallback != "" {
+			return fallback, nil
+		}
 		if err != nil {
 			return "", fmt.Errorf("resolve keychain secret %q: %w", ref.Keychain, err)
 		}
-		if value == "" {
-			return "", fmt.Errorf("keychain secret %q is empty", ref.Keychain)
+		if fallbackErr != nil {
+			return "", fmt.Errorf("resolve keychain secret %q: %w", ref.Keychain, fallbackErr)
 		}
-		return value, nil
+		return "", fmt.Errorf("keychain secret %q is empty", ref.Keychain)
 	}
 	return "", fmt.Errorf("secret reference is not configured")
 }
 
 func SetKeychainSecret(name, value string) error {
-	if strings.TrimSpace(name) == "" || value == "" {
+	if err := validateSecretName(name); err != nil {
+		return err
+	}
+	if value == "" {
 		return fmt.Errorf("keychain secret name and value are required")
 	}
-	if err := keyring.Set(keyringService, name, value); err != nil {
+	if err := keyringSet(keyringService, name, value); err == nil {
+		return nil
+	} else if err := writeFallbackSecret(name, value); err != nil {
 		return fmt.Errorf("store keychain secret %q: %w", name, err)
 	}
 	return nil
 }
 
 func DeleteKeychainSecret(name string) error {
-	if err := keyring.Delete(keyringService, name); err != nil && !errors.Is(err, keyring.ErrNotFound) {
+	if err := validateSecretName(name); err != nil {
+		return err
+	}
+	if err := keyringDelete(keyringService, name); err != nil && !errors.Is(err, keyring.ErrNotFound) {
+		// Servers often have no OS keychain; the on-disk fallback is enough.
+	}
+	if err := os.Remove(fallbackSecretPath(name)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("delete keychain secret %q: %w", name, err)
 	}
 	return nil
+}
+
+func validateSecretName(name string) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return fmt.Errorf("keychain secret name and value are required")
+	}
+	for _, r := range name {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '.' || r == '_' || r == '-' {
+			continue
+		}
+		return fmt.Errorf("secret name %q contains unsupported characters", name)
+	}
+	return nil
+}
+
+func secretsDir() string {
+	if dir := strings.TrimSpace(os.Getenv("POSTHOUSE_SECRETS_DIR")); dir != "" {
+		return dir
+	}
+	if defaultSecretsDir != "" {
+		return defaultSecretsDir
+	}
+	path := strings.TrimSpace(os.Getenv("POSTHOUSE_CONFIG"))
+	if path == "" {
+		root, err := os.UserConfigDir()
+		if err != nil {
+			return ""
+		}
+		return filepath.Join(root, "posthouse", "secrets")
+	}
+	return filepath.Join(filepath.Dir(path), "secrets")
+}
+
+func fallbackSecretPath(name string) string {
+	return filepath.Join(secretsDir(), name)
+}
+
+func writeFallbackSecret(name, value string) error {
+	dir := secretsDir()
+	if dir == "" {
+		return fmt.Errorf("no secret store is available")
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	_, err := safeio.WriteFile(fallbackSecretPath(name), []byte(value), true)
+	return err
+}
+
+func readFallbackSecret(name string) (string, error) {
+	data, err := os.ReadFile(fallbackSecretPath(name))
+	if err != nil {
+		return "", err
+	}
+	value := strings.TrimRight(string(data), "\r\n")
+	if value == "" {
+		return "", fmt.Errorf("secret file %q is empty", name)
+	}
+	return value, nil
 }

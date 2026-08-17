@@ -213,7 +213,7 @@ func Device(ctx context.Context, cfg Config) (string, error) {
 	print := cfg.PrintDevice
 	if print == nil {
 		print = func(verificationURL, userCode string) {
-			_, _ = fmt.Fprintf(os.Stderr, "Open %s and enter code %s\n", verificationURL, userCode)
+			_, _ = fmt.Fprintf(os.Stderr, "To connect this mailbox:\n\n  1. Open %s\n  2. Enter code %s\n\nWaiting for Allow…\n", verificationURL, userCode)
 		}
 	}
 	print(response.VerificationURI, response.UserCode)

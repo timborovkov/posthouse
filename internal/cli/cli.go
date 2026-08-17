@@ -101,11 +101,47 @@ func (c *CLI) connection(ctx context.Context, args []string) error {
 			return err
 		}
 		return writeJSON(c.stdout, connections)
-	case "add", "update":
+	case "add":
 		flags := flag.NewFlagSet("connection add", flag.ContinueOnError)
 		flags.SetOutput(c.stderr)
+		file := flags.String("file", "", "connection JSON file, or - for stdin")
+		kind := flags.String("kind", "", "gmail or microsoft")
+		id := flags.String("id", "", "connection id")
+		name := flags.String("name", "", "display name")
+		email := flags.String("email", "", "identity email")
+		category := flags.String("category", "work", "work or personal")
+		replace := flags.Bool("replace", false, "replace a connection with the same ID")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		var connection model.Connection
+		switch {
+		case strings.TrimSpace(*kind) != "":
+			parsed, err := nativeConnection(*kind, *id, *name, *email, *category)
+			if err != nil {
+				return err
+			}
+			connection = parsed
+		case *file != "":
+			data, err := readInput(*file)
+			if err != nil {
+				return err
+			}
+			if err := json.Unmarshal(data, &connection); err != nil {
+				return fmt.Errorf("decode connection: %w", err)
+			}
+		default:
+			return fmt.Errorf("usage: posthouse connection add --kind gmail --email you@gmail.com\n   or: posthouse connection add --file connection.json")
+		}
+		if err := c.service.UpsertConnection(connection, *replace); err != nil {
+			return err
+		}
+		return writeJSON(c.stdout, map[string]any{"ok": true, "connection": connection.ID})
+	case "update":
+		flags := flag.NewFlagSet("connection update", flag.ContinueOnError)
+		flags.SetOutput(c.stderr)
 		file := flags.String("file", "-", "connection JSON file, or - for stdin")
-		replace := flags.Bool("replace", args[0] == "update", "replace a connection with the same ID")
+		replace := flags.Bool("replace", true, "replace a connection with the same ID")
 		if err := flags.Parse(args[1:]); err != nil {
 			return err
 		}
@@ -806,6 +842,36 @@ func (values *stringList) Set(value string) error {
 		}
 	}
 	return nil
+}
+
+func nativeConnection(kind, id, name, email, category string) (model.Connection, error) {
+	kind = strings.ToLower(strings.TrimSpace(kind))
+	if kind != "gmail" && kind != "microsoft" {
+		return model.Connection{}, fmt.Errorf("kind must be gmail or microsoft")
+	}
+	email = strings.TrimSpace(email)
+	if email == "" {
+		return model.Connection{}, fmt.Errorf("connection add --kind requires --email")
+	}
+	if strings.TrimSpace(id) == "" {
+		id = kind + "-work"
+	}
+	if strings.TrimSpace(name) == "" {
+		if kind == "gmail" {
+			name = "Gmail"
+		} else {
+			name = "Microsoft"
+		}
+	}
+	if strings.TrimSpace(category) == "" {
+		category = "work"
+	}
+	return model.Connection{
+		ID: id, Name: name, Category: category,
+		Identity: model.Identity{Email: email},
+		Mail:     &model.MailConfig{Kind: kind},
+		Calendar: &model.CalendarConfig{Kind: kind},
+	}, nil
 }
 
 func readInput(path string) ([]byte, error) {

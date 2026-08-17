@@ -147,6 +147,28 @@ func TestCheckedUIDRejectsOverflow(t *testing.T) {
 	}
 }
 
+func TestConnectionAddKindCreatesGmailConnection(t *testing.T) {
+	application := testCLI(t, new(bytes.Buffer))
+	if err := application.Run(context.Background(), []string{"connection", "add", "--kind", "gmail", "--email", "you@gmail.com"}); err != nil {
+		t.Fatal(err)
+	}
+	connections, err := application.service.Connections(model.Selector{})
+	if err != nil || len(connections) != 1 {
+		t.Fatalf("connections=%#v err=%v", connections, err)
+	}
+	got := connections[0]
+	if got.ID != "gmail-work" || got.Mail == nil || got.Mail.Kind != "gmail" || got.Calendar == nil || got.Calendar.Kind != "gmail" || got.Identity.Email != "you@gmail.com" {
+		t.Fatalf("gmail connection = %#v", got)
+	}
+}
+
+func TestConnectionAddKindRequiresEmail(t *testing.T) {
+	application := testCLI(t, new(bytes.Buffer))
+	if err := application.Run(context.Background(), []string{"connection", "add", "--kind", "microsoft"}); err == nil || !strings.Contains(err.Error(), "--email") {
+		t.Fatalf("missing email error = %v", err)
+	}
+}
+
 func TestConnectionAuthFailsClosedWithoutClientID(t *testing.T) {
 	t.Setenv("POSTHOUSE_GOOGLE_CLIENT_ID", "")
 	application := testCLI(t, new(bytes.Buffer))

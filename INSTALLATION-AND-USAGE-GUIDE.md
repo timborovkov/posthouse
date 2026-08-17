@@ -1,8 +1,9 @@
 # Installation and usage
 
 Posthouse is a personal switchboard, not a hosted product. You run it on your
-laptop or on a machine you control. A shorter first-run path is in
-[GETTING-STARTED.md](./GETTING-STARTED.md).
+laptop or on a machine you control. Start with
+[GETTING-STARTED.md](./GETTING-STARTED.md) (Gmail, Microsoft, Hermes, Codex).
+This page is the reference for flags, IMAP, Docker, and Railway.
 
 ## Install
 
@@ -30,20 +31,14 @@ make build
 
 **Docker** (MCP + REST HTTP, not the TUI): see [Docker](#docker).
 
-You need IMAP/SMTP and/or CalDAV (or an ICS feed URL), or a native Gmail /
-Microsoft connection. Generic servers use an app password, not your normal
-login. Native Gmail and Microsoft use `posthouse connection auth` (browser
-Allow, or `--device` on a headless host). Do not register your own OAuth app
-unless you are dogfooding with env client IDs.
+You need a connected mailbox: Gmail, Microsoft, or generic IMAP/SMTP (and
+optional CalDAV or an ICS feed). Gmail and Microsoft: `posthouse connection add
+--kind gmail --email you@gmail.com` then `posthouse connection auth gmail-work`
+(add `--device` on a server). You click Allow. You do not create a Google Cloud
+or Microsoft app. Generic servers use an app password, not your normal login.
 
-Until verified publisher IDs ship, set:
-
-```sh
-export POSTHOUSE_GOOGLE_CLIENT_ID='...'
-export POSTHOUSE_MICROSOFT_CLIENT_ID='...'
-# Google Desktop token exchange only, never commit:
-export POSTHOUSE_GOOGLE_CLIENT_SECRET='...'
-```
+If `connection auth` says login is not configured, this build does not include
+Posthouse's Google/Microsoft ID yet. That is on the maintainer.
 
 ## Secrets
 
@@ -79,20 +74,16 @@ posthouse connection doctor acme
 redacted — do not feed it to `connection update`.
 
 Read-only ICS feed: [examples/feed-connection.json](./examples/feed-connection.json).
-Native Gmail: [examples/gmail-connection.json](./examples/gmail-connection.json).
-Native Microsoft: [examples/microsoft-connection.json](./examples/microsoft-connection.json).
+Gmail and Microsoft can skip JSON files:
 
 ```sh
-posthouse connection add --file examples/gmail-connection.json
+posthouse connection add --kind gmail --email you@gmail.com
 posthouse connection auth gmail-work
-posthouse connection doctor gmail-work
 ```
 
-`connection auth` opens a browser (or prints a device code with `--device`),
-stores the refresh token in the OS keychain, and writes a keychain secret ref
-on the connection. There is no MCP tool for this; authorize connections before
-Hermes uses them. `discover` is for generic IMAP special-use folders and CalDAV
-collections; native connections skip that path.
+On a server, add `--device` so a phone can click Allow. Connect mailboxes
+before Hermes or Codex uses them; there is no MCP login tool. `discover` is
+only for generic IMAP folders and CalDAV collections.
 
 Config path: `posthouse config path` (or `--config` / `POSTHOUSE_CONFIG`).
 State is `posthouse.db` next to it.

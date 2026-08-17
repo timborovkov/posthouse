@@ -27,7 +27,7 @@ go install github.com/timborovkov/posthouse/cmd/posthouse@latest
 posthouse tui
 ```
 
-Non-technical path (first connection, agents, private server):
+Non-technical path (Gmail, Microsoft, Hermes, Codex, your own server):
 [GETTING-STARTED.md](./GETTING-STARTED.md).
 
 Full CLI, MCP, REST, Docker, and Railway:

@@ -304,3 +304,38 @@ func TestValidateRejectsWhitespaceEquivalentConnectionIDs(t *testing.T) {
 		t.Fatalf("Validate whitespace-equivalent IDs error = %v", err)
 	}
 }
+
+func TestSetKeychainSecretFallsBackNextToConfig(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := New(filepath.Join(dir, "config.json")); err != nil {
+		t.Fatal(err)
+	}
+	originalSet, originalGet, originalDelete, originalDir := keyringSet, keyringGet, keyringDelete, defaultSecretsDir
+	keyringSet = func(string, string, string) error { return fmt.Errorf("no os keychain") }
+	keyringGet = func(string, string) (string, error) { return "", fmt.Errorf("no os keychain") }
+	keyringDelete = func(string, string) error { return fmt.Errorf("no os keychain") }
+	defer func() {
+		keyringSet, keyringGet, keyringDelete, defaultSecretsDir = originalSet, originalGet, originalDelete, originalDir
+	}()
+
+	if err := SetKeychainSecret("posthouse-gmail-work", "refresh-token"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ResolveSecret(model.SecretRef{Keychain: "posthouse-gmail-work"})
+	if err != nil || got != "refresh-token" {
+		t.Fatalf("fallback resolve = %q, %v", got, err)
+	}
+	info, err := os.Stat(filepath.Join(dir, "secrets", "posthouse-gmail-work"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("secret file mode = %o", info.Mode().Perm())
+	}
+	if err := DeleteKeychainSecret("posthouse-gmail-work"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "secrets", "posthouse-gmail-work")); !os.IsNotExist(err) {
+		t.Fatalf("deleted secret still present: %v", err)
+	}
+}
