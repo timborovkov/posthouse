@@ -67,7 +67,6 @@
         <a href="#features">Features</a>
         <a href="#connect">Connect</a>
         <a href="#setup">Setup</a>
-        <a href="#install">Install</a>
         <a href="privacy.html">Privacy</a>
         <a href="https://github.com/timborovkov/posthouse">GitHub</a>
         <a href="https://timb.dev">timb.dev</a>
@@ -86,7 +85,7 @@
         </p>
         <div class="cta-row">
           <a class="btn btn-primary" href="https://github.com/timborovkov/posthouse">View on GitHub</a>
-          <a class="btn btn-ghost" href="#setup">Agent setup</a>
+          <a class="btn btn-ghost" href="#setup-cli">Install CLI</a>
           <a class="btn btn-ghost" href="privacy.html">Privacy</a>
         </div>
         <img
@@ -294,115 +293,216 @@
       </section>
 
       <section class="wrap section" id="setup" aria-labelledby="setup-title">
-        <h2 id="setup-title">Setup with agents &amp; deploy</h2>
+        <h2 id="setup-title">Setup</h2>
         <p>
-          Install the binary (or run Docker), add a connection, then teach your
-          agent with skills and/or MCP. Full detail lives in the
+          Install the CLI, add a connection, then use it yourself or hand it to
+          an agent. Fold a section open for the exact commands. Full prose:
           <a href="https://github.com/timborovkov/posthouse/blob/main/GETTING-STARTED.md"
-            >repo guide</a
+            >Getting started</a
           >.
         </p>
 
-        <div class="setup-block" id="setup-skills">
-          <h3>Agent skills (any of the agents below)</h3>
-          <p>
-            Skills teach CLI, MCP, and REST — including prepare-before-execute.
-            <code>--agent</code> accepts <code>claude</code>, <code>cursor</code>,
-            <code>codex</code>, or <code>hermes</code>.
-          </p>
-          <pre><code>posthouse skill install --agent claude --all
-posthouse skill list</code></pre>
-        </div>
+        <p class="setup-group">On your machine</p>
 
-        <div class="setup-block" id="setup-claude">
-          <h3>Claude</h3>
-          <p>
-            Install skills into Claude’s skill folder, and/or register local MCP
-            stdio in your MCP client config:
-          </p>
-          <pre><code>posthouse skill install --agent claude --all
+        <details class="setup-block" id="setup-cli" open>
+          <summary>Install the CLI</summary>
+          <div class="setup-body">
+            <p>Needs Go 1.26.6+. Put <code>$(go env GOPATH)/bin</code> on your <code>PATH</code> if needed.</p>
+            <pre><code>curl -fsSL https://raw.githubusercontent.com/timborovkov/posthouse/main/scripts/install.sh | sh
+posthouse version</code></pre>
+            <p>Or with <code>go install</code>:</p>
+            <pre><code>go install github.com/timborovkov/posthouse/cmd/posthouse@latest
+posthouse version</code></pre>
+            <p>From a clone:</p>
+            <pre><code>git clone https://github.com/timborovkov/posthouse
+cd posthouse
+make build
+./bin/posthouse version</code></pre>
+          </div>
+        </details>
 
-# MCP client snippet (stdio — no access key)
+        <details class="setup-block" id="setup-secrets" open>
+          <summary>Create local secrets</summary>
+          <div class="setup-body">
+            <pre><code>posthouse setup
+# or write a mode-0600 env file:
+posthouse setup --write-env "$HOME/.config/posthouse/env"
+chmod 600 "$HOME/.config/posthouse/env"
+set -a; . "$HOME/.config/posthouse/env"; set +a</code></pre>
+            <ul>
+              <li><code>POSTHOUSE_CACHE_KEY</code> — encrypts local state. Desktop can use the OS keychain instead; headless and Docker must set this.</li>
+              <li><code>POSTHOUSE_ACCESS_KEY</code> — protects HTTP MCP + REST (≥16 chars). Local <code>mcp stdio</code> does not need it.</li>
+            </ul>
+            <p>Do not commit env files that contain these values.</p>
+          </div>
+        </details>
+
+        <details class="setup-block" id="setup-connection" open>
+          <summary>Add a mailbox and calendar</summary>
+          <div class="setup-body">
+            <p>
+              Copy
+              <a href="https://github.com/timborovkov/posthouse/blob/main/examples/connection.json"
+                >examples/connection.json</a
+              >, put a <strong>provider app password</strong> (not your login password) in the environment, then:
+            </p>
+            <pre><code>export ACME_MAIL_PASSWORD='the app password'
+export ACME_CALENDAR_PASSWORD='the app password'
+posthouse connection add --file examples/connection.json
+posthouse connection discover acme
+posthouse connection doctor acme</code></pre>
+            <p>Or use the terminal UI:</p>
+            <pre><code>posthouse tui
+# Tab areas · ? help · q quit — writes still show a preview first</code></pre>
+          </div>
+        </details>
+
+        <details class="setup-block" id="setup-yourself">
+          <summary>Use it yourself (CLI / TUI)</summary>
+          <div class="setup-body">
+            <pre><code>posthouse mail list --category work --label primary --unread
+posthouse mail search --query renewal --page-size 25
+posthouse calendar list --start 2026-08-01T00:00:00Z --end 2026-09-01T00:00:00Z
+posthouse tui</code></pre>
+            <p>
+              Writes prepare a ten-minute token — inspect with
+              <code>operation show</code>, then <code>operation execute</code>.
+              Nothing is sent until execute.
+            </p>
+          </div>
+        </details>
+
+        <p class="setup-group">Agents</p>
+
+        <details class="setup-block" id="setup-skills">
+          <summary>Agent skills (shared pattern)</summary>
+          <div class="setup-body">
+            <p>
+              Skills teach CLI, MCP, and REST — including prepare-before-execute.
+              <code>--agent</code> accepts <code>claude</code>, <code>cursor</code>,
+              <code>codex</code>, or <code>hermes</code>.
+            </p>
+            <pre><code>posthouse skill install --agent claude --all
+posthouse skill list
+# or copy into any folder: posthouse skill install --dir PATH cli mcp rest</code></pre>
+            <p>Pick the surface that matches how you run Posthouse:</p>
+            <ul>
+              <li>CLI on this machine → install the <code>cli</code> skill (or <code>--all</code>)</li>
+              <li>Local MCP → <code>posthouse mcp stdio</code> + <code>mcp</code> skill</li>
+              <li>Server URL → <code>rest</code> and/or <code>mcp</code> skills + <code>POSTHOUSE_ACCESS_KEY</code></li>
+            </ul>
+          </div>
+        </details>
+
+        <details class="setup-block" id="setup-claude">
+          <summary>Claude</summary>
+          <div class="setup-body">
+            <p>Install the CLI first (above), then skills and/or MCP stdio:</p>
+            <pre><code>posthouse skill install --agent claude --all
+
+# MCP client config (stdio — no access key)
 {
   "mcpServers": {
     "posthouse": {
       "command": "/absolute/path/to/posthouse",
-      "args": ["mcp", "stdio"]
+      "args": ["mcp", "stdio"],
+      "env": {
+        "POSTHOUSE_CACHE_KEY": "...",
+        "ACME_MAIL_PASSWORD": "..."
+      }
     }
   }
 }</code></pre>
-        </div>
+            <p>Use <code>which posthouse</code> for the absolute path after install.</p>
+          </div>
+        </details>
 
-        <div class="setup-block" id="setup-codex">
-          <h3>Codex</h3>
-          <p>Same skills + MCP pattern; point Codex at the skill install and stdio server:</p>
-          <pre><code>posthouse skill install --agent codex --all
+        <details class="setup-block" id="setup-codex">
+          <summary>Codex</summary>
+          <div class="setup-body">
+            <p>Install the Posthouse binary, then:</p>
+            <pre><code>posthouse skill install --agent codex --all
+# point Codex MCP at the same binary:
 posthouse mcp stdio</code></pre>
-        </div>
+          </div>
+        </details>
 
-        <div class="setup-block" id="setup-hermes">
-          <h3>Hermes</h3>
-          <p>
-            Hermes uses the same MCP tools (<code>messages_search</code>,
-            prepare/execute, …). Install the Hermes skills, then attach stdio or
-            a remote <code>/mcp</code> URL with your access key.
-          </p>
-          <pre><code>posthouse skill install --agent hermes --all
-# Local: posthouse mcp stdio
-# Remote: https://your-host/mcp  +  Authorization: Bearer &lt;POSTHOUSE_ACCESS_KEY&gt;</code></pre>
-        </div>
+        <details class="setup-block" id="setup-hermes">
+          <summary>Hermes</summary>
+          <div class="setup-body">
+            <p>
+              Install the CLI, then Hermes skills. Hermes calls the same MCP tools
+              (<code>messages_search</code>, prepare/execute, and so on.
+            </p>
+            <pre><code>posthouse skill install --agent hermes --all
+# Local:
+posthouse mcp stdio
+# Remote: https://your-host/mcp
+#   Authorization: Bearer &lt;POSTHOUSE_ACCESS_KEY&gt;</code></pre>
+          </div>
+        </details>
 
-        <div class="setup-block" id="setup-cursor">
-          <h3>Cursor</h3>
-          <p>Install Cursor skills and add Posthouse as an MCP server (stdio or HTTP):</p>
-          <pre><code>posthouse skill install --agent cursor --all</code></pre>
-        </div>
+        <details class="setup-block" id="setup-cursor">
+          <summary>Cursor</summary>
+          <div class="setup-body">
+            <p>Install the CLI, then Cursor skills and an MCP server entry:</p>
+            <pre><code>posthouse skill install --agent cursor --all
 
-        <div class="setup-block" id="setup-railway">
-          <h3>Deploy on Railway</h3>
-          <p>
-            Still <em>your</em> process — not a Posthouse cloud. Create a service
-            from the GitHub repo; <code>railway.json</code> builds the Dockerfile
-            and health-checks <code>/healthz</code>.
-          </p>
-          <pre><code># 1. Attach a volume at /data
-# 2. Set env:
-POSTHOUSE_CACHE_KEY=…
-POSTHOUSE_ACCESS_KEY=…   # ≥16 chars
-POSTHOUSE_TRUST_PROXY=1
-# plus provider app-password variables
+# MCP: stdio (local) or HTTP (private server)
+# stdio command/args: posthouse · mcp · stdio
+# HTTP: https://your-host/mcp + Bearer POSTHOUSE_ACCESS_KEY</code></pre>
+          </div>
+        </details>
 
-# 3. Point MCP/REST clients at:
-#    https://your-railway-url/mcp
-#    https://your-railway-url/v1
-# with Authorization: Bearer &lt;POSTHOUSE_ACCESS_KEY&gt;</code></pre>
-          <p>
-            Railway injects <code>PORT</code>; the start command already passes
-            <code>--allow-container-listener</code>. Keep bearer auth on.
-          </p>
-        </div>
+        <p class="setup-group">Deploy (still your process)</p>
 
-        <div class="setup-block" id="setup-docker">
-          <h3>Docker Compose (VPS / homelab)</h3>
-          <pre><code>git clone https://github.com/timborovkov/posthouse
+        <details class="setup-block" id="setup-docker">
+          <summary>Docker Compose (VPS / homelab)</summary>
+          <div class="setup-body">
+            <pre><code>git clone https://github.com/timborovkov/posthouse
 cd posthouse
 posthouse setup --write-env .env
-# add provider secrets to .env
+# add provider app-password variables to .env
 docker compose up --build
 # listens on 127.0.0.1:8791 — put TLS in front for remote access</code></pre>
-        </div>
-      </section>
+            <p>
+              On a private network or behind TLS you can also layer
+              <code>docker-compose.private.yml</code>. Set
+              <code>POSTHOUSE_TRUST_PROXY=1</code> when a reverse proxy supplies
+              <code>X-Real-IP</code> / <code>X-Forwarded-For</code>.
+            </p>
+          </div>
+        </details>
 
-      <section class="wrap section" id="install" aria-labelledby="install-title">
-        <h2 id="install-title">Install</h2>
-        <p>Go 1.26.6 or newer:</p>
-        <pre><code>go install github.com/timborovkov/posthouse/cmd/posthouse@latest
-posthouse tui</code></pre>
-        <p class="note">
-          Or clone the
-          <a href="https://github.com/timborovkov/posthouse">repository</a>
-          and run <code>make build</code>.
-        </p>
+        <details class="setup-block" id="setup-railway">
+          <summary>Railway</summary>
+          <div class="setup-body">
+            <p>
+              Not a Posthouse cloud — your service from this repo.
+              <code>railway.json</code> builds the Dockerfile and health-checks
+              <code>/healthz</code>.
+            </p>
+            <ol>
+              <li>Create a service from the GitHub repository.</li>
+              <li>Attach a volume at <code>/data</code>.</li>
+              <li>
+                Set <code>POSTHOUSE_CACHE_KEY</code>,
+                <code>POSTHOUSE_ACCESS_KEY</code> (≥16 chars),
+                <code>POSTHOUSE_TRUST_PROXY=1</code>, and provider secret variables.
+              </li>
+              <li>
+                Point MCP/REST at
+                <code>https://your-url/mcp</code> and
+                <code>https://your-url/v1</code> with
+                <code>Authorization: Bearer &lt;POSTHOUSE_ACCESS_KEY&gt;</code>.
+              </li>
+            </ol>
+            <p>
+              Railway injects <code>PORT</code>; the start command already passes
+              <code>--allow-container-listener</code>. Keep bearer auth on.
+            </p>
+          </div>
+        </details>
       </section>
 
       <section class="wrap section" id="about" aria-labelledby="about-title">

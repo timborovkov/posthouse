@@ -273,21 +273,62 @@ a:hover {
 }
 
 .setup-block {
-  margin: 0 0 1.75rem;
-  padding: 0 0 1.5rem;
-  border-bottom: 1px solid rgba(28, 36, 48, 0.08);
+  margin: 0 0 0.65rem;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 0.45rem;
+  background: rgba(255, 255, 255, 0.45);
 }
 
-.setup-block:last-of-type {
-  border-bottom: none;
-  margin-bottom: 0;
-  padding-bottom: 0;
+.setup-block[open] {
+  background: var(--panel);
 }
 
-.setup-block h3 {
-  margin-top: 0;
+.setup-block > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.85rem 1rem;
+  cursor: pointer;
+  list-style: none;
   font-family: var(--mono);
-  font-size: 0.98rem;
+  font-size: 0.95rem;
+  font-weight: 600;
+  user-select: none;
+}
+
+.setup-block > summary::-webkit-details-marker {
+  display: none;
+}
+
+.setup-block > summary::after {
+  content: "+";
+  flex-shrink: 0;
+  font-weight: 700;
+  color: var(--muted);
+}
+
+.setup-block[open] > summary::after {
+  content: "−";
+}
+
+.setup-block > summary:hover {
+  color: var(--accent-ink);
+}
+
+.setup-body {
+  padding: 0 1rem 1rem;
+  border-top: 1px solid var(--line);
+}
+
+.setup-body > :first-child {
+  margin-top: 0.85rem;
+}
+
+.setup-block h3,
+.setup-block > summary {
+  margin: 0;
 }
 
 .setup-block p {
@@ -295,6 +336,26 @@ a:hover {
   max-width: 42rem;
   color: var(--muted);
   font-size: 0.98rem;
+}
+
+.setup-block ul {
+  margin: 0 0 0.85rem;
+  padding-left: 1.2rem;
+  max-width: 42rem;
+  color: var(--muted);
+  font-size: 0.98rem;
+}
+
+.setup-block ol {
+  margin: 0 0 0.85rem;
+  padding-left: 1.2rem;
+  max-width: 42rem;
+  color: var(--muted);
+  font-size: 0.98rem;
+}
+
+.setup-block li {
+  margin-bottom: 0.35rem;
 }
 
 pre,
@@ -308,13 +369,27 @@ pre {
   overflow-x: auto;
   border: 1px solid var(--line);
   border-radius: 0.45rem;
-  background: var(--panel);
+  background: var(--paper);
   font-size: 0.9rem;
   line-height: 1.45;
 }
 
 .setup-block pre {
-  margin-top: 0.35rem;
+  margin: 0.35rem 0 0.75rem;
+}
+
+.setup-block pre:last-child {
+  margin-bottom: 0;
+}
+
+.setup-group {
+  margin: 1.75rem 0 0.75rem;
+  font-size: 0.78rem;
+  font-family: var(--mono);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
 }
 
 .site-footer {
