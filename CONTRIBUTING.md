@@ -11,4 +11,6 @@ For code changes:
 3. Update [README.md](./README.md), [GETTING-STARTED.md](./GETTING-STARTED.md), [INSTALLATION-AND-USAGE-GUIDE.md](./INSTALLATION-AND-USAGE-GUIDE.md), or [TODO.md](./TODO.md) if user-facing behavior moved.
 4. Run `make validate`.
 
-Dev setup is in the [README](./README.md#develop). Contributions are MIT.
+Dev setup is in the [README](./README.md#develop). Contributions use the same
+[MIT License](LICENSE). You keep copyright on your changes; inbound patches
+are MIT like the rest of the tree.

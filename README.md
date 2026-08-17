@@ -9,6 +9,9 @@ Reads can span connections; every write is previewed, then executed on exactly
 one connection. It is not a hosted SaaS: you run it on your laptop or on a
 machine you control.
 
+Built by [Tim Borovkov](https://timb.dev). Free to use under the
+[MIT License](LICENSE).
+
 v0.2. No OAuth, no native Gmail/Microsoft APIs. See [TODO.md](./TODO.md).
 
 ## Install
@@ -52,4 +55,9 @@ something is missing or broken. PRs welcome — see
 [CONTRIBUTING.md](./CONTRIBUTING.md). Do not paste secrets or message/event
 content. Security: [SECURITY.md](./SECURITY.md).
 
-MIT. Domain language: [CONTEXT.md](./CONTEXT.md).
+## License
+
+[MIT](LICENSE) — free to use, copy, modify, and share, including commercially.
+Copyright (c) 2026 [Tim Borovkov](https://timb.dev) and Posthouse contributors.
+
+Domain language: [CONTEXT.md](./CONTEXT.md).

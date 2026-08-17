@@ -1054,7 +1054,7 @@ func (p *posthouseApp) Render(app *tui.App) *tui.Element {
 	)
 	__tui_41.AddChild(__tui_42)
 	__tui_43 := tui.New(
-		tui.WithText("? help · q quit"),
+		tui.WithText("built by Tim Borovkov · ? help · q quit"),
 		tui.WithTextStyle(tui.NewStyle().Dim()),
 	)
 	__tui_41.AddChild(__tui_43)

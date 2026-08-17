@@ -377,7 +377,7 @@ templ (p *posthouseApp) Render() {
 			</div>
 		</div>
 		if p.errorText.Get()!="" { <div class="border-rounded border-red px-1 shrink-0"><span class="text-red">{p.errorText.Get()}</span></div> }
-		<div class="flex shrink-0 px-1 justify-between"><span class="font-dim">Tab areas · j/k move · / search · r refresh · c create · a actions</span><span class="font-dim">? help · q quit</span></div>
+		<div class="flex shrink-0 px-1 justify-between"><span class="font-dim">Tab areas · j/k move · / search · r refresh · c create · a actions</span><span class="font-dim">built by Tim Borovkov · ? help · q quit</span></div>
 		if p.searching.Get() { <div class="border-rounded px-1 shrink-0"><span class="text-cyan font-bold">Search: </span><span>{p.query.Get()+"_"}</span></div> }
 		<modal open={p.modal} class="justify-center items-center" backdrop="dim">
 			<div class="w-70 border-rounded p-2 flex-col gap-1">
