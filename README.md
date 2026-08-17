@@ -1,8 +1,10 @@
 # Posthouse
 
-Posthouse is a local-first Go CLI, MCP server, and full-screen terminal app for operating multiple generic mail and calendar connections through one safe interface. v0.2 covers IMAP/SMTP, read-only ICS feeds, mutable CalDAV calendars, encrypted offline state, and prepare-before-execute writes.
+Posthouse is a **personal**, local-first Go CLI, MCP server, REST API, and full-screen terminal app for operating multiple generic mail and calendar connections through one safe interface. It is not a hosted SaaS: you run it on your laptop or on a machine you control. v0.2 covers IMAP/SMTP, read-only ICS feeds, mutable CalDAV calendars, encrypted offline state, and prepare-before-execute writes.
 
 > **Release target:** v0.2.0. OAuth, native provider APIs, HTML composition, permanent mail deletion, CalDAV scheduling/free-busy, and live-provider certification are intentionally outside this release.
+
+New to Posthouse? Start with **[GETTING-STARTED.md](./GETTING-STARTED.md)** — install, first connection, agents, and private-cloud deploy without assuming you live in a terminal.
 
 ## What works
 
@@ -16,7 +18,7 @@ Posthouse is a local-first Go CLI, MCP server, and full-screen terminal app for 
 - Prepare and execute ETag-guarded CalDAV create, update, occurrence/series update, and delete operations.
 - Generate portable `METHOD:REQUEST` and `METHOD:CANCEL` invitations from the CLI or MCP, then send them as a separate prepared mail operation.
 - Use live-first reads with stale encrypted-cache fallback, `--offline`, `--refresh`, explicit sync, LRU limits, clear, and rekey.
-- Run the same contracts through CLI JSON, MCP stdio, authenticated Streamable HTTP, and a keyboard-complete Go-TUI.
+- Run the same contracts through CLI JSON, MCP stdio, authenticated Streamable HTTP, REST `/v1`, and a keyboard-complete Go-TUI.
 
 Provider-side draft create/update requires IMAP `UIDPLUS` (or IMAP4rev2) so the appended draft always has an addressable UID; sent-copy APPEND remains compatible without it. Cleartext authenticated IMAP/SMTP and disabled CalDAV certificate verification are accepted only on loopback development endpoints; remote connections must use verified TLS or STARTTLS.
 
@@ -28,18 +30,29 @@ Provider secrets use either environment or OS-keychain references. The SQLite st
 
 ## Install
 
-Posthouse pins Go 1.26.6.
+Posthouse pins Go 1.26.6. Guided install:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/timborovkov/posthouse/main/scripts/install.sh | sh
+posthouse setup
+```
+
+Or:
 
 ```sh
 go install github.com/timborovkov/posthouse/cmd/posthouse@latest
+posthouse setup
 ```
 
 From a clone:
 
 ```sh
 make build
+./bin/posthouse setup
 ./bin/posthouse help
 ```
+
+`posthouse setup` prints `POSTHOUSE_CACHE_KEY` and `POSTHOUSE_ACCESS_KEY`. Pass `--write-env PATH` to save them in a mode-`0600` file. Headless and Docker deployments must set the cache key; desktop use can let Posthouse store a path-scoped key in the OS keychain instead.
 
 ## Configure
 
@@ -134,9 +147,9 @@ The TUI has five responsive views: connection onboarding/doctor, unified inbox, 
 
 The `.gsx` source and generated `_gsx.go` are both committed. Run `make generate`; CI runs `make generate-check` and fails on a diff.
 
-## MCP
+## MCP and REST
 
-Stdio client configuration:
+Stdio client configuration (local process; no access key):
 
 ```json
 {
@@ -154,31 +167,50 @@ Stdio client configuration:
 }
 ```
 
-Streamable HTTP:
+HTTP serves Streamable MCP at `/mcp` and REST at `/v1` from one process:
 
 ```sh
-export POSTHOUSE_MCP_TOKEN='a-long-random-token'
+export POSTHOUSE_ACCESS_KEY='a-long-random-token'
 export POSTHOUSE_CACHE_KEY='a-base64-or-hex-encoded-32-byte-key'
-posthouse mcp http --address 127.0.0.1:8791
+posthouse serve --address 127.0.0.1:8791
 ```
 
-`POSTHOUSE_MCP_TOKEN` is mandatory for every Streamable HTTP listener, including loopback. Stdio is the only transport with implicit local-process authentication. Streamable HTTP request bodies are capped at 36 MiB, which accommodates one operation's base64-encoded 25 MiB attachment allowance plus its JSON envelope.
+`posthouse mcp http` is the same listener. `POSTHOUSE_ACCESS_KEY` is mandatory for every HTTP listener, including loopback (`POSTHOUSE_MCP_TOKEN` remains accepted as an alias; if both are set they must match). Stdio is the only transport with implicit local-process authentication. The access key must be at least 16 characters. Failed bearer attempts are counted per client address; eight failures in fifteen minutes return `429` with `Retry-After` for fifteen minutes. Set `POSTHOUSE_TRUST_PROXY=1` only when a TLS reverse proxy supplies `X-Forwarded-For`. Request bodies are capped at 36 MiB.
 
-The endpoint is `/mcp`. `/healthz` reports process liveness; `/readyz` checks configuration, cache migration/key availability, and initialized internal services. Provider connectivity belongs to `connection_doctor` and `sync`, not readiness. The direct server is restricted to loopback because it serves HTTP; expose it remotely only through a TLS-terminating reverse proxy forwarding to the loopback listener, and retain bearer-token authentication. `--allow-container-listener` exists only for a container whose published port is externally constrained to loopback or protected by TLS; the supplied Compose file uses it with a `127.0.0.1` host publication.
+`GET /v1` lists REST routes. `/healthz` reports process liveness; `/readyz` checks configuration, cache migration/key availability, and initialized internal services. Provider connectivity belongs to `connection_doctor` and `sync`, not readiness. The direct server is restricted to loopback because it serves HTTP; expose it remotely only through a TLS-terminating reverse proxy forwarding to the loopback listener, and retain bearer-token authentication. `--allow-container-listener` exists only for a container whose published port is externally constrained to loopback or protected by TLS. Hosted platforms that inject `PORT` (Railway) listen on `0.0.0.0:$PORT` automatically.
 
-The typed tool surface includes connection listing/doctor; message search/body/attachment reads; send, reply, forward, draft, and message-action preparation; event listing/ICS/CRUD preparation; operation show/execute; sync; and cache status. Tool errors are for invalid requests or total failure; successful multi-source reads carry structured partial errors and stale/cache timestamps in their result.
+The typed MCP tools and REST paths include connection listing/doctor; message search/body/attachment reads; send, reply, forward, draft, and message-action preparation; event listing/ICS/CRUD preparation; operation show/execute; sync; and cache status. Tool errors are for invalid requests or total failure; successful multi-source reads carry structured partial errors and stale/cache timestamps in their result.
 
-## Docker and deterministic tests
+### Agent skills
 
-Production-style local container:
+```sh
+posthouse skill list
+posthouse skill install --agent claude --all
+posthouse skill install --dir ./.agents/skills cli rest
+```
+
+`--agent` accepts `claude`, `cursor`, `codex`, or `hermes`. Skills teach the CLI, REST, and MCP contracts, including prepare-before-execute. Marketplace plugins are later; these files work today.
+
+## Docker and private-cloud deploy
+
+Production-style local container (MCP + REST on loopback):
 
 ```sh
 cp .env.example .env
-# Replace every placeholder, especially POSTHOUSE_CACHE_KEY and POSTHOUSE_MCP_TOKEN.
+# Replace every placeholder, especially POSTHOUSE_CACHE_KEY and POSTHOUSE_ACCESS_KEY.
+# Or: posthouse setup --write-env .env
 docker compose up --build
 ```
 
 The service binds `127.0.0.1:8791`, mounts the Docker-managed `posthouse-data` volume at `/data`, and uses `/data/config.json` plus `/data/posthouse.db` by default. The named volume remains writable by the image's non-root Posthouse user; inspect or back it up with standard Docker volume commands rather than replacing it with an unowned host bind mount.
+
+To publish on all host interfaces — only on a private network or behind TLS — add [docker-compose.private.yml](./docker-compose.private.yml):
+
+```sh
+docker compose -f docker-compose.yml -f docker-compose.private.yml up --build
+```
+
+[railway.json](./railway.json) builds the Dockerfile, health-checks `/healthz`, and expects a volume at `/data`. Set `POSTHOUSE_CACHE_KEY`, `POSTHOUSE_ACCESS_KEY`, and provider secrets; Railway's `PORT` is picked up automatically. This is still a personal process, not a Posthouse-hosted service.
 
 Development needs no real provider accounts. [docker-compose.test.yml](./docker-compose.test.yml) pins GreenMail `2.1.11` and Radicale `3.7.3`, binds them only to loopback, seeds isolated `work` and `personal` principals, and discards state after each suite:
 
@@ -203,4 +235,4 @@ The Docker suites exercise two mail identities, concurrent cross-process executi
 - No cache is a provider backup. Clearing it removes local cached content, not provider data or the separate prepared-operation ledger.
 - Generic protocol compatibility is covered by deterministic local servers; real Fastmail/iCloud or other provider checks may be added later but do not gate v0.2.
 
-See [CONTEXT.md](./CONTEXT.md) for domain language, [design.md](./design.md) for boundaries, [CONTRIBUTING.md](./CONTRIBUTING.md) for gates, and [TODO.md](./TODO.md) for deliberately deferred work.
+See [GETTING-STARTED.md](./GETTING-STARTED.md) for the non-technical install path, [CONTEXT.md](./CONTEXT.md) for domain language, [design.md](./design.md) for boundaries, [CONTRIBUTING.md](./CONTRIBUTING.md) for gates, and [TODO.md](./TODO.md) for deliberately deferred work.

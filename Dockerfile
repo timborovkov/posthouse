@@ -16,4 +16,4 @@ USER posthouse
 VOLUME ["/data"]
 EXPOSE 8791
 ENTRYPOINT ["posthouse"]
-CMD ["--config", "/data/config.json", "mcp", "http", "--address", "127.0.0.1:8791"]
+CMD ["--config", "/data/config.json", "serve"]

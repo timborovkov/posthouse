@@ -18,7 +18,7 @@ Live provider credentials are never required for the unit suite. Use local test 
 1. Create a focused branch.
 2. Preserve the terms in `CONTEXT.md`; update the glossary when the domain language genuinely changes.
 3. Add protocol or selector tests for behavior changes.
-4. Update `README.md` and `TODO.md` in the same change when capabilities or limitations move.
+4. Update `README.md`, `GETTING-STARTED.md`, and `TODO.md` in the same change when capabilities or limitations move.
 5. Run `make validate` before opening a pull request.
 6. Explain externally visible side effects and security implications in the PR description.
 

@@ -114,6 +114,62 @@ func TestCheckedUIDRejectsOverflow(t *testing.T) {
 	}
 }
 
+func TestSetupWritesEnvAndSkillInstall(t *testing.T) {
+	application := testCLI(t, new(bytes.Buffer))
+	envPath := filepath.Join(t.TempDir(), ".env")
+	if err := application.Run(context.Background(), []string{"setup", "--write-env", envPath}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(envPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(envPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("env permissions are %o, want 600", info.Mode().Perm())
+	}
+	body := string(data)
+	if !strings.Contains(body, "POSTHOUSE_CACHE_KEY=") || !strings.Contains(body, "POSTHOUSE_ACCESS_KEY=") {
+		t.Fatalf("env file = %s", body)
+	}
+	if err := application.Run(context.Background(), []string{"setup", "--write-env", envPath}); err == nil || !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("second setup returned %v", err)
+	}
+
+	skillDir := filepath.Join(t.TempDir(), "skills")
+	application.stdout = new(bytes.Buffer)
+	if err := application.Run(context.Background(), []string{"skill", "install", "--dir", skillDir, "cli"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(skillDir, "posthouse-cli", "SKILL.md")); err != nil {
+		t.Fatal(err)
+	}
+	application.stdout = new(bytes.Buffer)
+	if err := application.Run(context.Background(), []string{"skill", "list"}); err != nil {
+		t.Fatal(err)
+	}
+	if listed := application.stdout.(*bytes.Buffer).String(); !strings.Contains(listed, `"id": "mcp"`) {
+		t.Fatalf("skill list = %s", listed)
+	}
+}
+
+func TestResolveListenAddressUsesPortForHostedPlatforms(t *testing.T) {
+	t.Setenv("PORT", "8080")
+	t.Setenv("POSTHOUSE_HTTP_ADDRESS", "")
+	t.Setenv("POSTHOUSE_ALLOW_CONTAINER_LISTENER", "")
+	address, allow := resolveListenAddress("", false)
+	if address != "0.0.0.0:8080" || !allow {
+		t.Fatalf("PORT listen = %q allow=%v", address, allow)
+	}
+	address, allow = resolveListenAddress("127.0.0.1:8791", false)
+	if address != "127.0.0.1:8791" || allow {
+		t.Fatalf("explicit loopback = %q allow=%v", address, allow)
+	}
+}
+
 func testCLI(t *testing.T, stdout *bytes.Buffer) *CLI {
 	t.Helper()
 	store, err := config.New(filepath.Join(t.TempDir(), "config.json"))

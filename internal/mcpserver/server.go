@@ -2,7 +2,6 @@ package mcpserver
 
 import (
 	"context"
-	"crypto/subtle"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -14,6 +13,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/timborovkov/posthouse/internal/calendar"
+	"github.com/timborovkov/posthouse/internal/httpauth"
 	postmail "github.com/timborovkov/posthouse/internal/mail"
 	"github.com/timborovkov/posthouse/internal/model"
 	"github.com/timborovkov/posthouse/internal/service"
@@ -47,16 +47,26 @@ func (s *Server) RunHTTP(ctx context.Context, address string, token string, allo
 		return fmt.Errorf("invalid HTTP address %q: %w", address, err)
 	}
 	if !isLoopback(host) && !allowContainerListener {
-		return fmt.Errorf("direct MCP HTTP must listen on loopback; use a TLS-terminating reverse proxy for remote access")
+		return fmt.Errorf("direct HTTP must listen on loopback; use a TLS-terminating reverse proxy for remote access")
 	}
-	if token == "" {
-		return fmt.Errorf("POSTHOUSE_MCP_TOKEN is required for HTTP transport")
+	handler, err := s.HTTPHandler(token, logger)
+	if err != nil {
+		return err
 	}
-	handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return s.mcp }, &mcp.StreamableHTTPOptions{
+	httpServer := &http.Server{Addr: address, Handler: handler, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 2 * time.Minute}
+	logger.Info("Posthouse HTTP listening", "address", address, "mcp", "/mcp", "rest", "/v1")
+	return serveHTTPUntilShutdown(ctx, httpServer.ListenAndServe, httpServer.Shutdown)
+}
+
+func (s *Server) HTTPHandler(token string, logger *slog.Logger) (http.Handler, error) {
+	guard, err := httpauth.NewGuard(token)
+	if err != nil {
+		return nil, err
+	}
+	mcpHandler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return s.mcp }, &mcp.StreamableHTTPOptions{
 		Stateless: true, JSONResponse: true, Logger: logger, SessionTimeout: 5 * time.Minute,
 	})
 	mux := http.NewServeMux()
-	mux.Handle("/mcp", authenticate(http.MaxBytesHandler(handler, maxMCPHTTPRequestBytes), token))
 	mux.HandleFunc("GET /healthz", func(writer http.ResponseWriter, _ *http.Request) {
 		writer.Header().Set("Content-Type", "application/json")
 		_, _ = writer.Write([]byte(`{"status":"ok"}`))
@@ -70,9 +80,11 @@ func (s *Server) RunHTTP(ctx context.Context, address string, token string, allo
 		}
 		_, _ = writer.Write([]byte(`{"status":"ready"}`))
 	})
-	httpServer := &http.Server{Addr: address, Handler: mux, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 2 * time.Minute}
-	logger.Info("MCP server listening", "address", address, "endpoint", "/mcp")
-	return serveHTTPUntilShutdown(ctx, httpServer.ListenAndServe, httpServer.Shutdown)
+	protected := http.NewServeMux()
+	protected.Handle("/mcp", http.MaxBytesHandler(mcpHandler, maxMCPHTTPRequestBytes))
+	s.registerREST(protected)
+	mux.Handle("/", guard.Middleware(http.MaxBytesHandler(protected, maxMCPHTTPRequestBytes)))
+	return mux, nil
 }
 
 func serveHTTPUntilShutdown(ctx context.Context, serve func() error, shutdown func(context.Context) error) error {
@@ -493,22 +505,6 @@ func validateReadMode(mode string) error {
 		return fmt.Errorf("mode must be offline or refresh")
 	}
 	return nil
-}
-
-func authenticate(next http.Handler, token string) http.Handler {
-	if token == "" {
-		return next
-	}
-	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		provided := request.Header.Get("Authorization")
-		wanted := "Bearer " + token
-		if subtle.ConstantTimeCompare([]byte(provided), []byte(wanted)) != 1 {
-			writer.Header().Set("WWW-Authenticate", "Bearer")
-			http.Error(writer, "unauthorized", http.StatusUnauthorized)
-			return
-		}
-		next.ServeHTTP(writer, request)
-	})
 }
 
 func isLoopback(host string) bool {

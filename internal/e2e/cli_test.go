@@ -258,7 +258,7 @@ func TestBuiltBinaryHTTPHealthReadinessAndAuthentication(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	command := exec.CommandContext(ctx, binary, "--config", configPath, "mcp", "http", "--address", address)
-	command.Env = append(os.Environ(), "POSTHOUSE_MCP_TOKEN=e2e-token")
+	command.Env = append(os.Environ(), "POSTHOUSE_ACCESS_KEY=e2e-access-key-1")
 	var stderr bytes.Buffer
 	command.Stderr = &stderr
 	if err := command.Start(); err != nil {
@@ -276,6 +276,24 @@ func TestBuiltBinaryHTTPHealthReadinessAndAuthentication(t *testing.T) {
 			t.Fatalf("%s status %d; stderr=%s", path, response.StatusCode, stderr.String())
 		}
 	}
+	unauth, err := http.Get("http://" + address + "/v1/cache")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = unauth.Body.Close()
+	if unauth.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated REST status %d", unauth.StatusCode)
+	}
+	cacheReq, _ := http.NewRequest(http.MethodGet, "http://"+address+"/v1/cache", nil)
+	cacheReq.Header.Set("Authorization", "Bearer e2e-access-key-1")
+	cacheResp, err := http.DefaultClient.Do(cacheReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = cacheResp.Body.Close()
+	if cacheResp.StatusCode != http.StatusOK {
+		t.Fatalf("REST cache status %d; stderr=%s", cacheResp.StatusCode, stderr.String())
+	}
 	request, _ := http.NewRequest(http.MethodPost, "http://"+address+"/mcp", strings.NewReader(`{}`))
 	response, err := http.DefaultClient.Do(request)
 	if err != nil {
@@ -286,7 +304,7 @@ func TestBuiltBinaryHTTPHealthReadinessAndAuthentication(t *testing.T) {
 		t.Fatalf("unauthenticated MCP status %d", response.StatusCode)
 	}
 	httpMCPClient := mcp.NewClient(&mcp.Implementation{Name: "posthouse-http-e2e", Version: "0.2.0"}, nil)
-	httpSession, err := httpMCPClient.Connect(context.Background(), &mcp.StreamableClientTransport{Endpoint: "http://" + address + "/mcp", HTTPClient: &http.Client{Transport: bearerTransport{token: "e2e-token"}}}, nil)
+	httpSession, err := httpMCPClient.Connect(context.Background(), &mcp.StreamableClientTransport{Endpoint: "http://" + address + "/mcp", HTTPClient: &http.Client{Transport: bearerTransport{token: "e2e-access-key-1"}}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

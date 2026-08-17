@@ -154,8 +154,7 @@ func TestServerListsAndCallsReadOnlyConnectionTool(t *testing.T) {
 }
 
 func TestAuthenticate(t *testing.T) {
-	next := http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) { writer.WriteHeader(http.StatusNoContent) })
-	handler := authenticate(next, "correct")
+	handler := testHTTPHandler(t)
 
 	unauthorized := httptest.NewRecorder()
 	handler.ServeHTTP(unauthorized, httptest.NewRequest(http.MethodPost, "/mcp", nil))
@@ -164,17 +163,17 @@ func TestAuthenticate(t *testing.T) {
 	}
 
 	authorized := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/mcp", nil)
-	request.Header.Set("Authorization", "Bearer correct")
+	request := httptest.NewRequest(http.MethodGet, "/v1", nil)
+	request.Header.Set("Authorization", "Bearer "+testAccessKey)
 	handler.ServeHTTP(authorized, request)
-	if authorized.Code != http.StatusNoContent {
-		t.Fatalf("authorized status is %d", authorized.Code)
+	if authorized.Code != http.StatusOK {
+		t.Fatalf("authorized status is %d body=%s", authorized.Code, authorized.Body.String())
 	}
 }
 
 func TestRunHTTPRejectsNonLoopbackEvenWithToken(t *testing.T) {
 	server := New(nil)
-	err := server.RunHTTP(context.Background(), "0.0.0.0:8791", "secret", false, slog.Default())
+	err := server.RunHTTP(context.Background(), "0.0.0.0:8791", testAccessKey, false, slog.Default())
 	if err == nil || !strings.Contains(err.Error(), "must listen on loopback") {
 		t.Fatalf("RunHTTP non-loopback error = %v", err)
 	}
@@ -183,7 +182,7 @@ func TestRunHTTPRejectsNonLoopbackEvenWithToken(t *testing.T) {
 func TestRunHTTPContainerListenerStillRequiresToken(t *testing.T) {
 	server := New(nil)
 	err := server.RunHTTP(context.Background(), "0.0.0.0:8791", "", true, slog.Default())
-	if err == nil || !strings.Contains(err.Error(), "TOKEN is required") {
+	if err == nil || !strings.Contains(err.Error(), "at least") {
 		t.Fatalf("RunHTTP container-listener error = %v", err)
 	}
 }
@@ -191,7 +190,7 @@ func TestRunHTTPContainerListenerStillRequiresToken(t *testing.T) {
 func TestRunHTTPLoopbackStillRequiresToken(t *testing.T) {
 	server := New(nil)
 	err := server.RunHTTP(context.Background(), "127.0.0.1:8791", "", false, slog.Default())
-	if err == nil || !strings.Contains(err.Error(), "POSTHOUSE_MCP_TOKEN") {
+	if err == nil || !strings.Contains(err.Error(), "at least") {
 		t.Fatalf("RunHTTP loopback error = %v", err)
 	}
 }
