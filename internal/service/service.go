@@ -843,7 +843,7 @@ func (s *Service) PrepareForwardVerbatim(ctx context.Context, connectionID, fold
 		return model.PreparedOperation{}, fmt.Errorf("resolve mail provider: %w", err)
 	}
 	folder = mailFolder(connection, folder)
-	fetched, err := postmail.GetContext(ctx, connection, folder, uid)
+	fetched, err := s.mailGetMessage(ctx, connection, folder, uid)
 	if err != nil {
 		return model.PreparedOperation{}, err
 	}

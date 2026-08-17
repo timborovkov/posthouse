@@ -89,6 +89,25 @@ func TestParseMessageTreatsNamedInlineTextAsAttachment(t *testing.T) {
 	}
 }
 
+func TestParseMessageSetsMarkdownFromHTMLAndText(t *testing.T) {
+	htmlRaw := []byte("MIME-Version: 1.0\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<p>Hello <strong>world</strong></p>\r\n")
+	parsed, err := parseMessage(htmlRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(parsed.Detail.Markdown, "**world**") {
+		t.Fatalf("html markdown = %q", parsed.Detail.Markdown)
+	}
+	textRaw := []byte("MIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nplain only\r\n")
+	parsed, err = parseMessage(textRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Detail.Markdown != parsed.Detail.Text || !strings.Contains(parsed.Detail.Markdown, "plain only") {
+		t.Fatalf("text markdown = %q text = %q", parsed.Detail.Markdown, parsed.Detail.Text)
+	}
+}
+
 func TestAppendWaitErrorDistinguishesTaggedRejection(t *testing.T) {
 	rejected := classifyAppendWaitError(&imap.Error{Type: imap.StatusResponseTypeNo, Text: "over quota"})
 	var uncertain *UncertainAppendError

@@ -36,4 +36,8 @@ func TestMailActionUIDsAndCap(t *testing.T) {
 	if len(uids) != 2 || uids[0] != 1 || uids[1] != 2 {
 		t.Fatalf("uids = %#v", uids)
 	}
+	single := mailActionUIDs(MailAction{UID: 9})
+	if len(single) != 1 || single[0] != 9 {
+		t.Fatalf("single uid = %#v", single)
+	}
 }

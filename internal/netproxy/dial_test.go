@@ -153,7 +153,29 @@ func TestDialTCPHTTPConnectRejectsNon200EvenIfBodyMentions200(t *testing.T) {
 }
 
 func TestBypassProxyLoopback(t *testing.T) {
-	if !bypassProxy("127.0.0.1:993") || !bypassProxy("localhost:143") {
+	if !bypassProxy("127.0.0.1:993") || !bypassProxy("localhost:143") || !bypassProxy("[::1]:993") {
 		t.Fatal("loopback should bypass proxy")
+	}
+}
+
+func TestBypassProxyNOProxy(t *testing.T) {
+	t.Setenv("NO_PROXY", ".example.test,mail.test")
+	if !bypassProxy("imap.example.test:993") {
+		t.Fatal(".suffix should bypass")
+	}
+	if !bypassProxy("mail.test:143") {
+		t.Fatal("exact host should bypass")
+	}
+	t.Setenv("NO_PROXY", "example.test")
+	if !bypassProxy("imap.example.test:993") {
+		t.Fatal("suffix without leading dot should bypass")
+	}
+	t.Setenv("NO_PROXY", "")
+	if bypassProxy("imap.example.test:993") {
+		t.Fatal("non-loopback without NO_PROXY must not bypass")
+	}
+	t.Setenv("NO_PROXY", "*")
+	if !bypassProxy("anywhere.example:993") {
+		t.Fatal("* should bypass")
 	}
 }

@@ -282,4 +282,9 @@ func TestReadonlyProfileOmitsWriteTools(t *testing.T) {
 			t.Fatalf("readonly tools unexpectedly include %s", blocked)
 		}
 	}
+	for _, want := range []string{"messages_triage", "messages_unread_counts"} {
+		if !slices.Contains(names, want) {
+			t.Fatalf("readonly tools %v do not contain %s", names, want)
+		}
+	}
 }

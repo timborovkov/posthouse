@@ -194,24 +194,7 @@ func probeThunderbird(ctx context.Context, email, domain string) (*model.IMAPCon
 			lastErr = err
 			continue
 		}
-		var imapCfg *model.IMAPConfig
-		var smtpCfg *model.SMTPConfig
-		for _, server := range doc.EmailProvider.IncomingServers {
-			if !strings.EqualFold(server.Type, "imap") || server.Hostname == "" || server.Port == 0 {
-				continue
-			}
-			tls, startTLS := socketFlags(server.SocketType, server.Port, true)
-			imapCfg = &model.IMAPConfig{Address: net.JoinHostPort(server.Hostname, fmt.Sprintf("%d", server.Port)), TLS: tls, StartTLS: startTLS}
-			break
-		}
-		for _, server := range doc.EmailProvider.OutgoingServers {
-			if !strings.EqualFold(server.Type, "smtp") || server.Hostname == "" || server.Port == 0 {
-				continue
-			}
-			tls, startTLS := socketFlags(server.SocketType, server.Port, false)
-			smtpCfg = &model.SMTPConfig{Address: net.JoinHostPort(server.Hostname, fmt.Sprintf("%d", server.Port)), TLS: tls, StartTLS: startTLS}
-			break
-		}
+		imapCfg, smtpCfg := thunderbirdConfigs(doc)
 		if imapCfg == nil && smtpCfg == nil {
 			lastErr = fmt.Errorf("%s had no IMAP/SMTP servers", endpoint)
 			continue
@@ -222,6 +205,28 @@ func probeThunderbird(ctx context.Context, email, domain string) (*model.IMAPCon
 		lastErr = fmt.Errorf("no autoconfig document found")
 	}
 	return nil, nil, "", lastErr
+}
+
+func thunderbirdConfigs(doc thunderbirdClientConfig) (*model.IMAPConfig, *model.SMTPConfig) {
+	var imapCfg *model.IMAPConfig
+	var smtpCfg *model.SMTPConfig
+	for _, server := range doc.EmailProvider.IncomingServers {
+		if !strings.EqualFold(server.Type, "imap") || server.Hostname == "" || server.Port == 0 {
+			continue
+		}
+		tls, startTLS := socketFlags(server.SocketType, server.Port, true)
+		imapCfg = &model.IMAPConfig{Address: net.JoinHostPort(server.Hostname, fmt.Sprintf("%d", server.Port)), TLS: tls, StartTLS: startTLS}
+		break
+	}
+	for _, server := range doc.EmailProvider.OutgoingServers {
+		if !strings.EqualFold(server.Type, "smtp") || server.Hostname == "" || server.Port == 0 {
+			continue
+		}
+		tls, startTLS := socketFlags(server.SocketType, server.Port, false)
+		smtpCfg = &model.SMTPConfig{Address: net.JoinHostPort(server.Hostname, fmt.Sprintf("%d", server.Port)), TLS: tls, StartTLS: startTLS}
+		break
+	}
+	return imapCfg, smtpCfg
 }
 
 func socketFlags(socketType string, port int, incoming bool) (tls, startTLS bool) {
@@ -258,22 +263,29 @@ func probeCalDAV(ctx context.Context, domain string) (string, string, error) {
 		return "", "", err
 	}
 	defer resp.Body.Close()
-	location := resp.Header.Get("Location")
-	if location == "" && resp.StatusCode >= 300 && resp.StatusCode < 400 {
-		return "", "", fmt.Errorf("%s returned %s without Location", endpoint, resp.Status)
+	caldav, err := acceptCalDAVWellKnown(endpoint, resp.StatusCode, resp.Header.Get("Location"), resp.Request.URL)
+	if err != nil {
+		return "", "", err
 	}
+	return caldav, "well-known:caldav", nil
+}
+
+func acceptCalDAVWellKnown(endpoint string, status int, location string, base *url.URL) (string, error) {
 	if location != "" {
-		resolved, err := resp.Request.URL.Parse(location)
+		resolved, err := base.Parse(location)
 		if err != nil {
-			return "", "", err
+			return "", err
 		}
 		if !strings.EqualFold(resolved.Scheme, "https") {
-			return "", "", fmt.Errorf("caldav well-known redirected to non-HTTPS URL")
+			return "", fmt.Errorf("caldav well-known redirected to non-HTTPS URL")
 		}
-		return resolved.String(), "well-known:caldav", nil
+		return resolved.String(), nil
 	}
-	if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusMethodNotAllowed {
-		return endpoint, "well-known:caldav", nil
+	if status >= 300 && status < 400 {
+		return "", fmt.Errorf("%s returned %s without Location", endpoint, http.StatusText(status))
 	}
-	return "", "", fmt.Errorf("%s returned %s", endpoint, resp.Status)
+	if status == http.StatusOK || status == http.StatusUnauthorized || status == http.StatusMethodNotAllowed {
+		return endpoint, nil
+	}
+	return "", fmt.Errorf("%s returned %s", endpoint, http.StatusText(status))
 }

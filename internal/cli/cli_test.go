@@ -14,6 +14,26 @@ import (
 	"github.com/timborovkov/posthouse/internal/service"
 )
 
+func TestSchemaWriteEmitsAgentPayloadSchemas(t *testing.T) {
+	application := testCLI(t, new(bytes.Buffer))
+	dir := filepath.Join(t.TempDir(), "schemas")
+	if err := application.Run(context.Background(), []string{"schema", "write", "--dir", dir}); err != nil {
+		t.Fatal(err)
+	}
+	detail, err := os.ReadFile(filepath.Join(dir, "posthouse-message-detail.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(detail), `"markdown"`) {
+		t.Fatalf("message-detail schema missing markdown: %s", detail)
+	}
+	for _, name := range []string{"posthouse-triage-page.json", "posthouse-unread-summary.json", "posthouse-autoconfig-result.json"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+	}
+}
+
 func TestPolicyCommandsPersistDenyAndProfile(t *testing.T) {
 	application := testCLI(t, new(bytes.Buffer))
 	if err := application.Run(context.Background(), []string{"policy", "deny", "mail.send", "mail.trash"}); err != nil {

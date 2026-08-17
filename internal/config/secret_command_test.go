@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/timborovkov/posthouse/internal/model"
@@ -54,5 +55,23 @@ func TestValidSecretRefExactlyOne(t *testing.T) {
 	}
 	if validSecretRef(model.SecretRef{Env: "X", Command: []string{"pass"}}) {
 		t.Fatal("env+command should be invalid")
+	}
+}
+
+func TestResolveSecretCommandRejectsEmptyAndControlChars(t *testing.T) {
+	dir := t.TempDir()
+	empty := filepath.Join(dir, "empty.sh")
+	if err := os.WriteFile(empty, []byte("#!/bin/sh\nprintf '\\n'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ResolveSecret(model.SecretRef{Command: []string{empty}}); err == nil || !strings.Contains(err.Error(), "empty secret") {
+		t.Fatalf("empty secret error = %v", err)
+	}
+	control := filepath.Join(dir, "control.sh")
+	if err := os.WriteFile(control, []byte("#!/bin/sh\nprintf 'a\\000b'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ResolveSecret(model.SecretRef{Command: []string{control}}); err == nil || !strings.Contains(err.Error(), "control characters") {
+		t.Fatalf("control secret error = %v", err)
 	}
 }
