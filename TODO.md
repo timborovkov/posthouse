@@ -22,9 +22,12 @@ Implementing brief: [handoffs/native-gmail-microsoft.md](./handoffs/native-gmail
 
 Publisher-owned desktop/public OAuth clients; Gmail API + Graph as extra backends; IMAP/CalDAV remain for generic connections. Users consent in a browser; they do not create Cloud projects. Refresh tokens use existing keychain/env refs. Public message identity becomes opaque `id` so search can compose IMAP + Gmail + Graph into one page. No Posthouse token proxy, no IMAP XOAUTH2 for these two vendors, no branded protocol presets.
 
+Homepage and privacy pages for Google/Microsoft verification live in [`website/`](./website/) (deploy on a domain you own; see the publisher handoff).
+
 ## Later hardening
 
 - Broaden generic-server interoperability fixtures and fuzz MIME/iCalendar parsing.
-- Add scoped HTTP authorization and independent read/write credentials.
+- Add scoped HTTP authorization and independent read/write credentials (a single access key with brute-force lockout is shipped).
 - External security review, SBOM/signing, vulnerability gates, and recovery documentation.
 - Optional provider presets and OAuth without weakening generic protocol support.
+- Marketplace plugins for Claude, Hermes, and ChatGPT; today agents install `posthouse skill` files.

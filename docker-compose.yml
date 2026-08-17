@@ -1,15 +1,17 @@
 services:
   posthouse:
     build: .
-    command: ["--config", "/data/config.json", "mcp", "http", "--address", "0.0.0.0:8791", "--allow-container-listener"]
+    command: ["--config", "/data/config.json", "serve", "--address", "0.0.0.0:8791", "--allow-container-listener"]
     restart: unless-stopped
     ports:
       - "127.0.0.1:8791:8791"
     volumes:
       - posthouse-data:/data
     environment:
-      POSTHOUSE_MCP_TOKEN: ${POSTHOUSE_MCP_TOKEN:?set POSTHOUSE_MCP_TOKEN in .env}
+      POSTHOUSE_ACCESS_KEY: ${POSTHOUSE_ACCESS_KEY:-${POSTHOUSE_MCP_TOKEN:?set POSTHOUSE_ACCESS_KEY or POSTHOUSE_MCP_TOKEN in .env}}
+      POSTHOUSE_MCP_TOKEN: ${POSTHOUSE_MCP_TOKEN:-}
       POSTHOUSE_CACHE_KEY: ${POSTHOUSE_CACHE_KEY:?set POSTHOUSE_CACHE_KEY in .env}
+      POSTHOUSE_TRUST_PROXY: ${POSTHOUSE_TRUST_PROXY:-}
       POSTHOUSE_MCP_PROFILE: ${POSTHOUSE_MCP_PROFILE:-}
       POSTHOUSE_POLICY_DENY: ${POSTHOUSE_POLICY_DENY:-}
       POSTHOUSE_AUTOCONFIG_ALLOW_PRIVATE: ${POSTHOUSE_AUTOCONFIG_ALLOW_PRIVATE:-}

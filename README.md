@@ -3,24 +3,82 @@
 [![CI](https://github.com/timborovkov/posthouse/actions/workflows/ci.yml/badge.svg)](https://github.com/timborovkov/posthouse/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Local-first CLI, MCP server, and terminal app for multiple mail and calendar
-connections. IMAP/SMTP, CalDAV, and read-only ICS feeds. Reads can span
-connections; every write is previewed, then executed on exactly one
-connection.
+**One local switchboard across your mail and calendars — ready for your agents.**
 
-Probe IMAP/SMTP/CalDAV from an email address (`connection probe` / TUI onboard),
-triage via MCP (`messages_triage`), and keep secrets in env, keychain, or a
-command argv. Send text or HTML (`--html` / `--html-file`, MCP `html`, TUI body
-type). Default write policy allows everything; deny send/move/trash/etc. via
-`policy deny`, config, or `POSTHOUSE_POLICY_DENY`, and run MCP as
-`--profile readonly` when agents should not see write tools. The TUI is
-optional: config, CLI, and MCP already cover every operation. Recipients are
-raw addresses; there is no contacts registry.
+You juggle work and personal mailboxes, a few calendars, and maybe an agent
+that needs to read them. Providers do not speak the same language. Posthouse
+does: search across connections, then preview and execute every write on
+exactly one. It is personal software you run on a machine you control — CLI,
+MCP, REST, and an optional terminal UI. Free and open source under MIT.
 
-Built by [Tim Borovkov](https://timb.dev). Free to use under the
-[MIT License](LICENSE).
+Probe IMAP/SMTP/CalDAV from an email address (`connection probe` / TUI onboard).
+Default write policy allows everything; deny send/move/trash/etc. via
+`policy deny`, and run MCP as `--profile readonly` when agents should not see
+write tools. Recipients are raw addresses; there is no contacts registry.
 
-v0.2. No OAuth, no native Gmail/Microsoft APIs. See [TODO.md](./TODO.md).
+![Posthouse TUI unified inbox with demo work and personal messages](docs/images/tui-inbox.png)
+
+Built by [Tim Borovkov](https://timb.dev). Landing + privacy pages:
+[`website/`](./website/).
+
+v0.2. IMAP/SMTP, CalDAV, and ICS feeds today. OAuth / native Gmail and
+Microsoft are on the roadmap — see [TODO.md](./TODO.md).
+
+## Features
+
+### Connections and selectors
+
+| Idea | What it does |
+| --- | --- |
+| **Multiple connections** | Several mailboxes and calendars in one config (work + personal + …). |
+| **Category** | One broad grouping per connection: `work` or `personal`. |
+| **Labels** | Free markers you choose (`acme`, `finance`, `primary`) to select across connections. |
+| **Capabilities** | What each connection can do: `mail.read`, `mail.send`, `calendar.read`, `calendar.write`. |
+| **Selector** | Scope a read by connection IDs, category, labels, and/or capability. |
+| **Identity** | The From name/address used when that connection acts externally. |
+
+Reads may fan out across a selector. Every write targets **exactly one**
+connection, with a ten-minute prepare → preview → execute flow.
+
+### Mail
+
+| Action | Notes |
+| --- | --- |
+| List / search / triage | Unified inbox; filter by category, label, unread, query. `mail triage` is the agent-oriented summary. |
+| Unread counts | IMAP `STATUS UNSEEN` per selected connection (`mail unread`). |
+| Get / attachments | Full message body (includes `markdown`); save attachments locally; `--extract-text` for PDFs. |
+| Send | Text or HTML (`--html` / `--html-file`); optional CC/BCC and file attachments. |
+| Reply / forward | Prepare-then-execute; `--verbatim` forward attaches original parts. |
+| Drafts | Create, update, delete. |
+| Mark / move / archive / trash / junk | Folder actions on one connection; `--uids` batches up to 100. |
+
+### Calendar
+
+| Action | Notes |
+| --- | --- |
+| List / get | Across CalDAV collections and read-only ICS feeds. |
+| Create / update / delete | CalDAV writes with ETag checks; prepare-then-execute. |
+| Portable ICS | Generate invitation/cancel files without a provider write. |
+| Discover | Pull folders and calendar collections into config. |
+
+### How you use it
+
+| Surface | Best for |
+| --- | --- |
+| **CLI** | Scripts and JSON output (`posthouse mail search`, …). |
+| **TUI** | Keyboard-first daily loop; optional — same operations as CLI/MCP. |
+| **MCP** | Local `stdio` or Streamable HTTP for Claude, Cursor, Codex, Hermes, … |
+| **REST** | `/v1` on a personal `posthouse serve` (access key required). |
+| **Agent skills** | `posthouse skill install --agent …` ships `connections` / `mail` / `calendar` (plus `mcp` / `rest`). |
+
+### Agent limits
+
+| Idea | What it does |
+| --- | --- |
+| **Policy** | Deny write classes (`mail.send`, `mail.move`, …) on prepare and execute. |
+| **MCP profile** | `full` (default) or `readonly` (`--profile`, `policy mcp-profile`, or `POSTHOUSE_MCP_PROFILE`). |
+
+Recipients are raw addresses (no contacts registry). The TUI is optional.
 
 ## Install
 
@@ -29,8 +87,24 @@ go install github.com/timborovkov/posthouse/cmd/posthouse@latest
 posthouse tui
 ```
 
-Full setup, CLI, MCP, policy, and Docker:
+Teach a local agent the CLI skills (Codex, Claude, Cursor, Hermes):
+
+```sh
+posthouse skill install --agent codex connections mail calendar
+posthouse skill list
+```
+
+Add `--all` (or `mcp` / `rest`) when the agent should also use MCP or the HTTP API. Re-running install refreshes files and removes retired skill folders (`cli`, `email-inboxes`, `email-send`). `--agent codex` installs into `~/.agents/skills` and also refreshes `~/.codex/skills` for older Codex builds.
+
+Non-technical path (first connection, agents, private server):
+[GETTING-STARTED.md](./GETTING-STARTED.md).
+
+Full CLI, MCP, REST, policy, and deploy detail:
 [INSTALLATION-AND-USAGE-GUIDE.md](./INSTALLATION-AND-USAGE-GUIDE.md).
+
+Setup guides: [GETTING-STARTED.md](./GETTING-STARTED.md) (authoritative commands)
+and the foldable [website/](./website/) pages (deploy on your domain; see
+`#setup-railway` for Railway).
 
 ## Develop
 

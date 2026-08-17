@@ -1,6 +1,6 @@
 # Posthouse v0.2 release-candidate handoff
 
-Posthouse is a local-first Go CLI, MCP server, and full-screen terminal application for operating multiple generic mail and calendar connections through open protocols.
+Posthouse is a personal, local-first Go CLI, MCP server, REST API, and full-screen terminal application for operating multiple generic mail and calendar connections through open protocols. It is not a hosted SaaS.
 
 ## Included
 
@@ -11,7 +11,8 @@ Posthouse is a local-first Go CLI, MCP server, and full-screen terminal applicat
 - Optional write policy (default allow-all) to deny classes such as send, move, trash, draft, or calendar write on prepare and execute.
 - MCP `full` / `readonly` profiles so agents can be limited to read/sync tools without listing prepare/execute.
 - CGo-free encrypted SQLite cache/state with verified key markers, offline fallback, explicit sync, bounded retention, LRU eviction, and safe rekeying.
-- Typed MCP tools over stdio and authenticated Streamable HTTP, plus the generated keyboard-first Go-TUI.
+- Typed MCP tools over stdio and authenticated Streamable HTTP, REST `/v1`, agent skill install, plus the generated keyboard-first Go-TUI.
+- Personal Docker Compose / Railway deploy with an access key and failed-auth lockout.
 - Deterministic GreenMail `2.1.11` and Radicale `3.7.3` development environments using disposable work and personal principals.
 
 ## Verified
