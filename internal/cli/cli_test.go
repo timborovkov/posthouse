@@ -14,6 +14,19 @@ import (
 	"github.com/timborovkov/posthouse/internal/service"
 )
 
+func TestHelpCreditsAuthorAndLicense(t *testing.T) {
+	application := testCLI(t, new(bytes.Buffer))
+	if err := application.Run(context.Background(), []string{"help"}); err != nil {
+		t.Fatalf("help returned error: %v", err)
+	}
+	output := application.stdout.(*bytes.Buffer).String()
+	for _, expected := range []string{"Built by Tim Borovkov", "https://timb.dev", "MIT License"} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("help output %q does not contain %q", output, expected)
+		}
+	}
+}
+
 func TestCalendarICSStreamsFileToStdout(t *testing.T) {
 	application := testCLI(t, new(bytes.Buffer))
 	output := application.stdout.(*bytes.Buffer)
@@ -103,6 +116,25 @@ func TestCalendarListCursorRecoversDefaultRange(t *testing.T) {
 	startTime, endTime, err = calendarListRange(start, end, "opaque-cursor", true, true)
 	if err != nil || startTime.IsZero() || endTime.IsZero() {
 		t.Fatalf("explicit ranges start=%v end=%v err=%v", startTime, endTime, err)
+	}
+}
+
+func TestLoadComposeBodiesReadsHTMLFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "note.html")
+	if err := os.WriteFile(path, []byte("<p>Hi</p>"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	body, bodyFile, htmlBody, htmlFile := "", "", "", path
+	if err := loadComposeBodies(&body, &bodyFile, &htmlBody, &htmlFile); err != nil {
+		t.Fatal(err)
+	}
+	if htmlBody != "<p>Hi</p>" {
+		t.Fatalf("html body = %q", htmlBody)
+	}
+	bodyFile, htmlFile = "-", "-"
+	if err := loadComposeBodies(&body, &bodyFile, &htmlBody, &htmlFile); err == nil || !strings.Contains(err.Error(), "cannot both read stdin") {
+		t.Fatalf("dual stdin error = %v", err)
 	}
 }
 

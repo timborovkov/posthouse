@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"os"
 	"path/filepath"
@@ -786,14 +787,14 @@ func (s *Service) prepareSendWithConnection(ctx context.Context, connection mode
 	return s.prepare(ctx, "mail.send", connection, message, map[string]any{
 		"acting_identity": connection.Identity,
 		"recipients":      map[string]any{"to": message.To, "cc": message.CC, "bcc": message.BCC},
-		"subject":         message.Subject, "text": message.Text, "reply_to": message.ReplyTo,
+		"subject":         message.Subject, "text": message.Text, "html": message.HTML, "reply_to": message.ReplyTo,
 		"in_reply_to": message.InReplyTo, "references": message.References,
 		"attachments":  attachmentPreviews(message.Attachments),
 		"side_effects": []string{"send SMTP message", sentCopyEffect(connection)},
 	})
 }
 
-func (s *Service) PrepareReply(ctx context.Context, connectionID string, loc MessageLocator, text string) (model.PreparedOperation, error) {
+func (s *Service) PrepareReply(ctx context.Context, connectionID string, loc MessageLocator, text, htmlBody string) (model.PreparedOperation, error) {
 	connection, err := s.exactConnection(connectionID, "mail.send")
 	if err != nil {
 		return model.PreparedOperation{}, err
@@ -807,17 +808,22 @@ func (s *Service) PrepareReply(ctx context.Context, connectionID string, loc Mes
 		return model.PreparedOperation{}, err
 	}
 	recipients := replyRecipients(original)
-	return s.prepareSendWithConnection(ctx, connection, model.SendMessage{
+	message := model.SendMessage{
 		ConnectionID: connection.ID,
 		To:           recipients,
 		Subject:      prefixedSubject(original.Subject, "Re:"),
 		Text:         quotedBody(text, original.Text),
+		HTML:         quotedHTML(htmlBody, original.HTML, original.Text),
 		InReplyTo:    original.MessageID,
 		References:   append(append([]string(nil), original.References...), original.MessageID),
-	})
+	}
+	if strings.TrimSpace(text) == "" && strings.TrimSpace(htmlBody) != "" {
+		message.Text = ""
+	}
+	return s.prepareSendWithConnection(ctx, connection, message)
 }
 
-func (s *Service) PrepareForward(ctx context.Context, connectionID string, loc MessageLocator, recipients []string, text string) (model.PreparedOperation, error) {
+func (s *Service) PrepareForward(ctx context.Context, connectionID string, loc MessageLocator, recipients []string, text, htmlBody string) (model.PreparedOperation, error) {
 	if len(recipients) == 0 {
 		return model.PreparedOperation{}, fmt.Errorf("forward requires at least one recipient")
 	}
@@ -833,12 +839,17 @@ func (s *Service) PrepareForward(ctx context.Context, connectionID string, loc M
 	if err != nil {
 		return model.PreparedOperation{}, err
 	}
-	return s.prepareSendWithConnection(ctx, connection, model.SendMessage{
+	message := model.SendMessage{
 		ConnectionID: connection.ID,
 		To:           recipients,
 		Subject:      prefixedSubject(original.Subject, "Fwd:"),
 		Text:         quotedBody(text, original.Text),
-	})
+		HTML:         quotedHTML(htmlBody, original.HTML, original.Text),
+	}
+	if strings.TrimSpace(text) == "" && strings.TrimSpace(htmlBody) != "" {
+		message.Text = ""
+	}
+	return s.prepareSendWithConnection(ctx, connection, message)
 }
 
 func messageAddresses(addresses []model.Address) []string {
@@ -864,6 +875,20 @@ func quotedBody(text, original string) string {
 		return text
 	}
 	return text + "\n\n--- original message ---\n" + original
+}
+
+func quotedHTML(htmlBody, originalHTML, originalText string) string {
+	if strings.TrimSpace(htmlBody) == "" {
+		return ""
+	}
+	original := originalHTML
+	if original == "" && originalText != "" {
+		original = "<pre>" + html.EscapeString(originalText) + "</pre>"
+	}
+	if original == "" {
+		return htmlBody
+	}
+	return htmlBody + "<br><br><hr><p>original message</p>" + original
 }
 
 func prefixedSubject(subject, prefix string) string {
@@ -977,7 +1002,7 @@ func (s *Service) PrepareDraft(ctx context.Context, connectionID, kind string, l
 	return s.prepare(ctx, kind, connection, payload, map[string]any{
 		"acting_identity": connection.Identity, "id": payload.ID, "folder": loc.Folder, "uid": loc.UID,
 		"recipients": map[string]any{"to": message.To, "cc": message.CC, "bcc": message.BCC},
-		"subject":    message.Subject, "text": message.Text, "reply_to": message.ReplyTo,
+		"subject":    message.Subject, "text": message.Text, "html": message.HTML, "reply_to": message.ReplyTo,
 		"in_reply_to": message.InReplyTo, "references": message.References,
 		"attachments":  attachmentPreviews(message.Attachments),
 		"side_effects": []string{"modify one provider draft"},

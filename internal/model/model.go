@@ -157,6 +157,7 @@ type SendMessage struct {
 	BCC          []string          `json:"bcc,omitempty"`
 	Subject      string            `json:"subject"`
 	Text         string            `json:"text"`
+	HTML         string            `json:"html,omitempty"`
 	ReplyTo      string            `json:"reply_to,omitempty"`
 	InReplyTo    string            `json:"in_reply_to,omitempty"`
 	References   []string          `json:"references,omitempty"`

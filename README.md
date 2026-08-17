@@ -8,9 +8,16 @@ connections. Generic IMAP/SMTP, CalDAV, and read-only ICS feeds, plus native
 Gmail API and Microsoft Graph backends. Reads can span connections; every
 write is previewed, then executed on exactly one connection.
 
+Send text or HTML (`--html` / `--html-file`, MCP `html`, TUI body type). The
+TUI is optional: config, CLI, and MCP already cover every operation.
+Recipients are raw addresses; there is no contacts registry.
+
 v0.2 protocol surface stays. Native Gmail/Microsoft connections are additional
 backends behind the same selector, message/event shapes, and prepare-before-execute
 flow. See [TODO.md](./TODO.md).
+
+Built by [Tim Borovkov](https://timb.dev). Free to use under the
+[MIT License](LICENSE).
 
 ## Install
 
@@ -49,4 +56,9 @@ something is missing or broken. PRs welcome — see
 [CONTRIBUTING.md](./CONTRIBUTING.md). Do not paste secrets or message/event
 content. Security: [SECURITY.md](./SECURITY.md).
 
-MIT. Domain language: [CONTEXT.md](./CONTEXT.md).
+## License
+
+[MIT](LICENSE) — free to use, copy, modify, and share, including commercially.
+Copyright (c) 2026 [Tim Borovkov](https://timb.dev) and Posthouse contributors.
+
+Domain language: [CONTEXT.md](./CONTEXT.md).
