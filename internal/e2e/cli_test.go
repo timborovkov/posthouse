@@ -100,13 +100,17 @@ func TestBuiltBinaryMultiConnectionPreparedMailAndCalendar(t *testing.T) {
 		t.Fatalf("concurrent operation delivered %d copies", len(page["messages"].([]any)))
 	}
 	uid := uint32(received["uid"].(float64))
-	detail := runJSON(t, env, binary, "mail", "get", "--connection", "personal", "--folder", "INBOX", "--uid", fmt.Sprint(uid))
-	if detail["text"] != "hello" || len(detail["attachments"].([]any)) != 1 {
+	id, _ := received["id"].(string)
+	if id == "" {
+		t.Fatalf("list did not return opaque message id: %#v", received)
+	}
+	detail := runJSON(t, env, binary, "mail", "get", "--connection", "personal", "--id", id)
+	if detail["text"] != "hello" || len(detail["attachments"].([]any)) != 1 || detail["id"] != id {
 		t.Fatalf("message detail: %#v", detail)
 	}
 	attachment := detail["attachments"].([]any)[0].(map[string]any)
 	download := filepath.Join(t.TempDir(), "download.txt")
-	runJSON(t, env, binary, "mail", "attachment", "--connection", "personal", "--folder", "INBOX", "--uid", fmt.Sprint(uid), "--id", attachment["id"].(string), "--output", download)
+	runJSON(t, env, binary, "mail", "attachment", "--connection", "personal", "--message-id", id, "--id", attachment["id"].(string), "--output", download)
 	if data, err := os.ReadFile(download); err != nil || string(data) != "attachment body" {
 		t.Fatalf("downloaded attachment = %q, %v", data, err)
 	}
@@ -116,9 +120,9 @@ func TestBuiltBinaryMultiConnectionPreparedMailAndCalendar(t *testing.T) {
 	}
 
 	for _, command := range [][]string{
-		{"mail", "reply", "--connection", "personal", "--folder", "INBOX", "--uid", fmt.Sprint(uid), "--body", "reply body"},
-		{"mail", "forward", "--connection", "personal", "--folder", "INBOX", "--uid", fmt.Sprint(uid), "--to", "work@work.test", "--body", "forward body"},
-		{"mail", "mark", "--connection", "personal", "--folder", "INBOX", "--uid", fmt.Sprint(uid), "--read", "--flagged"},
+		{"mail", "reply", "--connection", "personal", "--id", id, "--body", "reply body"},
+		{"mail", "forward", "--connection", "personal", "--id", id, "--to", "work@work.test", "--body", "forward body"},
+		{"mail", "mark", "--connection", "personal", "--id", id, "--read", "--flagged"},
 	} {
 		operation := runJSON(t, env, binary, command...)
 		if executed := runJSON(t, env, binary, "operation", "execute", operation["token"].(string)); executed["status"] != "succeeded" {
@@ -143,8 +147,8 @@ func TestBuiltBinaryMultiConnectionPreparedMailAndCalendar(t *testing.T) {
 	currentFolder := "INBOX"
 	for _, action := range []struct{ command, destination string }{{"archive", "Archive"}, {"move", "Target"}, {"trash", "Trash"}} {
 		current := waitMessage(t, env, binary, "personal", currentFolder, "E2E prepared")
-		currentUID := fmt.Sprint(uint32(current["uid"].(float64)))
-		args := []string{"mail", action.command, "--connection", "personal", "--folder", currentFolder, "--uid", currentUID}
+		currentID, _ := current["id"].(string)
+		args := []string{"mail", action.command, "--connection", "personal", "--id", currentID}
 		if action.command == "move" {
 			args = append(args, "--destination", action.destination)
 		}

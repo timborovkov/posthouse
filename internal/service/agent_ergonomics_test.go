@@ -136,7 +136,7 @@ func TestPrepareForwardVerbatimAttachesRawMIMEWithoutBodyPreview(t *testing.T) {
 			Raw:    raw,
 		}, nil
 	}
-	prepared, err := application.PrepareForwardVerbatim(context.Background(), "work", "INBOX", 7, []string{"person@example.test"}, "")
+	prepared, err := application.PrepareForwardVerbatim(context.Background(), "work", MessageLocator{Folder: "INBOX", UID: 7}, []string{"person@example.test"}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,7 +181,7 @@ func TestPrepareForwardVerbatimRequiresParts(t *testing.T) {
 	application.mailGetMessage = func(context.Context, model.Connection, string, uint32) (postmail.FetchedMessage, error) {
 		return postmail.FetchedMessage{Detail: model.MessageDetail{Message: model.Message{Subject: "Empty"}}}, nil
 	}
-	if _, err := application.PrepareForwardVerbatim(context.Background(), "work", "INBOX", 1, []string{"person@example.test"}, ""); err == nil || !strings.Contains(err.Error(), "requires original MIME") {
+	if _, err := application.PrepareForwardVerbatim(context.Background(), "work", MessageLocator{Folder: "INBOX", UID: 1}, []string{"person@example.test"}, ""); err == nil || !strings.Contains(err.Error(), "requires original MIME") {
 		t.Fatalf("empty verbatim error = %v", err)
 	}
 }

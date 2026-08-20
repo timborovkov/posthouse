@@ -1,11 +1,13 @@
 ---
 name: posthouse-connections
-description: Manage Posthouse connections via CLI (add, label, update, remove, probe, discover, doctor). Use for IMAP/SMTP/CalDAV setup — not mail or calendar work.
+description: Manage Posthouse connections via CLI (Gmail/Microsoft Allow, IMAP probe/add, labels). Use for setup — not mail or calendar work.
 ---
 
 # Posthouse connections
 
 Guide connection **management** on a machine that can run `posthouse`. Mail → `posthouse-mail`. Calendar → `posthouse-calendar`.
+
+Do **not** run OAuth yourself, collect refresh tokens, or ask the user to create a Google Cloud or Microsoft app.
 
 ## Vocabulary
 
@@ -14,7 +16,7 @@ Guide connection **management** on a machine that can run `posthouse`. Mail → 
 - **Label**: free markers for selectors (`acme`, `primary`). Labels are how you “tag” a connection.
 - **Capability**: `mail.read`, `mail.send`, `calendar.read`, `calendar.write`.
 
-Never log passwords, keychain values, `POSTHOUSE_CACHE_KEY`, or access keys.
+Never log passwords, keychain values, `POSTHOUSE_CACHE_KEY`, access keys, or refresh tokens.
 
 ## List
 
@@ -25,7 +27,26 @@ posthouse connection list --category work --label primary --capability mail.read
 
 Pass `--cursor` from `next_cursor` with the same filters.
 
-## Probe, then add
+## Gmail and Microsoft
+
+The user clicks Allow. You only run these commands if they asked to add a mailbox **and** `posthouse` is on this machine:
+
+```sh
+posthouse connection add --kind gmail --email you@gmail.com
+posthouse connection auth gmail-work
+posthouse connection add --kind microsoft --email you@outlook.com
+posthouse connection auth microsoft-work
+```
+
+Gmail needs a browser on this computer. `--device` is the supported **Microsoft** path on a server (prints a link + code; phone clicks Allow). Google Desktop apps often reject device-code — do not promise Gmail `--device`.
+
+There is no MCP or REST login. On a remote server, tell the user to run `connection auth` in a shell on that host.
+
+Refresh tokens go in the OS keychain, or a mode-`0600` file next to config when no keychain exists. Those files are local secrets, not a vault, and are not encrypted with `POSTHOUSE_CACHE_KEY`.
+
+`discover` is only for generic IMAP folders and CalDAV collections.
+
+## Probe, then add IMAP / CalDAV
 
 Prefer probing from an identity email (RFC 6186 SRV + Thunderbird XML + CalDAV `/.well-known/caldav`) when hosts are unknown:
 

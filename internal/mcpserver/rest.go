@@ -137,7 +137,7 @@ func (s *Server) restMailGet(writer http.ResponseWriter, request *http.Request) 
 		writeError(writer, http.StatusBadRequest, err)
 		return
 	}
-	detail, err := s.service.GetMessageModeContext(request.Context(), input.Connection, input.Folder, input.UID, input.Mode)
+	detail, err := s.service.GetMessageModeContext(request.Context(), input.Connection, input.locator(), input.Mode)
 	writeResult(writer, detail, err)
 }
 
@@ -165,7 +165,7 @@ func (s *Server) restMailAttachment(writer http.ResponseWriter, request *http.Re
 		writeError(writer, http.StatusBadRequest, fmt.Errorf("limit must be between 1 and 1048576"))
 		return
 	}
-	attachment, data, snapshotCursor, err := s.service.GetAttachmentSnapshotMode(request.Context(), input.Connection, input.Folder, input.UID, input.AttachmentID, input.Mode, input.Cursor)
+	attachment, data, snapshotCursor, err := s.service.GetAttachmentSnapshotMode(request.Context(), input.Connection, input.locator(), input.AttachmentID, input.Mode, input.Cursor)
 	if err != nil {
 		writeError(writer, http.StatusBadRequest, err)
 		return
@@ -201,7 +201,7 @@ func (s *Server) restMailReply(writer http.ResponseWriter, request *http.Request
 	if !decodeJSON(writer, request, &input) {
 		return
 	}
-	prepared, err := s.service.PrepareReply(request.Context(), input.Connection, input.Folder, input.UID, input.Text, input.HTML)
+	prepared, err := s.service.PrepareReply(request.Context(), input.Connection, input.locator(), input.Text, input.HTML)
 	writeResult(writer, prepared, err)
 }
 
@@ -210,7 +210,7 @@ func (s *Server) restMailForward(writer http.ResponseWriter, request *http.Reque
 	if !decodeJSON(writer, request, &input) {
 		return
 	}
-	prepared, err := s.service.PrepareForward(request.Context(), input.Connection, input.Folder, input.UID, input.To, input.Text, input.HTML)
+	prepared, err := s.service.PrepareForward(request.Context(), input.Connection, input.locator(), input.To, input.Text, input.HTML)
 	writeResult(writer, prepared, err)
 }
 
@@ -219,7 +219,7 @@ func (s *Server) restMailDraft(writer http.ResponseWriter, request *http.Request
 	if !decodeJSON(writer, request, &input) {
 		return
 	}
-	prepared, err := s.service.PrepareDraft(request.Context(), input.Connection, "mail.draft."+input.Action, input.Folder, input.UID, input.Message.model())
+	prepared, err := s.service.PrepareDraft(request.Context(), input.Connection, "mail.draft."+input.Action, input.locator(), input.Message.model())
 	writeResult(writer, prepared, err)
 }
 
@@ -228,7 +228,7 @@ func (s *Server) restMailAction(writer http.ResponseWriter, request *http.Reques
 	if !decodeJSON(writer, request, &input) {
 		return
 	}
-	prepared, err := s.service.PrepareMailAction(request.Context(), input.Connection, "mail."+input.Action, service.MailAction{Folder: input.Folder, UID: input.UID, Destination: input.Destination, Seen: input.Seen, Flagged: input.Flagged})
+	prepared, err := s.service.PrepareMailAction(request.Context(), input.Connection, "mail."+input.Action, service.MailAction{ID: input.ID, Folder: input.Folder, UID: input.UID, Destination: input.Destination, Seen: input.Seen, Flagged: input.Flagged})
 	writeResult(writer, prepared, err)
 }
 

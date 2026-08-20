@@ -140,6 +140,7 @@ func GetContext(ctx context.Context, connection model.Connection, folder string,
 	result.Detail.ConnectionID = connection.ID
 	result.Detail.Folder = folder
 	result.Detail.UID = uid
+	result.Detail.ID = EncodeIMAPID(folder, selected.UIDValidity, uid)
 	result.Detail.ReceivedAt = items[0].InternalDate
 	result.Detail.Unread = !slices.Contains(items[0].Flags, imap.FlagSeen)
 	result.Detail.Flagged = slices.Contains(items[0].Flags, imap.FlagFlagged)
@@ -195,6 +196,10 @@ func MailboxUIDValidityContext(ctx context.Context, connection model.Connection,
 		return 0, fmt.Errorf("select IMAP folder %s: %w", folder, err)
 	}
 	return selected.UIDValidity, nil
+}
+
+func ParseRFC822(raw []byte) (FetchedMessage, error) {
+	return parseMessage(raw)
 }
 
 func parseMessage(raw []byte) (FetchedMessage, error) {

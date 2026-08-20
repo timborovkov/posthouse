@@ -1,0 +1,16 @@
+{
+  "id": "gmail-work",
+  "name": "Gmail work",
+  "category": "work",
+  "labels": ["gmail", "primary"],
+  "identity": {
+    "name": "Your Name",
+    "email": "you@gmail.com"
+  },
+  "mail": {
+    "kind": "gmail"
+  },
+  "calendar": {
+    "kind": "gmail"
+  }
+}

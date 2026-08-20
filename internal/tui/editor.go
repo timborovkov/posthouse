@@ -8,6 +8,7 @@ import (
 
 	tui "github.com/grindlemire/go-tui"
 
+	"github.com/timborovkov/posthouse/internal/config"
 	"github.com/timborovkov/posthouse/internal/model"
 	"github.com/timborovkov/posthouse/internal/safeio"
 	"github.com/timborovkov/posthouse/internal/service"
@@ -57,7 +58,7 @@ func (p *posthouseApp) submitEditorText(string) { p.submitEditor() }
 func (p *posthouseApp) editorLabels() []string {
 	switch p.editorKind.Get() {
 	case "connection":
-		return []string{"ID", "Name", "Category", "Identity email", "Mail username", "Mail secret env", "IMAP TLS address", "SMTP TLS address", "CalDAV URL", "CalDAV username", "CalDAV secret env"}
+		return []string{"ID", "Name", "Category", "Identity email", "Mail kind", "Mail username", "Mail secret env", "IMAP TLS address", "SMTP TLS address", "CalDAV URL", "CalDAV username", "CalDAV secret env"}
 	case "action":
 		return []string{"Action", "To / destination", "Body type text/html", "Body"}
 	case "event-action":
@@ -74,7 +75,7 @@ func (p *posthouseApp) editorLabels() []string {
 func (p *posthouseApp) editorTitle() string {
 	switch p.editorKind.Get() {
 	case "connection":
-		return "Onboard protocol connection"
+		return "Onboard connection"
 	case "action":
 		return "Message action: reply, forward, mark-read, mark-unread, flag, unflag, move, archive, trash"
 	case "event-action":
@@ -137,7 +138,10 @@ func (p *posthouseApp) editorFieldIsTime(index int) bool {
 }
 
 func (p *posthouseApp) editorPlaceholder(index int) string {
-	if p.editorKind.Get() == "connection" && (index == 6 || index == 7 || index == 8) {
+	if p.editorKind.Get() == "connection" && index == 4 {
+		return "imap, gmail, or microsoft"
+	}
+	if p.editorKind.Get() == "connection" && (index == 7 || index == 8 || index == 9) {
 		return "blank to probe"
 	}
 	if p.editorFieldIsTime(index) {
@@ -239,56 +243,65 @@ func (p *posthouseApp) submitEditor() {
 	var err error
 	switch p.editorKind.Get() {
 	case "connection":
-		if len(values) != 11 || values[0] == "" || values[1] == "" {
+		if len(values) != 12 || values[0] == "" || values[1] == "" {
 			err = fmt.Errorf("connection ID and name are required")
 		} else {
 			connection := model.Connection{ID: values[0], Name: values[1], Category: values[2], Identity: model.Identity{Email: values[3]}}
-			imapAddress, smtpAddress := values[6], values[7]
-			caldavURL := values[8]
-			if values[3] != "" && imapAddress == "" && smtpAddress == "" {
-				probe, probeErr := p.service.ProbeConnection(p.ctx, values[3], false)
-				if probeErr != nil {
-					err = probeErr
-				} else {
-					if probe.IMAP != nil {
-						imapAddress = probe.IMAP.Address
-						connection.Mail = &model.MailConfig{Username: values[4], Secret: model.SecretRef{Env: values[5]}, IMAP: *probe.IMAP, SentCopy: "provider-managed"}
-					}
-					if probe.SMTP != nil {
-						smtpAddress = probe.SMTP.Address
-						if connection.Mail == nil {
-							connection.Mail = &model.MailConfig{Username: values[4], Secret: model.SecretRef{Env: values[5]}, SentCopy: "provider-managed"}
+			kind := strings.ToLower(strings.TrimSpace(values[4]))
+			switch kind {
+			case "gmail", "microsoft":
+				connection.Mail = &model.MailConfig{Kind: kind}
+				connection.Calendar = &model.CalendarConfig{Kind: kind}
+			case "", "imap":
+				imapAddress, smtpAddress := values[7], values[8]
+				caldavURL := values[9]
+				if values[3] != "" && imapAddress == "" && smtpAddress == "" {
+					probe, probeErr := p.service.ProbeConnection(p.ctx, values[3], false)
+					if probeErr != nil {
+						err = probeErr
+					} else {
+						if probe.IMAP != nil {
+							imapAddress = probe.IMAP.Address
+							connection.Mail = &model.MailConfig{Username: values[5], Secret: model.SecretRef{Env: values[6]}, IMAP: *probe.IMAP, SentCopy: "provider-managed"}
 						}
-						connection.Mail.SMTP = *probe.SMTP
-					}
-					if caldavURL == "" && probe.CalDAV != "" {
-						caldavURL = probe.CalDAV
-					}
-				}
-			}
-			if err == nil && (imapAddress != "" || smtpAddress != "") {
-				if connection.Mail == nil {
-					connection.Mail = &model.MailConfig{Username: values[4], Secret: model.SecretRef{Env: values[5]}, IMAP: imapTransport(imapAddress), SMTP: smtpTransport(smtpAddress), SentCopy: "provider-managed"}
-				} else {
-					if values[4] != "" {
-						connection.Mail.Username = values[4]
-					}
-					if values[5] != "" {
-						connection.Mail.Secret = model.SecretRef{Env: values[5]}
-					}
-					if connection.Mail.IMAP.Address == "" && imapAddress != "" {
-						connection.Mail.IMAP = imapTransport(imapAddress)
-					}
-					if connection.Mail.SMTP.Address == "" && smtpAddress != "" {
-						connection.Mail.SMTP = smtpTransport(smtpAddress)
+						if probe.SMTP != nil {
+							smtpAddress = probe.SMTP.Address
+							if connection.Mail == nil {
+								connection.Mail = &model.MailConfig{Username: values[5], Secret: model.SecretRef{Env: values[6]}, SentCopy: "provider-managed"}
+							}
+							connection.Mail.SMTP = *probe.SMTP
+						}
+						if caldavURL == "" && probe.CalDAV != "" {
+							caldavURL = probe.CalDAV
+						}
 					}
 				}
-			}
-			if err == nil && caldavURL != "" {
-				connection.Calendar = &model.CalendarConfig{Kind: "caldav", URL: caldavURL, Username: values[9], Secret: model.SecretRef{Env: values[10]}}
-				if connection.Calendar.Username == "" {
-					connection.Calendar.Username = values[3]
+				if err == nil && (imapAddress != "" || smtpAddress != "") {
+					if connection.Mail == nil {
+						connection.Mail = &model.MailConfig{Username: values[5], Secret: model.SecretRef{Env: values[6]}, IMAP: imapTransport(imapAddress), SMTP: smtpTransport(smtpAddress), SentCopy: "provider-managed"}
+					} else {
+						if values[5] != "" {
+							connection.Mail.Username = values[5]
+						}
+						if values[6] != "" {
+							connection.Mail.Secret = model.SecretRef{Env: values[6]}
+						}
+						if connection.Mail.IMAP.Address == "" && imapAddress != "" {
+							connection.Mail.IMAP = imapTransport(imapAddress)
+						}
+						if connection.Mail.SMTP.Address == "" && smtpAddress != "" {
+							connection.Mail.SMTP = smtpTransport(smtpAddress)
+						}
+					}
 				}
+				if err == nil && caldavURL != "" {
+					connection.Calendar = &model.CalendarConfig{Kind: "caldav", URL: caldavURL, Username: values[10], Secret: model.SecretRef{Env: values[11]}}
+					if connection.Calendar.Username == "" {
+						connection.Calendar.Username = values[3]
+					}
+				}
+			default:
+				err = fmt.Errorf("mail kind must be imap, gmail, or microsoft")
 			}
 			if err == nil {
 				err = p.service.UpsertConnection(connection, false)
@@ -297,8 +310,13 @@ func (p *posthouseApp) submitEditor() {
 				p.editor.Set(false)
 				p.editorFields = nil
 				p.errorText.Set("")
-				p.pendingDiscover.Set(connection.ID)
-				p.modalText.Set("Connection saved\n\nEnter discovers folders and calendars · Esc skips")
+				if kind == "gmail" || kind == "microsoft" {
+					p.pendingAuth.Set(connection.ID)
+					p.modalText.Set("Connection saved\n\nEnter authorizes in a browser · Esc skips")
+				} else {
+					p.pendingDiscover.Set(connection.ID)
+					p.modalText.Set("Connection saved\n\nEnter discovers folders and calendars · Esc skips")
+				}
 				p.refresh()
 				return
 			}
@@ -311,7 +329,8 @@ func (p *posthouseApp) submitEditor() {
 			err = fmt.Errorf("message action is incomplete")
 		} else {
 			action := strings.ToLower(strings.TrimSpace(values[0]))
-			payload := service.MailAction{Folder: item.Folder, UID: item.UID}
+			loc := messageLocator(item)
+			payload := service.MailAction{ID: loc.ID, Folder: loc.Folder, UID: loc.UID}
 			kind := "mail." + action
 			text, htmlBody := "", ""
 			if action == "reply" || action == "forward" {
@@ -320,9 +339,9 @@ func (p *posthouseApp) submitEditor() {
 			if err == nil {
 				switch action {
 				case "reply":
-					prepared, err = p.service.PrepareReply(p.ctx, item.ConnectionID, item.Folder, item.UID, text, htmlBody)
+					prepared, err = p.service.PrepareReply(p.ctx, item.ConnectionID, loc, text, htmlBody)
 				case "forward":
-					prepared, err = p.service.PrepareForward(p.ctx, item.ConnectionID, item.Folder, item.UID, splitValues(values[1]), text, htmlBody)
+					prepared, err = p.service.PrepareForward(p.ctx, item.ConnectionID, loc, splitValues(values[1]), text, htmlBody)
 				case "mark-read":
 					value := true
 					payload.Seen = &value
@@ -395,7 +414,7 @@ func (p *posthouseApp) submitEditor() {
 				}
 				mode := strings.ToLower(strings.TrimSpace(values[1]))
 				if mode == "draft" {
-					prepared, err = p.service.PrepareDraft(p.ctx, values[0], "mail.draft.create", "", 0, message)
+					prepared, err = p.service.PrepareDraft(p.ctx, values[0], "mail.draft.create", service.MessageLocator{}, message)
 				} else if mode == "send" || mode == "" {
 					prepared, err = p.service.PrepareSend(p.ctx, message)
 				} else {
@@ -461,6 +480,10 @@ func parseRequiredRFC3339(name, value string) (time.Time, error) {
 		return time.Time{}, fmt.Errorf("%s must be RFC3339, e.g. %s", name, rfc3339Example)
 	}
 	return parsed, nil
+}
+
+func formatAuth(connection model.Connection) string {
+	return "Authorized connection " + connection.ID + "\n\nRefresh token stored in the OS keychain."
 }
 
 func formatDiscover(connection model.Connection) string {
@@ -559,6 +582,31 @@ func (p *posthouseApp) startDiscover(id string) {
 	})
 }
 
+func (p *posthouseApp) authorizeSelected() {
+	if p.view.Get() != 0 {
+		return
+	}
+	items := p.connections.Get()
+	if len(items) == 0 {
+		return
+	}
+	item := items[p.selected.Get()]
+	if !config.NativeMail(item) && !config.NativeCalendar(item) {
+		p.modalText.Set("Connection auth is for Gmail and Microsoft connections.\n\nUse d to discover IMAP/CalDAV folders.")
+		p.modal.Set(true)
+		return
+	}
+	p.startAuthorize(item.ID)
+}
+
+func (p *posthouseApp) startAuthorize(id string) {
+	p.pendingAuth.Set("")
+	p.startProviderRead("auth", func(ctx context.Context) providerReadSnapshot {
+		_, err := p.authorizeConnection(ctx, id, false)
+		return providerReadSnapshot{connection: model.Connection{ID: id}, err: err}
+	})
+}
+
 func attachmentSaveName(attachment model.Attachment) string {
 	if attachment.Name != "" {
 		return attachment.Name
@@ -580,7 +628,7 @@ func (p *posthouseApp) beginAttachmentSave() {
 			return
 		}
 		p.startProviderRead("attachment-save", func(ctx context.Context) providerReadSnapshot {
-			metadata, data, err := p.getAttachment(ctx, detail.ConnectionID, detail.Folder, detail.UID, item.ID)
+			metadata, data, err := p.getAttachment(ctx, detail.ConnectionID, messageLocator(detail.Message), item.ID)
 			return providerReadSnapshot{attachment: metadata, data: data, err: err}
 		})
 		return

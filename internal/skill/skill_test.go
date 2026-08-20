@@ -42,8 +42,8 @@ func TestListAndInstallSelectedSkills(t *testing.T) {
 	if !strings.Contains(string(body), "prepared operation") {
 		t.Fatalf("mail skill body = %s", body)
 	}
-	if !strings.Contains(string(body), `"text":`) {
-		t.Fatalf("mail skill missing draft.json example: %s", body)
+	if !strings.Contains(string(body), "--id MESSAGE_ID") {
+		t.Fatalf("mail skill should use opaque --id: %s", body)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "posthouse-mcp", "SKILL.md")); !os.IsNotExist(err) {
 		t.Fatalf("mcp skill should not have been installed: %v", err)
@@ -82,6 +82,13 @@ func TestInstallPrunesRetiredSkills(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "posthouse-connections", "SKILL.md")); err != nil {
 		t.Fatal(err)
+	}
+	connections, err := os.ReadFile(filepath.Join(dir, "posthouse-connections", "SKILL.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(connections), "connection auth gmail-work") || !strings.Contains(string(connections), "Microsoft") {
+		t.Fatalf("connections skill missing native auth: %s", connections)
 	}
 }
 

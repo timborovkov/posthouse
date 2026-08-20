@@ -22,8 +22,11 @@ import (
 	"github.com/timborovkov/posthouse/internal/autoconfig"
 	"github.com/timborovkov/posthouse/internal/calendar"
 	"github.com/timborovkov/posthouse/internal/config"
+	"github.com/timborovkov/posthouse/internal/gmail"
 	postmail "github.com/timborovkov/posthouse/internal/mail"
+	"github.com/timborovkov/posthouse/internal/microsoft"
 	"github.com/timborovkov/posthouse/internal/model"
+	"github.com/timborovkov/posthouse/internal/oauth"
 	"github.com/timborovkov/posthouse/internal/pagination"
 	"github.com/timborovkov/posthouse/internal/policy"
 	"github.com/timborovkov/posthouse/internal/selector"
@@ -50,6 +53,7 @@ type Service struct {
 	mailGetAttachment      func(context.Context, model.Connection, string, uint32, string) (model.Attachment, []byte, uint32, error)
 	mailboxUIDValidity     func(context.Context, model.Connection, string) (uint32, error)
 	calendarListCalDAV     func(context.Context, model.Connection, []string, time.Time, time.Time, string) ([]model.Event, error)
+	authorizeOAuth         func(context.Context, oauth.Config, bool) (string, error)
 	stateMu                sync.Mutex
 	state                  *state.Store
 	stateErr               error
@@ -80,11 +84,11 @@ const maxOutboundAttachmentBytes int64 = 25 << 20
 
 func New(store *config.Store) *Service {
 	return &Service{
-		store: store, calendar: calendar.NewClient(nil), mailSearchContext: postmail.SearchContext,
+		store: store, calendar: calendar.NewClient(nil), mailSearchContext: searchMailContext,
 		mailSnapshotContext: postmail.SnapshotMessageContext,
 		mailAppendContext:   postmail.AppendContext, mailMarkDeletedContext: postmail.MarkDeletedContext,
 		mailGetMessage: postmail.GetContext, mailGetAttachment: postmail.GetAttachmentContext, mailboxUIDValidity: postmail.MailboxUIDValidityContext,
-		mailBuild: postmail.BuildMessage, mailSendRawContext: postmail.SendSerializedContext, mailAppendRawContext: postmail.AppendSerializedCopyContext,
+		mailBuild: postmail.BuildMessage, mailSendRawContext: sendSerializedContext, mailAppendRawContext: postmail.AppendSerializedCopyContext,
 		now: func() time.Time { return time.Now().UTC() },
 	}
 }
@@ -365,6 +369,7 @@ func (s *Service) SearchMessagesContext(ctx context.Context, selection model.Sel
 				result, err = s.mailSearchContext(ctx, connection, connectionOptions)
 			}
 		}
+		postmail.StampIMAPMessages(result.Messages, mailFolder(connection, connectionOptions.Folder), result.UIDValidity)
 		if err != nil {
 			providerError := sourceError(connection.ID, "mail_unavailable", err)
 			if options.Mode != "offline" && options.Mode != "refresh" {
@@ -392,6 +397,9 @@ func (s *Service) SearchMessagesContext(ctx context.Context, selection model.Sel
 				continue
 			}
 		} else if options.Mode != "offline" {
+			if config.NativeMail(connection) && result.UIDValidity == 0 {
+				result.UIDValidity = 1
+			}
 			if requestCacheID == "" {
 				pageErrors = append(pageErrors, sourceError(connection.ID, "cache_write_skipped", fmt.Errorf("provider identity could not be resolved during read")))
 			} else if mailboxLedger == nil {
@@ -408,6 +416,7 @@ func (s *Service) SearchMessagesContext(ctx context.Context, selection model.Sel
 				result.Messages[index].Stale = true
 			}
 		}
+		postmail.StampIMAPMessages(result.Messages, mailFolder(connection, connectionOptions.Folder), result.UIDValidity)
 		results[connection.ID] = result
 		cursorState.UIDValidity = result.UIDValidity
 		if cursorState.UIDNext == 0 {
@@ -603,6 +612,13 @@ func (s *Service) ListEventsMode(ctx context.Context, selection model.Selector, 
 					} else {
 						events, err = s.calendar.ListCalDAV(ctx, connection, selection.Collections, start, end, query)
 					}
+				} else if config.NativeCalendar(connection) {
+					switch config.CalendarKind(connection.Calendar) {
+					case config.CalendarKindGmail:
+						events, err = gmail.ListEvents(ctx, connection, start, end, query)
+					default:
+						events, err = microsoft.ListEvents(ctx, connection, start, end, query)
+					}
 				} else {
 					events, err = s.calendar.List(ctx, connection, start, end, query)
 				}
@@ -703,7 +719,15 @@ func (s *Service) GenerateICS(event model.Event) (model.Event, string, error) {
 	return calendar.Generate(event)
 }
 
+type MessageLocator struct {
+	ID          string `json:"id,omitempty"`
+	Folder      string `json:"folder,omitempty"`
+	UID         uint32 `json:"uid,omitempty"`
+	UIDValidity uint32 `json:"uid_validity,omitempty"`
+}
+
 type MailAction struct {
+	ID            string                                  `json:"id,omitempty"`
 	Folder        string                                  `json:"folder"`
 	UID           uint32                                  `json:"uid,omitempty"`
 	UIDs          []uint32                                `json:"uids,omitempty"`
@@ -715,6 +739,7 @@ type MailAction struct {
 }
 
 type draftPayload struct {
+	ID           string                       `json:"id,omitempty"`
 	Folder       string                       `json:"folder"`
 	UID          uint32                       `json:"uid,omitempty"`
 	Message      model.SendMessage            `json:"message"`
@@ -744,7 +769,7 @@ func (s *Service) PrepareSend(ctx context.Context, message model.SendMessage) (m
 }
 
 func (s *Service) prepareSendWithConnection(ctx context.Context, connection model.Connection, message model.SendMessage) (model.PreparedOperation, error) {
-	if connection.Mail.SMTP.Address == "" {
+	if !config.CanSendMail(connection) {
 		return model.PreparedOperation{}, fmt.Errorf("connection %s cannot send mail", connection.ID)
 	}
 	if len(message.To)+len(message.CC)+len(message.BCC) == 0 {
@@ -770,7 +795,7 @@ func (s *Service) prepareSendWithConnection(ctx context.Context, connection mode
 	})
 }
 
-func (s *Service) PrepareReply(ctx context.Context, connectionID, folder string, uid uint32, text, htmlBody string) (model.PreparedOperation, error) {
+func (s *Service) PrepareReply(ctx context.Context, connectionID string, loc MessageLocator, text, htmlBody string) (model.PreparedOperation, error) {
 	connection, err := s.exactConnection(connectionID, "mail.send")
 	if err != nil {
 		return model.PreparedOperation{}, err
@@ -779,7 +804,7 @@ func (s *Service) PrepareReply(ctx context.Context, connectionID, folder string,
 	if err != nil {
 		return model.PreparedOperation{}, fmt.Errorf("resolve mail provider: %w", err)
 	}
-	original, err := s.getMessageModeWithConnection(ctx, connection, folder, uid, "")
+	original, err := s.getMessageModeWithConnection(ctx, connection, loc, "")
 	if err != nil {
 		return model.PreparedOperation{}, err
 	}
@@ -799,7 +824,7 @@ func (s *Service) PrepareReply(ctx context.Context, connectionID, folder string,
 	return s.prepareSendWithConnection(ctx, connection, message)
 }
 
-func (s *Service) PrepareForward(ctx context.Context, connectionID, folder string, uid uint32, recipients []string, text, htmlBody string) (model.PreparedOperation, error) {
+func (s *Service) PrepareForward(ctx context.Context, connectionID string, loc MessageLocator, recipients []string, text, htmlBody string) (model.PreparedOperation, error) {
 	if len(recipients) == 0 {
 		return model.PreparedOperation{}, fmt.Errorf("forward requires at least one recipient")
 	}
@@ -811,7 +836,7 @@ func (s *Service) PrepareForward(ctx context.Context, connectionID, folder strin
 	if err != nil {
 		return model.PreparedOperation{}, fmt.Errorf("resolve mail provider: %w", err)
 	}
-	original, err := s.getMessageModeWithConnection(ctx, connection, folder, uid, "")
+	original, err := s.getMessageModeWithConnection(ctx, connection, loc, "")
 	if err != nil {
 		return model.PreparedOperation{}, err
 	}
@@ -830,7 +855,7 @@ func (s *Service) PrepareForward(ctx context.Context, connectionID, folder strin
 
 // PrepareForwardVerbatim prepares a forward that reattaches original parts without putting the
 // original body into the prepared-operation preview returned to agents.
-func (s *Service) PrepareForwardVerbatim(ctx context.Context, connectionID, folder string, uid uint32, recipients []string, comment string) (model.PreparedOperation, error) {
+func (s *Service) PrepareForwardVerbatim(ctx context.Context, connectionID string, loc MessageLocator, recipients []string, comment string) (model.PreparedOperation, error) {
 	if len(recipients) == 0 {
 		return model.PreparedOperation{}, fmt.Errorf("forward requires at least one recipient")
 	}
@@ -842,8 +867,20 @@ func (s *Service) PrepareForwardVerbatim(ctx context.Context, connectionID, fold
 	if err != nil {
 		return model.PreparedOperation{}, fmt.Errorf("resolve mail provider: %w", err)
 	}
-	folder = mailFolder(connection, folder)
-	fetched, err := s.mailGetMessage(ctx, connection, folder, uid)
+	var fetched postmail.FetchedMessage
+	if config.NativeMail(connection) {
+		loc, err = resolveMessageLocator(connection, loc)
+		if err != nil {
+			return model.PreparedOperation{}, err
+		}
+		fetched, err = nativeGetMessage(ctx, connection, loc.ID)
+	} else {
+		loc, err = resolveMessageLocator(connection, loc)
+		if err != nil {
+			return model.PreparedOperation{}, err
+		}
+		fetched, err = s.mailGetMessage(ctx, connection, loc.Folder, loc.UID)
+	}
 	if err != nil {
 		return model.PreparedOperation{}, err
 	}
@@ -884,7 +921,7 @@ func (s *Service) PrepareForwardVerbatim(ctx context.Context, connectionID, fold
 	if message.Text == "" {
 		message.Text = "Forwarded message attached."
 	}
-	if connection.Mail.SMTP.Address == "" {
+	if !config.CanSendMail(connection) {
 		return model.PreparedOperation{}, fmt.Errorf("connection %s cannot send mail", connection.ID)
 	}
 	if connection.Mail.SentCopy == "always" && connection.Mail.Folders.Sent == "" {
@@ -902,7 +939,7 @@ func (s *Service) PrepareForwardVerbatim(ctx context.Context, connectionID, fold
 		"subject":         message.Subject,
 		"text":            message.Text,
 		"verbatim":        true,
-		"source":          map[string]any{"folder": folder, "uid": uid, "attachment_count": len(attachments)},
+		"source":          map[string]any{"id": loc.ID, "folder": loc.Folder, "uid": loc.UID, "attachment_count": len(attachments)},
 		"comment":         strings.TrimSpace(comment),
 		"attachments":     attachmentPreviews(attachments),
 		"side_effects":    []string{"send SMTP message", sentCopyEffect(connection)},
@@ -1032,10 +1069,19 @@ func (s *Service) PrepareMailAction(ctx context.Context, connectionID, kind stri
 		}
 	case "mail.archive":
 		payload.Destination = connection.Mail.Folders.Archive
+		if config.NativeMail(connection) && payload.Destination == "" {
+			payload.Destination = "ARCHIVE"
+		}
 	case "mail.trash":
 		payload.Destination = connection.Mail.Folders.Trash
+		if config.NativeMail(connection) && payload.Destination == "" {
+			payload.Destination = "TRASH"
+		}
 	case "mail.junk":
 		payload.Destination = connection.Mail.Folders.Junk
+		if config.NativeMail(connection) && payload.Destination == "" {
+			payload.Destination = "JUNK"
+		}
 	default:
 		return model.PreparedOperation{}, fmt.Errorf("unsupported mail action %q", kind)
 	}
@@ -1043,14 +1089,30 @@ func (s *Service) PrepareMailAction(ctx context.Context, connectionID, kind stri
 		return model.PreparedOperation{}, fmt.Errorf("connection %s has no discovered destination folder; run connection discover", connection.ID)
 	}
 	payload.Folder = mailFolder(connection, payload.Folder)
+	if strings.TrimSpace(payload.ID) != "" || (config.NativeMail(connection) && len(payload.UIDs) == 0) {
+		loc, locErr := resolveMessageLocator(connection, MessageLocator{ID: payload.ID, Folder: payload.Folder, UID: payload.UID})
+		if locErr != nil {
+			return model.PreparedOperation{}, locErr
+		}
+		payload.ID, payload.Folder, payload.UID = loc.ID, loc.Folder, loc.UID
+		if payload.ID == "" && payload.UID != 0 {
+			payload.ID = postmail.EncodeIMAPID(payload.Folder, loc.UIDValidity, payload.UID)
+		}
+	}
 	uids := mailActionUIDs(payload)
-	if len(uids) == 0 {
-		return model.PreparedOperation{}, fmt.Errorf("mail action requires uid or uids")
+	if len(uids) == 0 && payload.ID == "" {
+		return model.PreparedOperation{}, fmt.Errorf("mail action requires id, uid, or uids")
 	}
 	if len(uids) > maxBatchMailUIDs {
 		return model.PreparedOperation{}, fmt.Errorf("mail action accepts at most %d uids", maxBatchMailUIDs)
 	}
-	if len(uids) == 1 {
+	if len(uids) == 0 && payload.ID != "" {
+		payload.Precondition, err = s.snapshotMessage(ctx, connection, payload.Folder, payload.UID)
+		if err != nil {
+			return model.PreparedOperation{}, err
+		}
+		payload.Preconditions = nil
+	} else if len(uids) == 1 {
 		payload.UID = uids[0]
 		payload.UIDs = nil
 		payload.Precondition, err = s.snapshotMessage(ctx, connection, payload.Folder, payload.UID)
@@ -1071,20 +1133,24 @@ func (s *Service) PrepareMailAction(ctx context.Context, connectionID, kind stri
 		}
 		payload.Precondition = postmail.MessagePrecondition{}
 	}
-	preview := map[string]any{
-		"acting_identity": connection.Identity, "folder": payload.Folder,
-		"destination": payload.Destination, "seen": payload.Seen, "flagged": payload.Flagged,
-		"side_effects": []string{fmt.Sprintf("modify %d provider message(s)", len(uids))},
+	count := len(uids)
+	if count == 0 {
+		count = 1
 	}
-	if len(uids) == 1 {
+	preview := map[string]any{
+		"acting_identity": connection.Identity, "id": payload.ID, "folder": payload.Folder,
+		"destination": payload.Destination, "seen": payload.Seen, "flagged": payload.Flagged,
+		"side_effects": []string{fmt.Sprintf("modify %d provider message(s)", count)},
+	}
+	if payload.UID != 0 && len(payload.UIDs) == 0 {
 		preview["uid"] = payload.UID
-	} else {
+	} else if len(payload.UIDs) > 0 {
 		preview["uids"] = payload.UIDs
 	}
 	return s.prepare(ctx, kind, connection, payload, preview)
 }
 
-func (s *Service) PrepareDraft(ctx context.Context, connectionID, kind string, folder string, uid uint32, message model.SendMessage) (model.PreparedOperation, error) {
+func (s *Service) PrepareDraft(ctx context.Context, connectionID, kind string, loc MessageLocator, message model.SendMessage) (model.PreparedOperation, error) {
 	connection, err := s.exactConnection(connectionID, "mail.read")
 	if err != nil {
 		return model.PreparedOperation{}, err
@@ -1093,17 +1159,22 @@ func (s *Service) PrepareDraft(ctx context.Context, connectionID, kind string, f
 	if err != nil {
 		return model.PreparedOperation{}, fmt.Errorf("resolve mail provider: %w", err)
 	}
-	if folder == "" {
-		folder = connection.Mail.Folders.Drafts
-	}
-	if folder == "" {
-		return model.PreparedOperation{}, fmt.Errorf("connection %s has no drafts folder; run connection discover", connection.ID)
-	}
 	if kind != "mail.draft.create" && kind != "mail.draft.update" && kind != "mail.draft.delete" {
 		return model.PreparedOperation{}, fmt.Errorf("unsupported draft operation %q", kind)
 	}
-	if kind != "mail.draft.create" && uid == 0 {
-		return model.PreparedOperation{}, fmt.Errorf("draft UID is required")
+	if kind != "mail.draft.create" {
+		loc, err = resolveMessageLocator(connection, loc)
+		if err != nil {
+			return model.PreparedOperation{}, err
+		}
+	} else if loc.Folder == "" {
+		loc.Folder = connection.Mail.Folders.Drafts
+		if loc.Folder == "" && config.NativeMail(connection) {
+			loc.Folder = "DRAFTS"
+		}
+	}
+	if loc.Folder == "" {
+		return model.PreparedOperation{}, fmt.Errorf("connection %s has no drafts folder; run connection discover", connection.ID)
 	}
 	message.ConnectionID = connection.ID
 	if kind != "mail.draft.delete" {
@@ -1114,15 +1185,18 @@ func (s *Service) PrepareDraft(ctx context.Context, connectionID, kind string, f
 			return model.PreparedOperation{}, fmt.Errorf("validate draft message: %w", err)
 		}
 	}
-	payload := draftPayload{Folder: folder, UID: uid, Message: message}
+	payload := draftPayload{ID: loc.ID, Folder: loc.Folder, UID: loc.UID, Message: message}
 	if kind != "mail.draft.create" {
-		payload.Precondition, err = s.snapshotMessage(ctx, connection, folder, uid)
+		if payload.ID == "" && payload.UID != 0 {
+			payload.ID = postmail.EncodeIMAPID(payload.Folder, loc.UIDValidity, payload.UID)
+		}
+		payload.Precondition, err = s.snapshotMessage(ctx, connection, loc.Folder, loc.UID)
 		if err != nil {
 			return model.PreparedOperation{}, err
 		}
 	}
 	return s.prepare(ctx, kind, connection, payload, map[string]any{
-		"acting_identity": connection.Identity, "folder": folder, "uid": uid,
+		"acting_identity": connection.Identity, "id": payload.ID, "folder": loc.Folder, "uid": loc.UID,
 		"recipients": map[string]any{"to": message.To, "cc": message.CC, "bcc": message.BCC},
 		"subject":    message.Subject, "text": message.Text, "html": message.HTML, "reply_to": message.ReplyTo,
 		"in_reply_to": message.InReplyTo, "references": message.References,
@@ -1140,16 +1214,16 @@ func (s *Service) PrepareCalendarWrite(ctx context.Context, connectionID, kind s
 	if err != nil {
 		return model.PreparedOperation{}, fmt.Errorf("resolve calendar provider: %w", err)
 	}
-	if connection.Calendar.Kind != "caldav" {
+	if connection.Calendar.Kind != "caldav" && !config.NativeCalendar(connection) {
 		return model.PreparedOperation{}, fmt.Errorf("connection %s calendar is read-only", connection.ID)
 	}
 	if kind != "calendar.create" && kind != "calendar.update" {
 		return model.PreparedOperation{}, fmt.Errorf("unsupported calendar operation %q", kind)
 	}
-	if kind == "calendar.update" && event.ETag == "" {
+	if kind == "calendar.update" && event.ETag == "" && !config.NativeCalendar(connection) {
 		return model.PreparedOperation{}, fmt.Errorf("calendar update requires the current ETag")
 	}
-	if kind == "calendar.update" {
+	if kind == "calendar.update" && event.ETag != "" && !config.NativeCalendar(connection) {
 		if err := calendar.ValidateCalDAVETag(event.ETag); err != nil {
 			return model.PreparedOperation{}, err
 		}
@@ -1160,8 +1234,10 @@ func (s *Service) PrepareCalendarWrite(ctx context.Context, connectionID, kind s
 	if kind == "calendar.update" && event.RecurrenceID == "" && event.SeriesID != "" && event.ID != event.SeriesID {
 		return model.PreparedOperation{}, fmt.Errorf("cannot replace a recurring series from an expanded occurrence; refresh and edit the series master")
 	}
-	if err := calendar.ValidateCalDAVHref(connection, event.CollectionID, event.Href); err != nil {
-		return model.PreparedOperation{}, err
+	if !config.NativeCalendar(connection) {
+		if err := calendar.ValidateCalDAVHref(connection, event.CollectionID, event.Href); err != nil {
+			return model.PreparedOperation{}, err
+		}
 	}
 	if event.RecurrenceID != "" {
 		recurrenceID, err := time.Parse(time.RFC3339, event.RecurrenceID)
@@ -1200,12 +1276,6 @@ func (s *Service) PrepareCalendarDelete(ctx context.Context, connectionID, colle
 	if recurrenceID != "" {
 		return model.PreparedOperation{}, fmt.Errorf("cannot delete one expanded occurrence; update it with STATUS:CANCELLED or delete the series master")
 	}
-	if etag == "" {
-		return model.PreparedOperation{}, fmt.Errorf("calendar delete requires the current ETag")
-	}
-	if err := calendar.ValidateCalDAVETag(etag); err != nil {
-		return model.PreparedOperation{}, err
-	}
 	connection, err := s.exactConnection(connectionID, "calendar.write")
 	if err != nil {
 		return model.PreparedOperation{}, err
@@ -1214,15 +1284,30 @@ func (s *Service) PrepareCalendarDelete(ctx context.Context, connectionID, colle
 	if err != nil {
 		return model.PreparedOperation{}, fmt.Errorf("resolve calendar provider: %w", err)
 	}
-	if connection.Calendar.Kind != "caldav" {
+	if connection.Calendar.Kind != "caldav" && !config.NativeCalendar(connection) {
 		return model.PreparedOperation{}, fmt.Errorf("connection %s calendar is read-only", connection.ID)
+	}
+	if config.NativeCalendar(connection) {
+		if href == "" {
+			return model.PreparedOperation{}, fmt.Errorf("calendar delete requires the provider event id")
+		}
+		return s.prepare(ctx, "calendar.delete", connection, calendarDeletePayload{Href: href, ETag: etag}, map[string]any{
+			"acting_identity": connection.Identity, "href": href,
+			"side_effects": []string{"delete one calendar event"},
+		})
+	}
+	if etag == "" {
+		return model.PreparedOperation{}, fmt.Errorf("calendar delete requires the current ETag")
+	}
+	if err := calendar.ValidateCalDAVETag(etag); err != nil {
+		return model.PreparedOperation{}, err
 	}
 	if err := calendar.ValidateCalDAVHref(connection, collectionID, href); err != nil {
 		return model.PreparedOperation{}, err
 	}
 	return s.prepare(ctx, "calendar.delete", connection, calendarDeletePayload{CollectionID: collectionID, Href: href, ETag: etag}, map[string]any{
 		"acting_identity": connection.Identity, "calendar": collectionID, "href": href,
-		"side_effects": []string{"delete one CalDAV event"},
+		"side_effects": []string{"delete one calendar event"},
 	})
 }
 
@@ -1508,6 +1593,12 @@ func (s *Service) waitForOperation(ctx context.Context, ledger *state.Store, tok
 }
 
 func (s *Service) execute(ctx context.Context, connection model.Connection, kind string, payload json.RawMessage) (map[string]any, error) {
+	if config.NativeMail(connection) && strings.HasPrefix(kind, "mail.") {
+		return executeNativeMail(ctx, connection, kind, payload, s.mailBuild)
+	}
+	if config.NativeCalendar(connection) && strings.HasPrefix(kind, "calendar.") {
+		return executeNativeCalendar(ctx, connection, kind, payload)
+	}
 	switch kind {
 	case "mail.send":
 		var message model.SendMessage
@@ -1562,8 +1653,8 @@ func (s *Service) execute(ctx context.Context, connection model.Connection, kind
 			return nil, err
 		}
 		uids := mailActionUIDs(action)
-		if len(uids) == 0 {
-			return nil, fmt.Errorf("mail action requires uid or uids")
+		if len(uids) == 0 && action.ID == "" {
+			return nil, fmt.Errorf("mail action requires id, uid, or uids")
 		}
 		succeeded := make([]uint32, 0, len(uids))
 		failed := make([]map[string]any, 0)
@@ -1679,6 +1770,9 @@ func (s *Service) execute(ctx context.Context, connection model.Connection, kind
 }
 
 func (s *Service) snapshotMessage(ctx context.Context, connection model.Connection, folder string, uid uint32) (postmail.MessagePrecondition, error) {
+	if config.NativeMail(connection) {
+		return postmail.MessagePrecondition{}, nil
+	}
 	if s.mailSnapshot != nil {
 		return s.mailSnapshot(connection, folder, uid)
 	}
@@ -1686,27 +1780,35 @@ func (s *Service) snapshotMessage(ctx context.Context, connection model.Connecti
 }
 
 func (s *Service) GetMessage(connectionID, folder string, uid uint32) (model.MessageDetail, error) {
-	return s.GetMessageModeContext(context.Background(), connectionID, folder, uid, "")
+	return s.GetMessageModeContext(context.Background(), connectionID, MessageLocator{Folder: folder, UID: uid}, "")
 }
 
 func (s *Service) GetMessageMode(connectionID, folder string, uid uint32, mode string) (model.MessageDetail, error) {
-	return s.GetMessageModeContext(context.Background(), connectionID, folder, uid, mode)
+	return s.GetMessageModeContext(context.Background(), connectionID, MessageLocator{Folder: folder, UID: uid}, mode)
 }
 
-func (s *Service) GetMessageContext(ctx context.Context, connectionID, folder string, uid uint32) (model.MessageDetail, error) {
-	return s.GetMessageModeContext(ctx, connectionID, folder, uid, "")
+func (s *Service) GetMessageContext(ctx context.Context, connectionID string, loc MessageLocator) (model.MessageDetail, error) {
+	return s.GetMessageModeContext(ctx, connectionID, loc, "")
 }
 
-func (s *Service) GetMessageModeContext(ctx context.Context, connectionID, folder string, uid uint32, mode string) (model.MessageDetail, error) {
+func (s *Service) GetMessageModeContext(ctx context.Context, connectionID string, loc MessageLocator, mode string) (model.MessageDetail, error) {
 	connection, err := s.exactConnection(connectionID, "mail.read")
 	if err != nil {
 		return model.MessageDetail{}, err
 	}
-	return s.getMessageModeWithConnection(ctx, connection, folder, uid, mode)
+	return s.getMessageModeWithConnection(ctx, connection, loc, mode)
 }
 
-func (s *Service) getMessageModeWithConnection(ctx context.Context, connection model.Connection, folder string, uid uint32, mode string) (model.MessageDetail, error) {
+func (s *Service) getMessageModeWithConnection(ctx context.Context, connection model.Connection, loc MessageLocator, mode string) (model.MessageDetail, error) {
 	var err error
+	loc, err = resolveMessageLocator(connection, loc)
+	if err != nil {
+		return model.MessageDetail{}, err
+	}
+	if config.NativeMail(connection) {
+		return s.getNativeMessageMode(ctx, connection, loc, mode)
+	}
+	folder, uid := loc.Folder, loc.UID
 	if folder == "" {
 		folder = connection.Mail.Folders.Inbox
 		if folder == "" {
@@ -1730,6 +1832,9 @@ func (s *Service) getMessageModeWithConnection(ctx context.Context, connection m
 			liveUIDValidity, validityErr := s.mailboxUIDValidity(ctx, connection, folder)
 			if validityErr == nil {
 				confirmedUIDMismatch = validityOK && liveUIDValidity != cachedUIDValidity
+				if loc.UIDValidity != 0 {
+					confirmedUIDMismatch = confirmedUIDMismatch || liveUIDValidity != loc.UIDValidity
+				}
 				if stateErr == nil {
 					cacheID := mailCacheID(connection)
 					_, _ = s.commitMailboxUIDValidity(ledger, connection, cacheID, folder, mailboxCacheSnapshot{UIDValidity: cachedUIDValidity, Found: validityOK}, liveUIDValidity)
@@ -1746,10 +1851,14 @@ func (s *Service) getMessageModeWithConnection(ctx context.Context, connection m
 		}
 		fetched, fetchErr := s.mailGetMessage(ctx, connection, folder, uid)
 		if fetchErr == nil {
+			postmail.StampIMAPMessage(&fetched.Detail.Message, folder, fetched.UIDValidity)
+			if loc.UIDValidity != 0 && fetched.UIDValidity != loc.UIDValidity {
+				return model.MessageDetail{}, fmt.Errorf("mailbox UIDVALIDITY changed; restart from search")
+			}
 			if stateErr == nil && requestCacheID != "" {
 				if committed, commitErr := s.commitMailboxUIDValidity(ledger, connection, requestCacheID, folder, mailboxSnapshot, fetched.UIDValidity); commitErr == nil && committed {
 					data, _ := json.Marshal(fetched.Detail)
-					_ = ledger.Put(context.Background(), state.CacheEntry{Namespace: "message_body", Key: messageCacheKey(requestCacheID, folder, fetched.UIDValidity, uid), ConnectionID: connection.ID, Kind: "message_body", ProviderID: fmt.Sprintf("%s/%d", folder, uid), ExpiresAt: s.now().Add(s.messageBodyTTL()), Value: data})
+					_ = ledger.Put(context.Background(), state.CacheEntry{Namespace: "message_body", Key: messageCacheKey(requestCacheID, folder, fetched.UIDValidity, uid), ConnectionID: connection.ID, Kind: "message_body", ProviderID: fetched.Detail.ID, ExpiresAt: s.now().Add(s.messageBodyTTL()), Value: data})
 				}
 			}
 			return fetched.Detail, nil
@@ -1761,6 +1870,7 @@ func (s *Service) getMessageModeWithConnection(ctx context.Context, connection m
 	}
 	if !confirmedUIDMismatch {
 		if cached, ok := s.cachedMessageFor(connection, folder, uid); ok {
+			postmail.StampIMAPMessage(&cached.Message, folder, loc.UIDValidity)
 			cached.Stale = true
 			return cached, nil
 		}
@@ -1771,20 +1881,33 @@ func (s *Service) getMessageModeWithConnection(ctx context.Context, connection m
 	return model.MessageDetail{}, fmt.Errorf("no cached message body for %s/%d", folder, uid)
 }
 
-func (s *Service) GetAttachment(ctx context.Context, connectionID, folder string, uid uint32, attachmentID string) (model.Attachment, []byte, error) {
-	return s.GetAttachmentMode(ctx, connectionID, folder, uid, attachmentID, "")
+func (s *Service) GetAttachment(ctx context.Context, connectionID string, loc MessageLocator, attachmentID string) (model.Attachment, []byte, error) {
+	return s.GetAttachmentByLocator(ctx, connectionID, loc, attachmentID, "")
 }
 
 func (s *Service) GetAttachmentMode(ctx context.Context, connectionID, folder string, uid uint32, attachmentID, mode string) (model.Attachment, []byte, error) {
-	attachment, data, _, err := s.getAttachmentModeSnapshot(ctx, connectionID, folder, uid, attachmentID, mode)
+	return s.GetAttachmentByLocator(ctx, connectionID, MessageLocator{Folder: folder, UID: uid}, attachmentID, mode)
+}
+
+func (s *Service) GetAttachmentByLocator(ctx context.Context, connectionID string, loc MessageLocator, attachmentID, mode string) (model.Attachment, []byte, error) {
+	attachment, data, _, err := s.getAttachmentModeSnapshot(ctx, connectionID, loc, attachmentID, mode)
 	return attachment, data, err
 }
 
-func (s *Service) getAttachmentModeSnapshot(ctx context.Context, connectionID, folder string, uid uint32, attachmentID, mode string) (model.Attachment, []byte, attachmentSnapshotPosition, error) {
+func (s *Service) getAttachmentModeSnapshot(ctx context.Context, connectionID string, loc MessageLocator, attachmentID, mode string) (model.Attachment, []byte, attachmentSnapshotPosition, error) {
 	connection, err := s.exactConnection(connectionID, "mail.read")
 	if err != nil {
 		return model.Attachment{}, nil, attachmentSnapshotPosition{}, err
 	}
+	loc, err = resolveMessageLocator(connection, loc)
+	if err != nil {
+		return model.Attachment{}, nil, attachmentSnapshotPosition{}, err
+	}
+	if config.NativeMail(connection) {
+		attachment, data, err := s.getNativeAttachment(ctx, connection, loc, attachmentID, mode)
+		return attachment, data, attachmentSnapshotPosition{}, err
+	}
+	folder, uid := loc.Folder, loc.UID
 	if folder == "" {
 		folder = connection.Mail.Folders.Inbox
 		if folder == "" {
@@ -1855,20 +1978,22 @@ func (s *Service) getAttachmentModeSnapshot(ctx context.Context, connectionID, f
 	return model.Attachment{}, nil, attachmentSnapshotPosition{}, fmt.Errorf("no cached attachment %q", attachmentID)
 }
 
-func (s *Service) GetAttachmentSnapshotMode(ctx context.Context, connectionID, folder string, uid uint32, attachmentID, mode, cursor string) (model.Attachment, []byte, string, error) {
+func (s *Service) GetAttachmentSnapshotMode(ctx context.Context, connectionID string, loc MessageLocator, attachmentID, mode, cursor string) (model.Attachment, []byte, string, error) {
 	connection, err := s.exactConnection(connectionID, "mail.read")
 	if err != nil {
 		return model.Attachment{}, nil, "", err
 	}
-	if folder == "" {
-		folder = mailFolder(connection, "")
+	loc, err = resolveMessageLocator(connection, loc)
+	if err != nil {
+		return model.Attachment{}, nil, "", err
 	}
 	scope := struct {
 		ConnectionID string `json:"connection_id"`
-		Folder       string `json:"folder"`
-		UID          uint32 `json:"uid"`
+		ID           string `json:"id,omitempty"`
+		Folder       string `json:"folder,omitempty"`
+		UID          uint32 `json:"uid,omitempty"`
 		AttachmentID string `json:"attachment_id"`
-	}{connection.ID, folder, uid, attachmentID}
+	}{connection.ID, loc.ID, loc.Folder, loc.UID, attachmentID}
 	if cursor != "" {
 		var snapshot attachmentSnapshotPosition
 		if err := pagination.Decode(cursor, "attachment", scope, &snapshot); err != nil {
@@ -1877,20 +2002,20 @@ func (s *Service) GetAttachmentSnapshotMode(ctx context.Context, connectionID, f
 		if mailCacheID(connection) != snapshot.CacheID {
 			return model.Attachment{}, nil, "", fmt.Errorf("attachment continuation provider changed; restart the download")
 		}
-		attachment, data, ok := s.cachedAttachmentSnapshotFor(ctx, folder, uid, attachmentID, snapshot)
+		attachment, data, ok := s.cachedAttachmentSnapshotFor(ctx, loc.Folder, loc.UID, attachmentID, snapshot)
 		if !ok {
 			return model.Attachment{}, nil, "", fmt.Errorf("attachment continuation expired; restart the download")
 		}
 		return attachment, data, cursor, nil
 	}
-	attachment, data, snapshot, err := s.getAttachmentModeSnapshot(ctx, connection.ID, folder, uid, attachmentID, mode)
+	attachment, data, snapshot, err := s.getAttachmentModeSnapshot(ctx, connection.ID, loc, attachmentID, mode)
 	if err != nil {
 		return model.Attachment{}, nil, "", err
 	}
 	if snapshot.CacheID == "" || snapshot.UIDValidity == 0 {
 		return attachment, data, "", nil
 	}
-	if _, _, ok := s.cachedAttachmentSnapshotFor(ctx, folder, uid, attachmentID, snapshot); !ok {
+	if _, _, ok := s.cachedAttachmentSnapshotFor(ctx, loc.Folder, loc.UID, attachmentID, snapshot); !ok {
 		return attachment, data, "", nil
 	}
 	cursor, err = pagination.Encode("attachment", scope, snapshot)
@@ -2207,6 +2332,29 @@ func resolveCalendarConnection(connection model.Connection) (model.Connection, e
 		return connection, nil
 	}
 	calendarConfig := *connection.Calendar
+	if config.NativeCalendar(connection) {
+		var err error
+		if calendarConfig.ResolvedSecret == "" {
+			if validConfiguredSecret(calendarConfig.Secret) {
+				calendarConfig.ResolvedSecret, err = config.ResolveSecret(calendarConfig.Secret)
+			} else if connection.Mail != nil {
+				resolvedMail, mailErr := resolveMailConnection(connection)
+				if mailErr != nil {
+					return connection, mailErr
+				}
+				calendarConfig.ResolvedSecret = resolvedMail.Mail.ResolvedSecret
+				connection = resolvedMail
+			}
+		}
+		if err != nil || calendarConfig.ResolvedSecret == "" {
+			if err == nil {
+				err = fmt.Errorf("secret reference is not configured")
+			}
+			return connection, err
+		}
+		connection.Calendar = &calendarConfig
+		return connection, nil
+	}
 	var err error
 	if calendarConfig.ResolvedURL == "" {
 		switch {
@@ -2517,18 +2665,26 @@ func (s *Service) DoctorConnection(ctx context.Context, id string) (model.Doctor
 		result.Checks = append(result.Checks, check)
 	}
 	if connection.Mail != nil {
-		_, secretErr := config.ResolveSecret(connection.Mail.Secret)
-		add("mail.secret", secretErr)
-		if secretErr == nil && connection.Mail.IMAP.Address != "" {
-			_, err := postmail.DiscoverContext(ctx, connection)
-			add("imap.discovery", err)
-		}
-		if secretErr == nil && connection.Mail.SMTP.Address != "" {
-			add("smtp.authentication", postmail.DoctorSMTP(ctx, connection))
+		if config.NativeMail(connection) {
+			s.doctorNative(ctx, connection, add)
+		} else {
+			_, secretErr := config.ResolveSecret(connection.Mail.Secret)
+			add("mail.secret", secretErr)
+			if secretErr == nil && connection.Mail.IMAP.Address != "" {
+				_, err := postmail.DiscoverContext(ctx, connection)
+				add("imap.discovery", err)
+			}
+			if secretErr == nil && connection.Mail.SMTP.Address != "" {
+				add("smtp.authentication", postmail.DoctorSMTP(ctx, connection))
+			}
 		}
 	}
 	if connection.Calendar != nil {
-		if connection.Calendar.Kind == "feed" {
+		if config.NativeCalendar(connection) {
+			if connection.Mail == nil || !config.NativeMail(connection) {
+				s.doctorNative(ctx, connection, add)
+			}
+		} else if connection.Calendar.Kind == "feed" {
 			_, err := resolveDoctorCalendarURL(connection)
 			if err == nil {
 				_, err = s.calendar.List(ctx, connection, s.now().Add(-24*time.Hour), s.now().Add(24*time.Hour), "")
@@ -3337,6 +3493,9 @@ func calendarCacheID(connection model.Connection) string {
 	}
 	calendarOnly := connection
 	calendarOnly.Mail = nil
+	if config.NativeCalendar(connection) {
+		return resolvedCacheID(calendarOnly, resolved.Calendar.ResolvedSecret)
+	}
 	values := []string{resolved.Calendar.ResolvedURL}
 	if resolved.Calendar.Kind == "caldav" {
 		values = append(values, resolved.Calendar.ResolvedSecret)
@@ -3457,6 +3616,39 @@ func mailFolder(connection model.Connection, folder string) string {
 		return "INBOX"
 	}
 	return folder
+}
+
+func resolveMessageLocator(connection model.Connection, loc MessageLocator) (MessageLocator, error) {
+	loc.ID = strings.TrimSpace(loc.ID)
+	if loc.ID != "" {
+		parsed, isIMAP, err := postmail.ParseIMAPID(loc.ID)
+		if err != nil {
+			return MessageLocator{}, err
+		}
+		if isIMAP {
+			loc.Folder = parsed.Folder
+			loc.UID = parsed.UID
+			loc.UIDValidity = parsed.UIDValidity
+			return loc, nil
+		}
+	}
+	if loc.UID == 0 {
+		if loc.ID != "" {
+			if config.NativeMail(connection) {
+				if loc.Folder == "" {
+					loc.Folder = mailFolder(connection, loc.Folder)
+				}
+				return loc, nil
+			}
+			return MessageLocator{}, fmt.Errorf("message id is not valid for this IMAP connection")
+		}
+		return MessageLocator{}, fmt.Errorf("message id is required")
+	}
+	loc.Folder = mailFolder(connection, loc.Folder)
+	if loc.ID == "" && loc.UIDValidity != 0 {
+		loc.ID = postmail.EncodeIMAPID(loc.Folder, loc.UIDValidity, loc.UID)
+	}
+	return loc, nil
 }
 
 func mergeFolders(configured, discovered model.FolderConfig) model.FolderConfig {
