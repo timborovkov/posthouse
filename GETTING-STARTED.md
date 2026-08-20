@@ -108,8 +108,10 @@ You can connect several mailboxes. Search looks across all of them.
 posthouse tui
 ```
 
-`?` is help. `o` connects Gmail or Microsoft the same way as `connection auth`
-(browser on this computer).
+`Tab` moves around, `?` is help, `Esc` cancels a form without submitting, `q`
+quits. `o` connects Gmail or Microsoft the same way as `connection auth`
+(browser on this computer). Sending mail or changing a calendar still shows an
+exact preview before anything is sent.
 
 If `connection auth` says Google or Microsoft login is not configured, this
 build does not include Posthouse's login yet. That is on the maintainer. You
