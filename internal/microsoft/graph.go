@@ -25,6 +25,7 @@ var TokenURL string
 const nativeUIDValidity uint32 = 1
 const graphJSONLimit int64 = 8 << 20
 const maxEventPages = 50
+const graphSimpleMIMELimit = 4 << 20
 const immutableIDPrefer = `IdType="ImmutableId"`
 
 var wellKnownFolders sync.Map
@@ -203,6 +204,9 @@ func Get(ctx context.Context, connection model.Connection, id string) (postmail.
 }
 
 func Send(ctx context.Context, connection model.Connection, raw []byte) error {
+	if err := RejectOversizedMIME(raw); err != nil {
+		return err
+	}
 	client, err := httpClient(ctx, connection)
 	if err != nil {
 		return err
@@ -257,6 +261,9 @@ func Move(ctx context.Context, connection model.Connection, id, destination stri
 }
 
 func CreateDraft(ctx context.Context, connection model.Connection, raw []byte) (string, error) {
+	if err := RejectOversizedMIME(raw); err != nil {
+		return "", err
+	}
 	client, err := httpClient(ctx, connection)
 	if err != nil {
 		return "", err
@@ -293,6 +300,22 @@ func DeleteMessage(ctx context.Context, connection model.Connection, id string) 
 		return err
 	}
 	return doJSON(ctx, client, http.MethodDelete, APIBase+"/me/messages/"+url.PathEscape(id), nil, nil)
+}
+
+func RejectOversizedMIME(raw []byte) error {
+	if base64.StdEncoding.EncodedLen(len(raw)) > graphSimpleMIMELimit {
+		return fmt.Errorf("Microsoft Graph simple send is limited to 4 MiB; reduce attachments")
+	}
+	return nil
+}
+
+func rejectUnsupportedGraphStatus(status string) error {
+	switch strings.ToUpper(strings.TrimSpace(status)) {
+	case "", "CONFIRMED":
+		return nil
+	default:
+		return fmt.Errorf("Microsoft Graph calendar writes do not serialize event status %q; omit status or delete the event", status)
+	}
 }
 
 func Ping(ctx context.Context, connection model.Connection) error {
@@ -400,6 +423,9 @@ func PutEvent(ctx context.Context, connection model.Connection, event model.Even
 	if event.RecurrenceRule != "" || len(event.RecurrenceDates) > 0 || len(event.ExceptionDates) > 0 || len(event.RecurrencePeriods) > 0 || event.RecurrenceRange != "" || event.RecurrenceID != "" {
 		return model.Event{}, fmt.Errorf("Microsoft Graph calendar writes do not serialize recurrence; omit recurrence fields")
 	}
+	if err := rejectUnsupportedGraphStatus(event.Status); err != nil {
+		return model.Event{}, err
+	}
 	start, end := graphEventTimes(event)
 	payload := map[string]any{
 		"subject":  event.Title,
@@ -408,11 +434,13 @@ func PutEvent(ctx context.Context, connection model.Connection, event model.Even
 		"end":      end,
 		"isAllDay": event.AllDay,
 	}
-	if event.Location != "" {
+	if !create || event.Location != "" {
 		payload["location"] = map[string]string{"displayName": event.Location}
 	}
 	if attendees := graphAttendees(event.Attendees); len(attendees) > 0 {
 		payload["attendees"] = attendees
+	} else if !create {
+		payload["attendees"] = []map[string]any{}
 	}
 	method, path := http.MethodPost, APIBase+"/me/events"
 	var headers http.Header
@@ -509,11 +537,14 @@ func graphAttendees(values []string) []map[string]any {
 }
 
 func graphEventTimes(event model.Event) (map[string]string, map[string]string) {
-	start := event.Start.UTC()
-	end := event.End.UTC()
+	start := event.Start
+	end := event.End
 	if event.AllDay {
-		start = time.Date(start.Year(), start.Month(), start.Day(), 0, 0, 0, 0, time.UTC)
-		end = time.Date(end.Year(), end.Month(), end.Day(), 0, 0, 0, 0, time.UTC)
+		start = time.Date(event.Start.Year(), event.Start.Month(), event.Start.Day(), 0, 0, 0, 0, time.UTC)
+		end = time.Date(event.End.Year(), event.End.Month(), event.End.Day(), 0, 0, 0, 0, time.UTC)
+	} else {
+		start = event.Start.UTC()
+		end = event.End.UTC()
 	}
 	return map[string]string{"dateTime": start.Format("2006-01-02T15:04:05"), "timeZone": "UTC"},
 		map[string]string{"dateTime": end.Format("2006-01-02T15:04:05"), "timeZone": "UTC"}
@@ -544,7 +575,7 @@ func afterCursor(message model.Message, options postmail.SearchOptions) bool {
 			return true
 		}
 	}
-	return message.ID != options.CursorID
+	return options.CursorID == "" || message.ID > options.CursorID
 }
 
 func canonicalMailFolder(folder string) string {

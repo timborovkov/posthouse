@@ -411,3 +411,129 @@ func TestSearchUnreadFilterIncludesOrderedReceivedDateTime(t *testing.T) {
 		t.Fatalf("unread query filter=%q order=%q", filter, order)
 	}
 }
+
+func TestAfterCursorEqualTimeUsesTotalOrder(t *testing.T) {
+	stamp := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
+	options := postmail.SearchOptions{CursorTime: stamp, CursorID: "bbb"}
+	if afterCursor(model.Message{ID: "aaa", ReceivedAt: stamp}, options) {
+		t.Fatal("equal-time cursor re-admitted an earlier ID")
+	}
+	if afterCursor(model.Message{ID: "bbb", ReceivedAt: stamp}, options) {
+		t.Fatal("cursor ID itself was re-admitted")
+	}
+	if !afterCursor(model.Message{ID: "ccc", ReceivedAt: stamp}, options) {
+		t.Fatal("equal-time listing dropped a later ID")
+	}
+	if !afterCursor(model.Message{ID: "aaa", ReceivedAt: stamp.Add(-time.Hour)}, options) {
+		t.Fatal("older message was dropped")
+	}
+	if afterCursor(model.Message{ID: "zzz", ReceivedAt: stamp.Add(time.Hour)}, options) {
+		t.Fatal("newer message was kept")
+	}
+}
+
+func TestPutEventAllDayKeepsLocalDate(t *testing.T) {
+	var body map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/token" {
+			writer.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(writer).Encode(map[string]any{"access_token": "graph-access", "token_type": "Bearer", "expires_in": 3600})
+			return
+		}
+		_ = json.NewDecoder(request.Body).Decode(&body)
+		_ = json.NewEncoder(writer).Encode(map[string]any{
+			"id": "evt-2", "iCalUId": "uid-2", "subject": "Offsite", "isAllDay": true,
+			"start": map[string]string{"dateTime": "2026-08-17T00:00:00", "timeZone": "UTC"},
+			"end":   map[string]string{"dateTime": "2026-08-18T00:00:00", "timeZone": "UTC"},
+		})
+	}))
+	defer server.Close()
+	t.Setenv("POSTHOUSE_MICROSOFT_CLIENT_ID", "public-client")
+	origBase, origToken := APIBase, TokenURL
+	APIBase, TokenURL = server.URL, server.URL+"/token"
+	defer func() { APIBase, TokenURL = origBase, origToken }()
+	zone := time.FixedZone("AEST", 10*3600)
+	start := time.Date(2026, 8, 17, 0, 0, 0, 0, zone)
+	_, err := PutEvent(context.Background(), model.Connection{ID: "ms", Calendar: &model.CalendarConfig{Kind: "microsoft", ResolvedSecret: "refresh-ms"}}, model.Event{
+		Title: "Offsite", Start: start, End: start.Add(24 * time.Hour), AllDay: true,
+	}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	startPayload, _ := body["start"].(map[string]any)
+	endPayload, _ := body["end"].(map[string]any)
+	if startPayload["dateTime"] != "2026-08-17T00:00:00" || endPayload["dateTime"] != "2026-08-18T00:00:00" {
+		t.Fatalf("all-day graph times = start %#v end %#v", body["start"], body["end"])
+	}
+}
+
+func TestPutEventRejectsCancelledStatus(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/token" {
+			writer.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(writer).Encode(map[string]any{"access_token": "graph-access", "token_type": "Bearer", "expires_in": 3600})
+			return
+		}
+		http.Error(writer, "cancelled status must be rejected locally", http.StatusTeapot)
+	}))
+	defer server.Close()
+	t.Setenv("POSTHOUSE_MICROSOFT_CLIENT_ID", "public-client")
+	origBase, origToken := APIBase, TokenURL
+	APIBase, TokenURL = server.URL, server.URL+"/token"
+	defer func() { APIBase, TokenURL = origBase, origToken }()
+	start := time.Date(2026, 8, 17, 9, 0, 0, 0, time.UTC)
+	_, err := PutEvent(context.Background(), model.Connection{ID: "ms", Calendar: &model.CalendarConfig{Kind: "microsoft", ResolvedSecret: "refresh-ms"}}, model.Event{
+		Title: "Planning", Start: start, End: start.Add(time.Hour), Status: "CANCELLED",
+	}, true)
+	if err == nil || !strings.Contains(err.Error(), "do not serialize event status") {
+		t.Fatalf("PutEvent cancelled = %v", err)
+	}
+}
+
+func TestPutEventUpdateClearsEmptyLocationAndAttendees(t *testing.T) {
+	var body map[string]any
+	var method, path string
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/token" {
+			writer.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(writer).Encode(map[string]any{"access_token": "graph-access", "token_type": "Bearer", "expires_in": 3600})
+			return
+		}
+		method, path = request.Method, request.URL.Path
+		_ = json.NewDecoder(request.Body).Decode(&body)
+		_ = json.NewEncoder(writer).Encode(map[string]any{
+			"id": "evt-1", "iCalUId": "uid-1", "subject": "Cleared",
+			"start": map[string]string{"dateTime": "2026-08-17T09:00:00", "timeZone": "UTC"},
+			"end":   map[string]string{"dateTime": "2026-08-17T10:00:00", "timeZone": "UTC"},
+		})
+	}))
+	defer server.Close()
+	t.Setenv("POSTHOUSE_MICROSOFT_CLIENT_ID", "public-client")
+	origBase, origToken := APIBase, TokenURL
+	APIBase, TokenURL = server.URL, server.URL+"/token"
+	defer func() { APIBase, TokenURL = origBase, origToken }()
+	start := time.Date(2026, 8, 17, 9, 0, 0, 0, time.UTC)
+	_, err := PutEvent(context.Background(), model.Connection{ID: "ms", Calendar: &model.CalendarConfig{Kind: "microsoft", ResolvedSecret: "refresh-ms"}}, model.Event{
+		Href: "evt-1", Title: "Cleared", Start: start, End: start.Add(time.Hour), ETag: `"etag-1"`,
+	}, false)
+	if err != nil || method != http.MethodPatch || !strings.HasSuffix(path, "/events/evt-1") {
+		t.Fatalf("PutEvent update method=%s path=%s err=%v", method, path, err)
+	}
+	location, _ := body["location"].(map[string]any)
+	if location["displayName"] != "" {
+		t.Fatalf("update omitted empty location: %#v", body["location"])
+	}
+	attendees, ok := body["attendees"].([]any)
+	if !ok || len(attendees) != 0 {
+		t.Fatalf("update omitted empty attendees: %#v", body["attendees"])
+	}
+}
+
+func TestRejectOversizedMIME(t *testing.T) {
+	if err := RejectOversizedMIME(make([]byte, 1024)); err != nil {
+		t.Fatal(err)
+	}
+	if err := RejectOversizedMIME(make([]byte, 3<<20+1)); err == nil || !strings.Contains(err.Error(), "4 MiB") {
+		t.Fatalf("RejectOversizedMIME = %v", err)
+	}
+}

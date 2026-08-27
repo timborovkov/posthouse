@@ -811,6 +811,9 @@ func (s *Service) prepareSendWithConnection(ctx context.Context, connection mode
 	if err := postmail.ValidateMessage(message); err != nil {
 		return model.PreparedOperation{}, fmt.Errorf("validate message: %w", err)
 	}
+	if err := s.assertMicrosoftMIMELimit(connection, message); err != nil {
+		return model.PreparedOperation{}, err
+	}
 	return s.prepare(ctx, "mail.send", connection, message, map[string]any{
 		"acting_identity": connection.Identity,
 		"recipients":      map[string]any{"to": message.To, "cc": message.CC, "bcc": message.BCC},
@@ -819,6 +822,17 @@ func (s *Service) prepareSendWithConnection(ctx context.Context, connection mode
 		"attachments":  attachmentPreviews(message.Attachments),
 		"side_effects": []string{"send SMTP message", sentCopyEffect(connection)},
 	})
+}
+
+func (s *Service) assertMicrosoftMIMELimit(connection model.Connection, message model.SendMessage) error {
+	if config.MailKind(connection.Mail) != config.MailKindMicrosoft {
+		return nil
+	}
+	data, err := s.mailBuild(connection, message)
+	if err != nil {
+		return err
+	}
+	return microsoft.RejectOversizedMIME(data)
 }
 
 func (s *Service) PrepareReply(ctx context.Context, connectionID string, loc MessageLocator, text, htmlBody string) (model.PreparedOperation, error) {
@@ -1210,6 +1224,9 @@ func (s *Service) PrepareDraft(ctx context.Context, connectionID, kind string, l
 		if err := postmail.ValidateMessage(message); err != nil {
 			return model.PreparedOperation{}, fmt.Errorf("validate draft message: %w", err)
 		}
+		if err := s.assertMicrosoftMIMELimit(connection, message); err != nil {
+			return model.PreparedOperation{}, err
+		}
 	}
 	payload := draftPayload{ID: loc.ID, Folder: loc.Folder, UID: loc.UID, Message: message}
 	if kind != "mail.draft.create" {
@@ -1266,6 +1283,12 @@ func (s *Service) PrepareCalendarWrite(ctx context.Context, connectionID, kind s
 		}
 		if config.CalendarKind(connection.Calendar) == config.CalendarKindMicrosoft && nativeRecurrenceSet(event) {
 			return model.PreparedOperation{}, fmt.Errorf("Microsoft Graph calendar writes do not serialize recurrence; omit recurrence fields")
+		}
+		if config.CalendarKind(connection.Calendar) == config.CalendarKindMicrosoft {
+			status := strings.ToUpper(strings.TrimSpace(event.Status))
+			if status != "" && status != "CONFIRMED" {
+				return model.PreparedOperation{}, fmt.Errorf("Microsoft Graph calendar writes do not serialize event status %q; omit status or delete the event", event.Status)
+			}
 		}
 	}
 	if !config.NativeCalendar(connection) {
@@ -2999,7 +3022,13 @@ func (s *Service) cachedMailResult(connectionID, folder string, scope any, optio
 				continue
 			}
 			if strings.TrimSpace(options.Query) != "" {
-				detail, found := s.cachedMessageSnapshotFor(ledger, cacheID, folder, result.UIDValidity, message.UID)
+				var detail model.MessageDetail
+				var found bool
+				if config.NativeMail(connection) && message.ID != "" {
+					detail, found = s.cachedNativeMessage(connection, message.ID)
+				} else {
+					detail, found = s.cachedMessageSnapshotFor(ledger, cacheID, folder, result.UIDValidity, message.UID)
+				}
 				if !found {
 					if !matchesCachedMessage(message, options) {
 						continue
@@ -3560,12 +3589,15 @@ func mailCacheID(connection model.Connection) string {
 	if connection.Mail == nil {
 		return ""
 	}
+	mailOnly := connection
+	mailOnly.Calendar = nil
+	if config.NativeMail(connection) {
+		return resolvedCacheID(mailOnly, nativeCacheIdentity(connection))
+	}
 	resolved, err := resolveMailConnection(connection)
 	if err != nil {
 		return ""
 	}
-	mailOnly := connection
-	mailOnly.Calendar = nil
 	return resolvedCacheID(mailOnly, resolved.Mail.ResolvedSecret)
 }
 
@@ -3573,20 +3605,28 @@ func calendarCacheID(connection model.Connection) string {
 	if connection.Calendar == nil {
 		return ""
 	}
-	resolved, err := resolveCalendarConnection(connection)
-	if err != nil {
-		return ""
-	}
 	calendarOnly := connection
 	calendarOnly.Mail = nil
 	if config.NativeCalendar(connection) {
-		return resolvedCacheID(calendarOnly, resolved.Calendar.ResolvedSecret)
+		return resolvedCacheID(calendarOnly, nativeCacheIdentity(connection))
+	}
+	resolved, err := resolveCalendarConnection(connection)
+	if err != nil {
+		return ""
 	}
 	values := []string{resolved.Calendar.ResolvedURL}
 	if resolved.Calendar.Kind == "caldav" {
 		values = append(values, resolved.Calendar.ResolvedSecret)
 	}
 	return resolvedCacheID(calendarOnly, values...)
+}
+
+func nativeCacheIdentity(connection model.Connection) string {
+	email := strings.ToLower(strings.TrimSpace(connection.Identity.Email))
+	if email != "" {
+		return email
+	}
+	return connection.ID
 }
 
 func messageCacheKey(connectionID, folder string, uidValidity, uid uint32) string {

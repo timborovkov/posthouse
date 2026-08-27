@@ -36,8 +36,11 @@ func TestSearchGetSendAndLabelAgainstFixture(t *testing.T) {
 			_ = json.NewEncoder(writer).Encode(map[string]any{"messages": []map[string]string{{"id": "msg-1"}}})
 		case request.Method == http.MethodGet && strings.Contains(request.URL.Path, "/messages/msg-1") && request.URL.Query().Get("format") == "metadata":
 			_ = json.NewEncoder(writer).Encode(map[string]any{
-				"id": "msg-1", "internalDate": "1152194645000", "labelIds": []string{"INBOX", "UNREAD"},
-				"payload": map[string]any{"headers": []map[string]string{{"name": "Subject", "value": "Hello"}, {"name": "From", "value": "a@example.test"}}},
+				"id": "msg-1", "internalDate": "1152194645000", "labelIds": []string{"INBOX", "UNREAD"}, "snippet": "Hello preview",
+				"payload": map[string]any{
+					"headers": []map[string]string{{"name": "Subject", "value": "Hello"}, {"name": "From", "value": "a@example.test"}},
+					"parts":   []map[string]any{{"filename": "notes.pdf", "body": map[string]string{"attachmentId": "att-1"}}},
+				},
 			})
 		case request.Method == http.MethodGet && strings.Contains(request.URL.Path, "/messages/msg-1"):
 			_ = json.NewEncoder(writer).Encode(map[string]any{"id": "msg-1", "raw": encoded, "labelIds": []string{"INBOX"}, "internalDate": "1152194645000"})
@@ -65,7 +68,7 @@ func TestSearchGetSendAndLabelAgainstFixture(t *testing.T) {
 	defer func() { APIBase, TokenURL = origBase, origToken }()
 	connection := model.Connection{ID: "gmail-work", Mail: &model.MailConfig{Kind: "gmail", ResolvedSecret: "refresh-secret"}}
 	result, err := Search(context.Background(), connection, postmail.SearchOptions{Query: "hello", Limit: 10})
-	if err != nil || len(result.Messages) != 1 || result.Messages[0].ID != "msg-1" || result.Messages[0].Subject != "Hello" {
+	if err != nil || len(result.Messages) != 1 || result.Messages[0].ID != "msg-1" || result.Messages[0].Subject != "Hello" || result.Messages[0].Preview != "Hello preview" || !result.Messages[0].HasAttachments {
 		t.Fatalf("Search = %#v, %v", result, err)
 	}
 	fetched, err := Get(context.Background(), connection, "msg-1")
@@ -333,5 +336,133 @@ func TestSearchDropsSameDayMessagesBeforeSince(t *testing.T) {
 	result, err := Search(context.Background(), model.Connection{ID: "gmail-work", Mail: &model.MailConfig{Kind: "gmail", ResolvedSecret: "refresh"}}, postmail.SearchOptions{Since: since, Limit: 10})
 	if err != nil || len(result.Messages) != 0 {
 		t.Fatalf("Search Since filtered = %#v, %v", result, err)
+	}
+}
+
+func TestAfterCursorEqualTimeUsesTotalOrder(t *testing.T) {
+	stamp := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
+	options := postmail.SearchOptions{CursorTime: stamp, CursorID: "bbb"}
+	if afterCursor(model.Message{ID: "aaa", ReceivedAt: stamp}, options) {
+		t.Fatal("equal-time cursor re-admitted an earlier ID")
+	}
+	if afterCursor(model.Message{ID: "bbb", ReceivedAt: stamp}, options) {
+		t.Fatal("cursor ID itself was re-admitted")
+	}
+	if !afterCursor(model.Message{ID: "ccc", ReceivedAt: stamp}, options) {
+		t.Fatal("equal-time listing dropped a later ID")
+	}
+	if !afterCursor(model.Message{ID: "aaa", ReceivedAt: stamp.Add(-time.Hour)}, options) {
+		t.Fatal("older message was dropped")
+	}
+	if afterCursor(model.Message{ID: "zzz", ReceivedAt: stamp.Add(time.Hour)}, options) {
+		t.Fatal("newer message was kept")
+	}
+}
+
+func TestPutEventAllDayKeepsLocalDate(t *testing.T) {
+	var body map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/token" {
+			writer.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(writer).Encode(map[string]any{"access_token": "ya29.access", "token_type": "Bearer", "expires_in": 3600})
+			return
+		}
+		if request.Method == http.MethodPost && strings.HasSuffix(request.URL.Path, "/events") {
+			_ = json.NewDecoder(request.Body).Decode(&body)
+			_ = json.NewEncoder(writer).Encode(map[string]any{
+				"id": "evt-1", "iCalUID": "uid-1", "summary": "Offsite",
+				"start": map[string]string{"date": "2026-08-17"}, "end": map[string]string{"date": "2026-08-18"},
+			})
+			return
+		}
+		http.NotFound(writer, request)
+	}))
+	defer server.Close()
+	t.Setenv("POSTHOUSE_GOOGLE_CLIENT_ID", "desktop.apps.googleusercontent.com")
+	origCal, origToken := CalendarAPIBase, TokenURL
+	CalendarAPIBase, TokenURL = server.URL+"/calendar/v3", server.URL+"/token"
+	defer func() { CalendarAPIBase, TokenURL = origCal, origToken }()
+	zone := time.FixedZone("AEST", 10*3600)
+	start := time.Date(2026, 8, 17, 0, 0, 0, 0, zone)
+	_, err := PutEvent(context.Background(), model.Connection{ID: "gmail-work", Mail: &model.MailConfig{Kind: "gmail", ResolvedSecret: "refresh"}}, model.Event{
+		Title: "Offsite", Start: start, End: start.Add(24 * time.Hour), AllDay: true,
+	}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	startPayload, _ := body["start"].(map[string]any)
+	endPayload, _ := body["end"].(map[string]any)
+	if startPayload["date"] != "2026-08-17" || endPayload["date"] != "2026-08-18" {
+		t.Fatalf("all-day civil dates = start %#v end %#v", body["start"], body["end"])
+	}
+}
+
+func TestMessageFromRawMapsPreviewAndAttachments(t *testing.T) {
+	message := messageFromRaw("gmail-work", rawMessage{
+		ID:      "msg-1",
+		Snippet: "Hello preview",
+		Payload: &gmailPayload{Filename: "notes.pdf"},
+	})
+	if message.Preview != "Hello preview" || !message.HasAttachments {
+		t.Fatalf("messageFromRaw = %#v", message)
+	}
+	nested := messageFromRaw("gmail-work", rawMessage{
+		ID: "msg-2",
+		Payload: &gmailPayload{
+			Parts: []gmailPayload{{Body: &struct {
+				AttachmentID string `json:"attachmentId"`
+			}{AttachmentID: "att-1"}}},
+		},
+	})
+	if !nested.HasAttachments {
+		t.Fatalf("nested attachment metadata = %#v", nested)
+	}
+}
+
+func TestCreateUpdateDeleteDraftUsesDraftResource(t *testing.T) {
+	var putPath, deletePath string
+	var listed bool
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/token" {
+			writer.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(writer).Encode(map[string]any{"access_token": "ya29.access", "token_type": "Bearer", "expires_in": 3600})
+			return
+		}
+		switch {
+		case request.Method == http.MethodPost && request.URL.Path == "/gmail/v1/users/me/drafts":
+			_ = json.NewEncoder(writer).Encode(map[string]any{"id": "draft-1", "message": map[string]string{"id": "msg-1"}})
+		case request.Method == http.MethodGet && request.URL.Path == "/gmail/v1/users/me/drafts/msg-1":
+			http.NotFound(writer, request)
+		case request.Method == http.MethodGet && request.URL.Path == "/gmail/v1/users/me/drafts":
+			listed = true
+			_ = json.NewEncoder(writer).Encode(map[string]any{"drafts": []map[string]any{{"id": "draft-1", "message": map[string]string{"id": "msg-1"}}}})
+		case request.Method == http.MethodPut && strings.Contains(request.URL.Path, "/drafts/"):
+			putPath = request.URL.Path
+			_ = json.NewEncoder(writer).Encode(map[string]any{"id": "draft-1"})
+		case request.Method == http.MethodDelete && strings.Contains(request.URL.Path, "/drafts/"):
+			deletePath = request.URL.Path
+			writer.WriteHeader(http.StatusNoContent)
+		case strings.Contains(request.URL.Path, "/messages/") && strings.Contains(request.URL.Path, "/trash"):
+			http.Error(writer, "draft delete must not trash a message", http.StatusTeapot)
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+	t.Setenv("POSTHOUSE_GOOGLE_CLIENT_ID", "desktop.apps.googleusercontent.com")
+	origBase, origToken := APIBase, TokenURL
+	APIBase, TokenURL = server.URL+"/gmail/v1", server.URL+"/token"
+	defer func() { APIBase, TokenURL = origBase, origToken }()
+	connection := model.Connection{ID: "gmail-work", Mail: &model.MailConfig{Kind: "gmail", ResolvedSecret: "refresh"}}
+	created, err := CreateDraft(context.Background(), connection, []byte("From: a@example.test\r\nTo: b@example.test\r\nSubject: Draft\r\n\r\nHi"))
+	if err != nil || created != "draft-1" {
+		t.Fatalf("CreateDraft = %q, %v", created, err)
+	}
+	updated, err := UpdateDraft(context.Background(), connection, "msg-1", []byte("From: a@example.test\r\nTo: b@example.test\r\nSubject: Updated\r\n\r\nHi"))
+	if err != nil || updated != "draft-1" || !strings.HasSuffix(putPath, "/drafts/draft-1") || !listed {
+		t.Fatalf("UpdateDraft = %q path=%s listed=%v err=%v", updated, putPath, listed, err)
+	}
+	if err := DeleteDraft(context.Background(), connection, "msg-1"); err != nil || !strings.HasSuffix(deletePath, "/drafts/draft-1") {
+		t.Fatalf("DeleteDraft path=%s err=%v", deletePath, err)
 	}
 }

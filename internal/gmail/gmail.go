@@ -42,16 +42,25 @@ type listResponse struct {
 }
 
 type rawMessage struct {
-	ID           string   `json:"id"`
-	InternalDate string   `json:"internalDate"`
-	LabelIDs     []string `json:"labelIds"`
-	Raw          string   `json:"raw"`
-	Payload      *struct {
-		Headers []struct {
-			Name  string `json:"name"`
-			Value string `json:"value"`
-		} `json:"headers"`
-	} `json:"payload"`
+	ID           string        `json:"id"`
+	InternalDate string        `json:"internalDate"`
+	LabelIDs     []string      `json:"labelIds"`
+	Snippet      string        `json:"snippet"`
+	Raw          string        `json:"raw"`
+	Payload      *gmailPayload `json:"payload"`
+}
+
+type gmailPayload struct {
+	Filename string `json:"filename"`
+	MimeType string `json:"mimeType"`
+	Headers  []struct {
+		Name  string `json:"name"`
+		Value string `json:"value"`
+	} `json:"headers"`
+	Body *struct {
+		AttachmentID string `json:"attachmentId"`
+	} `json:"body"`
+	Parts []gmailPayload `json:"parts"`
 }
 
 func Search(ctx context.Context, connection model.Connection, options postmail.SearchOptions) (postmail.SearchResult, error) {
@@ -191,10 +200,31 @@ func CreateDraft(ctx context.Context, connection model.Connection, raw []byte) (
 	if err := doJSON(ctx, client, http.MethodPost, APIBase+"/users/me/drafts", map[string]any{"message": map[string]string{"raw": base64.RawURLEncoding.EncodeToString(raw)}}, &created); err != nil {
 		return "", err
 	}
-	if created.Message.ID != "" {
-		return created.Message.ID, nil
+	if created.ID != "" {
+		return created.ID, nil
 	}
-	return created.ID, nil
+	return created.Message.ID, nil
+}
+
+func UpdateDraft(ctx context.Context, connection model.Connection, id string, raw []byte) (string, error) {
+	client, err := httpClient(ctx, connection)
+	if err != nil {
+		return "", err
+	}
+	draftID, err := resolveDraftID(ctx, client, id)
+	if err != nil {
+		return "", err
+	}
+	var saved struct {
+		ID string `json:"id"`
+	}
+	if err := doJSON(ctx, client, http.MethodPut, APIBase+"/users/me/drafts/"+url.PathEscape(draftID), map[string]any{"message": map[string]string{"raw": base64.RawURLEncoding.EncodeToString(raw)}}, &saved); err != nil {
+		return "", err
+	}
+	if saved.ID != "" {
+		return saved.ID, nil
+	}
+	return draftID, nil
 }
 
 func DeleteDraft(ctx context.Context, connection model.Connection, id string) error {
@@ -202,7 +232,59 @@ func DeleteDraft(ctx context.Context, connection model.Connection, id string) er
 	if err != nil {
 		return err
 	}
-	return doJSON(ctx, client, http.MethodDelete, APIBase+"/users/me/drafts/"+url.PathEscape(id), nil, nil)
+	draftID, err := resolveDraftID(ctx, client, id)
+	if err != nil {
+		return err
+	}
+	return doJSON(ctx, client, http.MethodDelete, APIBase+"/users/me/drafts/"+url.PathEscape(draftID), nil, nil)
+}
+
+func Untrash(ctx context.Context, connection model.Connection, id string) error {
+	client, err := httpClient(ctx, connection)
+	if err != nil {
+		return err
+	}
+	return doJSON(ctx, client, http.MethodPost, APIBase+"/users/me/messages/"+url.PathEscape(id)+"/untrash", struct{}{}, nil)
+}
+
+func resolveDraftID(ctx context.Context, client *http.Client, id string) (string, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return "", fmt.Errorf("draft id is required")
+	}
+	var draft struct {
+		ID string `json:"id"`
+	}
+	if err := doJSON(ctx, client, http.MethodGet, APIBase+"/users/me/drafts/"+url.PathEscape(id)+"?format=minimal", nil, &draft); err == nil && strings.TrimSpace(draft.ID) != "" {
+		return draft.ID, nil
+	}
+	endpoint := APIBase + "/users/me/drafts?maxResults=100"
+	for page := 0; page < maxEventPages; page++ {
+		var listed struct {
+			Drafts []struct {
+				ID      string `json:"id"`
+				Message struct {
+					ID string `json:"id"`
+				} `json:"message"`
+			} `json:"drafts"`
+			NextPageToken string `json:"nextPageToken"`
+		}
+		if err := doJSON(ctx, client, http.MethodGet, endpoint, nil, &listed); err != nil {
+			return "", err
+		}
+		for _, item := range listed.Drafts {
+			if item.ID == id || item.Message.ID == id {
+				if item.ID != "" {
+					return item.ID, nil
+				}
+			}
+		}
+		if listed.NextPageToken == "" {
+			break
+		}
+		endpoint = APIBase + "/users/me/drafts?maxResults=100&pageToken=" + url.QueryEscape(listed.NextPageToken)
+	}
+	return "", fmt.Errorf("gmail draft %s was not found", id)
 }
 
 func Ping(ctx context.Context, connection model.Connection) error {
@@ -266,16 +348,29 @@ func Snapshot(ctx context.Context, connection model.Connection, id string) (stri
 	if err != nil {
 		return "", err
 	}
-	var payload struct {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return "", fmt.Errorf("message id is required")
+	}
+	var message struct {
 		HistoryID json.Number `json:"historyId"`
 	}
-	if err := doJSON(ctx, client, http.MethodGet, APIBase+"/users/me/messages/"+url.PathEscape(id)+"?format=minimal", nil, &payload); err != nil {
-		return "", err
+	if err := doJSON(ctx, client, http.MethodGet, APIBase+"/users/me/messages/"+url.PathEscape(id)+"?format=minimal", nil, &message); err == nil {
+		if strings.TrimSpace(message.HistoryID.String()) != "" {
+			return message.HistoryID.String(), nil
+		}
 	}
-	if strings.TrimSpace(payload.HistoryID.String()) == "" {
-		return "", fmt.Errorf("gmail message %s is missing a history id", id)
+	var draft struct {
+		Message struct {
+			HistoryID json.Number `json:"historyId"`
+		} `json:"message"`
 	}
-	return payload.HistoryID.String(), nil
+	if err := doJSON(ctx, client, http.MethodGet, APIBase+"/users/me/drafts/"+url.PathEscape(id)+"?format=minimal", nil, &draft); err == nil {
+		if strings.TrimSpace(draft.Message.HistoryID.String()) != "" {
+			return draft.Message.HistoryID.String(), nil
+		}
+	}
+	return "", fmt.Errorf("gmail message %s is missing a history id", id)
 }
 
 func ListEvents(ctx context.Context, connection model.Connection, start, end time.Time, query string) ([]model.Event, error) {
@@ -335,8 +430,8 @@ func PutEvent(ctx context.Context, connection model.Connection, event model.Even
 		Recurrence:  calendarRecurrence(event),
 	}
 	if event.AllDay {
-		payload.Start = calendarTime{Date: event.Start.UTC().Format("2006-01-02")}
-		payload.End = calendarTime{Date: event.End.UTC().Format("2006-01-02")}
+		payload.Start = calendarTime{Date: civilDate(event.Start)}
+		payload.End = calendarTime{Date: civilDate(event.End)}
 	} else {
 		payload.Start = calendarTime{DateTime: event.Start.UTC().Format(time.RFC3339)}
 		payload.End = calendarTime{DateTime: event.End.UTC().Format(time.RFC3339)}
@@ -469,6 +564,10 @@ func parseCalendarTime(value calendarTime) time.Time {
 		}
 	}
 	return time.Time{}
+}
+
+func civilDate(value time.Time) string {
+	return time.Date(value.Year(), value.Month(), value.Day(), 0, 0, 0, 0, time.UTC).Format("2006-01-02")
 }
 
 func metadataMany(ctx context.Context, client *http.Client, connectionID string, ids []string) ([]model.Message, error) {
@@ -613,7 +712,15 @@ func metadata(ctx context.Context, client *http.Client, connectionID, id string)
 }
 
 func messageFromRaw(connectionID string, payload rawMessage) model.Message {
-	message := model.Message{ConnectionID: connectionID, ID: payload.ID, Folder: folderFromLabels(payload.LabelIDs), Unread: containsLabel(payload.LabelIDs, "UNREAD"), Flagged: containsLabel(payload.LabelIDs, "STARRED")}
+	message := model.Message{
+		ConnectionID:   connectionID,
+		ID:             payload.ID,
+		Folder:         folderFromLabels(payload.LabelIDs),
+		Unread:         containsLabel(payload.LabelIDs, "UNREAD"),
+		Flagged:        containsLabel(payload.LabelIDs, "STARRED"),
+		Preview:        payload.Snippet,
+		HasAttachments: payloadHasAttachment(payload.Payload),
+	}
 	if ms, err := strconv.ParseInt(payload.InternalDate, 10, 64); err == nil {
 		message.ReceivedAt = time.UnixMilli(ms).UTC()
 	}
@@ -636,6 +743,24 @@ func messageFromRaw(connectionID string, payload rawMessage) model.Message {
 		}
 	}
 	return message
+}
+
+func payloadHasAttachment(payload *gmailPayload) bool {
+	if payload == nil {
+		return false
+	}
+	if strings.TrimSpace(payload.Filename) != "" {
+		return true
+	}
+	if payload.Body != nil && strings.TrimSpace(payload.Body.AttachmentID) != "" {
+		return true
+	}
+	for index := range payload.Parts {
+		if payloadHasAttachment(&payload.Parts[index]) {
+			return true
+		}
+	}
+	return false
 }
 
 func searchQuery(options postmail.SearchOptions) string {
@@ -688,7 +813,7 @@ func afterCursor(message model.Message, options postmail.SearchOptions) bool {
 			return true
 		}
 	}
-	return message.ID != options.CursorID
+	return options.CursorID == "" || message.ID > options.CursorID
 }
 
 func unreadLabel(folder string) string {

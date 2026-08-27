@@ -74,7 +74,7 @@ func CanSendMail(connection model.Connection) bool {
 }
 
 func OAuthSecretName(connection model.Connection) string {
-	if connection.Mail != nil && strings.TrimSpace(connection.Mail.Secret.Keychain) != "" {
+	if NativeMail(connection) && connection.Mail != nil && strings.TrimSpace(connection.Mail.Secret.Keychain) != "" {
 		return strings.TrimSpace(connection.Mail.Secret.Keychain)
 	}
 	if connection.Calendar != nil && strings.TrimSpace(connection.Calendar.Secret.Keychain) != "" {

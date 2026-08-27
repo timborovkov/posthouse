@@ -594,3 +594,141 @@ func TestMicrosoftClientPersistsRotatedRefreshToken(t *testing.T) {
 		t.Fatal("rotated Microsoft refresh token was not persisted")
 	}
 }
+
+func TestMicrosoftPrepareSendRejectsOversizedMIME(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	t.Setenv("POSTHOUSE_MICROSOFT_CLIENT_ID", "public-client")
+	t.Setenv("MS_REFRESH", "refresh-ms")
+	application := serviceWithConnections(t, model.Connection{
+		ID: "microsoft", Name: "Microsoft", Identity: model.Identity{Email: "me@contoso.test"},
+		Mail: &model.MailConfig{Kind: "microsoft", Secret: model.SecretRef{Env: "MS_REFRESH"}},
+	})
+	application.mailBuild = func(model.Connection, model.SendMessage) ([]byte, error) {
+		return make([]byte, 3<<20+1), nil
+	}
+	_, err := application.PrepareSend(context.Background(), model.SendMessage{ConnectionID: "microsoft", To: []string{"teammate@example.test"}, Subject: "Status", Text: "Hello"})
+	if err == nil || !strings.Contains(err.Error(), "4 MiB") {
+		t.Fatalf("PrepareSend oversized = %v", err)
+	}
+}
+
+func TestMicrosoftPrepareCalendarWriteRejectsCancelledStatus(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	t.Setenv("POSTHOUSE_MICROSOFT_CLIENT_ID", "public-client")
+	t.Setenv("MS_REFRESH", "refresh-ms")
+	application := serviceWithConnections(t, model.Connection{
+		ID: "microsoft", Name: "Microsoft", Identity: model.Identity{Email: "me@contoso.test"},
+		Calendar: &model.CalendarConfig{Kind: "microsoft", Secret: model.SecretRef{Env: "MS_REFRESH"}},
+	})
+	start := time.Date(2026, 8, 17, 9, 0, 0, 0, time.UTC)
+	_, err := application.PrepareCalendarWrite(context.Background(), "microsoft", "calendar.create", model.Event{Title: "Planning", Start: start, End: start.Add(time.Hour), Status: "CANCELLED"})
+	if err == nil || !strings.Contains(err.Error(), "do not serialize event status") {
+		t.Fatalf("PrepareCalendarWrite cancelled = %v", err)
+	}
+}
+
+func TestGmailMoveRemovesSourceLabelAndUntrashes(t *testing.T) {
+	var modifyBody map[string]any
+	var untrashed bool
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/token" {
+			writer.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(writer).Encode(map[string]any{"access_token": "ya29.access", "token_type": "Bearer", "expires_in": 3600})
+			return
+		}
+		switch {
+		case request.Method == http.MethodGet && strings.Contains(request.URL.Path, "/messages/"):
+			_ = json.NewEncoder(writer).Encode(map[string]any{"id": "msg-1", "historyId": "1001"})
+		case request.Method == http.MethodPost && strings.HasSuffix(request.URL.Path, "/untrash"):
+			untrashed = true
+			_ = json.NewEncoder(writer).Encode(map[string]any{"id": "msg-1"})
+		case request.Method == http.MethodPost && strings.HasSuffix(request.URL.Path, "/modify"):
+			_ = json.NewDecoder(request.Body).Decode(&modifyBody)
+			_ = json.NewEncoder(writer).Encode(map[string]any{"id": "msg-1"})
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	t.Setenv("POSTHOUSE_GOOGLE_CLIENT_ID", "desktop.apps.googleusercontent.com")
+	t.Setenv("GMAIL_REFRESH", "refresh-secret")
+	origBase, origToken := gmail.APIBase, gmail.TokenURL
+	gmail.APIBase, gmail.TokenURL = server.URL+"/gmail/v1", server.URL+"/token"
+	defer func() { gmail.APIBase, gmail.TokenURL = origBase, origToken }()
+	application := serviceWithConnections(t, model.Connection{
+		ID: "gmail-work", Name: "Gmail", Identity: model.Identity{Email: "me@acme.test"},
+		Mail: &model.MailConfig{Kind: "gmail", Secret: model.SecretRef{Env: "GMAIL_REFRESH"}},
+	})
+	action, err := application.PrepareMailAction(context.Background(), "gmail-work", "mail.move", MailAction{ID: "msg-1", Folder: "Projects", Destination: "INBOX"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := application.ExecuteOperation(context.Background(), action.Token); err != nil {
+		t.Fatal(err)
+	}
+	add, _ := modifyBody["addLabelIds"].([]any)
+	remove, _ := modifyBody["removeLabelIds"].([]any)
+	if len(add) != 1 || add[0] != "INBOX" || len(remove) != 1 || remove[0] != "Projects" {
+		t.Fatalf("custom-label move modify = %#v", modifyBody)
+	}
+	restore, err := application.PrepareMailAction(context.Background(), "gmail-work", "mail.move", MailAction{ID: "msg-1", Folder: "TRASH", Destination: "INBOX"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := application.ExecuteOperation(context.Background(), restore.Token); err != nil || !untrashed {
+		t.Fatalf("execute untrash = %v untrashed=%v", err, untrashed)
+	}
+}
+
+func TestGmailDraftUpdateAndDeleteUseDraftResources(t *testing.T) {
+	var putPath, deletePath string
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/token" {
+			writer.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(writer).Encode(map[string]any{"access_token": "ya29.access", "token_type": "Bearer", "expires_in": 3600})
+			return
+		}
+		switch {
+		case request.Method == http.MethodGet && strings.Contains(request.URL.Path, "/messages/"):
+			_ = json.NewEncoder(writer).Encode(map[string]any{"id": "msg-1", "historyId": "1001"})
+		case request.Method == http.MethodGet && request.URL.Path == "/gmail/v1/users/me/drafts/draft-1":
+			_ = json.NewEncoder(writer).Encode(map[string]any{"id": "draft-1", "message": map[string]any{"id": "msg-1", "historyId": "1001"}})
+		case request.Method == http.MethodPut && strings.Contains(request.URL.Path, "/drafts/"):
+			putPath = request.URL.Path
+			_ = json.NewEncoder(writer).Encode(map[string]any{"id": "draft-1"})
+		case request.Method == http.MethodDelete && strings.Contains(request.URL.Path, "/drafts/"):
+			deletePath = request.URL.Path
+			writer.WriteHeader(http.StatusNoContent)
+		case strings.Contains(request.URL.Path, "/trash"):
+			http.Error(writer, "draft delete must not trash a message", http.StatusTeapot)
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	t.Setenv("POSTHOUSE_GOOGLE_CLIENT_ID", "desktop.apps.googleusercontent.com")
+	t.Setenv("GMAIL_REFRESH", "refresh-secret")
+	origBase, origToken := gmail.APIBase, gmail.TokenURL
+	gmail.APIBase, gmail.TokenURL = server.URL+"/gmail/v1", server.URL+"/token"
+	defer func() { gmail.APIBase, gmail.TokenURL = origBase, origToken }()
+	application := serviceWithConnections(t, model.Connection{
+		ID: "gmail-work", Name: "Gmail", Identity: model.Identity{Email: "me@acme.test"},
+		Mail: &model.MailConfig{Kind: "gmail", Secret: model.SecretRef{Env: "GMAIL_REFRESH"}, Folders: model.FolderConfig{Drafts: "DRAFTS"}},
+	})
+	update, err := application.PrepareDraft(context.Background(), "gmail-work", "mail.draft.update", MessageLocator{ID: "draft-1", Folder: "DRAFTS"}, model.SendMessage{To: []string{"teammate@example.test"}, Subject: "Updated", Text: "Hello"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := application.ExecuteOperation(context.Background(), update.Token); err != nil || !strings.HasSuffix(putPath, "/drafts/draft-1") {
+		t.Fatalf("execute draft update path=%s err=%v", putPath, err)
+	}
+	deletion, err := application.PrepareDraft(context.Background(), "gmail-work", "mail.draft.delete", MessageLocator{ID: "draft-1", Folder: "DRAFTS"}, model.SendMessage{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := application.ExecuteOperation(context.Background(), deletion.Token); err != nil || !strings.HasSuffix(deletePath, "/drafts/draft-1") {
+		t.Fatalf("execute draft delete path=%s err=%v", deletePath, err)
+	}
+}

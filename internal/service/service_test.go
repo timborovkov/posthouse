@@ -469,6 +469,25 @@ func TestProviderCacheIdentityUsesResolvedSecretValues(t *testing.T) {
 	}
 }
 
+func TestNativeMailCacheIDStableAcrossTokenRotation(t *testing.T) {
+	connection := model.Connection{
+		ID:       "gmail-work",
+		Identity: model.Identity{Email: "me@acme.test"},
+		Mail:     &model.MailConfig{Kind: "gmail", ResolvedSecret: "refresh-one"},
+	}
+	first := mailCacheID(connection)
+	connection.Mail.ResolvedSecret = "refresh-two"
+	second := mailCacheID(connection)
+	if first == "" || first != second {
+		t.Fatalf("native mail cache identity changed across token rotation: %q then %q", first, second)
+	}
+	connection.Identity.Email = ""
+	fallback := mailCacheID(connection)
+	if fallback == "" || fallback == first {
+		t.Fatalf("native mail cache identity without email = %q first=%q", fallback, first)
+	}
+}
+
 func TestCalendarFetchUsesOneResolvedProviderSnapshot(t *testing.T) {
 	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
 	t.Setenv("SECRET_FEED_URL", "https://calendar-one.example.test/feed.ics")
@@ -1300,6 +1319,38 @@ func TestOfflineBodySearchReportsReducedSemantics(t *testing.T) {
 	page, err := application.SearchMessages(model.Selector{}, postmail.SearchOptions{Mode: "offline", Query: "needle"}, 10, "")
 	if err != nil || len(page.Messages) != 1 || len(page.Errors) != 1 || page.Errors[0].Code != "offline_search_incomplete" {
 		t.Fatalf("offline body search = %#v, %v", page, err)
+	}
+}
+
+func TestOfflineNativeBodySearchMatchesOpaqueID(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	t.Setenv("GMAIL_REFRESH", "refresh")
+	application := serviceWithConnections(t, model.Connection{
+		ID: "gmail-work", Name: "Gmail", Identity: model.Identity{Email: "me@acme.test"},
+		Mail: &model.MailConfig{Kind: "gmail", Secret: model.SecretRef{Env: "GMAIL_REFRESH"}},
+	})
+	message := model.Message{ConnectionID: "gmail-work", Folder: "INBOX", ID: "msg-1", Subject: "Unrelated", ReceivedAt: instant(12)}
+	if err := application.cacheMailResult("gmail-work", "INBOX", "seed", postmail.SearchOptions{}, postmail.SearchResult{UIDValidity: 1, Messages: []model.Message{message}}); err != nil {
+		t.Fatal(err)
+	}
+	connection, err := application.exactConnection("gmail-work", "mail.read")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger, err := application.ensureState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	detail, err := json.Marshal(model.MessageDetail{Message: message, Text: "body contains the needle"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ledger.Put(context.Background(), state.CacheEntry{Namespace: "message_body", Key: nativeBodyCacheKey(mailCacheID(connection), "msg-1"), ConnectionID: "gmail-work", Kind: "message_body", ExpiresAt: time.Now().Add(time.Hour), Value: detail}); err != nil {
+		t.Fatal(err)
+	}
+	page, err := application.SearchMessages(model.Selector{}, postmail.SearchOptions{Mode: "offline", Query: "needle"}, 10, "")
+	if err != nil || len(page.Messages) != 1 || page.Messages[0].ID != "msg-1" || len(page.Errors) != 1 || page.Errors[0].Code != "offline_search_incomplete" {
+		t.Fatalf("offline native body search = %#v, %v", page, err)
 	}
 }
 

@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -333,7 +334,7 @@ func executeNativeMail(ctx context.Context, connection model.Connection, kind st
 			}
 			return map[string]any{"moved": true, "destination": "JUNK"}, nil
 		default:
-			if err := nativeMove(ctx, connection, id, action.Destination); err != nil {
+			if err := nativeMove(ctx, connection, id, action.Folder, action.Destination); err != nil {
 				return nil, err
 			}
 			return map[string]any{"moved": true, "destination": action.Destination}, nil
@@ -350,7 +351,7 @@ func executeNativeMail(ctx context.Context, connection model.Connection, kind st
 			}
 		}
 		if kind == "mail.draft.delete" {
-			if err := nativeTrash(ctx, connection, id); err != nil {
+			if err := nativeDeleteDraft(ctx, connection, id); err != nil {
 				return nil, err
 			}
 			return map[string]any{"deleted": true}, nil
@@ -359,14 +360,20 @@ func executeNativeMail(ctx context.Context, connection model.Connection, kind st
 		if err != nil {
 			return nil, err
 		}
+		if kind == "mail.draft.update" && id != "" {
+			updated, err := nativeUpdateDraft(ctx, connection, id, data)
+			if err != nil {
+				var uncertain *uncertainOperationError
+				if errors.As(err, &uncertain) && updated != "" {
+					return map[string]any{"id": updated, "cleanup": "failed"}, err
+				}
+				return nil, err
+			}
+			return map[string]any{"id": updated}, nil
+		}
 		created, err := nativeCreateDraft(ctx, connection, data)
 		if err != nil {
 			return nil, err
-		}
-		if kind == "mail.draft.update" && id != "" {
-			if err := nativeTrash(ctx, connection, id); err != nil {
-				return map[string]any{"id": created, "cleanup": "failed"}, &uncertainOperationError{message: fmt.Sprintf("replacement draft was created as %s but old draft cleanup failed: %v", created, err)}
-			}
 		}
 		return map[string]any{"id": created}, nil
 	default:
@@ -461,15 +468,51 @@ func nativeJunk(ctx context.Context, connection model.Connection, id string) err
 	return microsoft.Move(ctx, connection, id, "junkemail")
 }
 
-func nativeMove(ctx context.Context, connection model.Connection, id, destination string) error {
+func nativeMove(ctx context.Context, connection model.Connection, id, source, destination string) error {
 	if config.MailKind(connection.Mail) == config.MailKindGmail {
-		label := strings.ToUpper(strings.TrimSpace(destination))
-		if label == "" {
-			label = "INBOX"
-		}
-		return gmail.Modify(ctx, connection, id, []string{label}, []string{"INBOX"})
+		return gmailMove(ctx, connection, id, source, destination)
 	}
 	return microsoft.Move(ctx, connection, id, destination)
+}
+
+func gmailMove(ctx context.Context, connection model.Connection, id, source, destination string) error {
+	dest := gmailLabel(destination)
+	src := gmailLabel(source)
+	if dest == "INBOX" && src == "TRASH" {
+		return gmail.Untrash(ctx, connection, id)
+	}
+	if dest == "ARCHIVE" {
+		remove := []string{"INBOX"}
+		if src != "" && src != "INBOX" && src != "ARCHIVE" {
+			remove = append(remove, src)
+		}
+		return gmail.Modify(ctx, connection, id, nil, remove)
+	}
+	add := []string{dest}
+	remove := []string{}
+	if src != "" && src != dest {
+		remove = append(remove, src)
+	}
+	return gmail.Modify(ctx, connection, id, add, remove)
+}
+
+func gmailLabel(folder string) string {
+	switch strings.ToUpper(strings.TrimSpace(folder)) {
+	case "", "INBOX":
+		return "INBOX"
+	case "SENT":
+		return "SENT"
+	case "DRAFTS", "DRAFT":
+		return "DRAFT"
+	case "TRASH":
+		return "TRASH"
+	case "SPAM", "JUNK":
+		return "SPAM"
+	case "ARCHIVE":
+		return "ARCHIVE"
+	default:
+		return folder
+	}
 }
 
 func nativeCreateDraft(ctx context.Context, connection model.Connection, raw []byte) (string, error) {
@@ -477,6 +520,29 @@ func nativeCreateDraft(ctx context.Context, connection model.Connection, raw []b
 		return gmail.CreateDraft(ctx, connection, raw)
 	}
 	return microsoft.CreateDraft(ctx, connection, raw)
+}
+
+func nativeUpdateDraft(ctx context.Context, connection model.Connection, id string, raw []byte) (string, error) {
+	if config.MailKind(connection.Mail) == config.MailKindGmail {
+		return gmail.UpdateDraft(ctx, connection, id, raw)
+	}
+	created, err := microsoft.CreateDraft(ctx, connection, raw)
+	if err != nil {
+		return "", err
+	}
+	if id != "" {
+		if err := microsoft.DeleteMessage(ctx, connection, id); err != nil {
+			return created, &uncertainOperationError{message: fmt.Sprintf("replacement draft was created as %s but old draft cleanup failed: %v", created, err)}
+		}
+	}
+	return created, nil
+}
+
+func nativeDeleteDraft(ctx context.Context, connection model.Connection, id string) error {
+	if config.MailKind(connection.Mail) == config.MailKindGmail {
+		return gmail.DeleteDraft(ctx, connection, id)
+	}
+	return microsoft.DeleteMessage(ctx, connection, id)
 }
 
 func nativeGetMessage(ctx context.Context, connection model.Connection, id string) (postmail.FetchedMessage, error) {
