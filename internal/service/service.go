@@ -251,7 +251,20 @@ func (s *Service) RemoveConnection(id string) error {
 		for index, connection := range cfg.Connections {
 			if connection.ID == id {
 				if config.NativeMail(connection) || config.NativeCalendar(connection) {
-					secretName = oauthKeychainName(connection)
+					candidate := oauthKeychainName(connection)
+					shared := false
+					for otherIndex, other := range cfg.Connections {
+						if otherIndex == index {
+							continue
+						}
+						if config.ConnectionReferencesOAuthSecret(other, candidate) {
+							shared = true
+							break
+						}
+					}
+					if !shared {
+						secretName = candidate
+					}
 				}
 				cfg.Connections = append(cfg.Connections[:index], cfg.Connections[index+1:]...)
 				return cfg, nil
@@ -1937,7 +1950,15 @@ func (s *Service) getAttachmentModeSnapshot(ctx context.Context, connectionID st
 	}
 	if config.NativeMail(connection) {
 		attachment, data, err := s.getNativeAttachment(ctx, connection, loc, attachmentID, mode)
-		return attachment, data, attachmentSnapshotPosition{}, err
+		if err != nil {
+			return attachment, data, attachmentSnapshotPosition{}, err
+		}
+		cacheID := mailCacheID(connection)
+		if cacheID == "" || len(data) == 0 {
+			return attachment, data, attachmentSnapshotPosition{}, nil
+		}
+		digest := sha256.Sum256(data)
+		return attachment, data, attachmentSnapshotPosition{CacheID: cacheID, UIDValidity: 1, Digest: hex.EncodeToString(digest[:])}, nil
 	}
 	folder, uid := loc.Folder, loc.UID
 	if folder == "" {
@@ -2034,7 +2055,7 @@ func (s *Service) GetAttachmentSnapshotMode(ctx context.Context, connectionID st
 		if mailCacheID(connection) != snapshot.CacheID {
 			return model.Attachment{}, nil, "", fmt.Errorf("attachment continuation provider changed; restart the download")
 		}
-		attachment, data, ok := s.cachedAttachmentSnapshotFor(ctx, loc.Folder, loc.UID, attachmentID, snapshot)
+		attachment, data, ok := s.cachedAttachmentSnapshotForLocator(ctx, connection, loc, attachmentID, snapshot)
 		if !ok {
 			return model.Attachment{}, nil, "", fmt.Errorf("attachment continuation expired; restart the download")
 		}
@@ -2047,7 +2068,7 @@ func (s *Service) GetAttachmentSnapshotMode(ctx context.Context, connectionID st
 	if snapshot.CacheID == "" || snapshot.UIDValidity == 0 {
 		return attachment, data, "", nil
 	}
-	if _, _, ok := s.cachedAttachmentSnapshotFor(ctx, loc.Folder, loc.UID, attachmentID, snapshot); !ok {
+	if _, _, ok := s.cachedAttachmentSnapshotForLocator(ctx, connection, loc, attachmentID, snapshot); !ok {
 		return attachment, data, "", nil
 	}
 	cursor, err = pagination.Encode("attachment", scope, snapshot)
@@ -3415,11 +3436,22 @@ func (s *Service) cachedAttachmentForSnapshot(ctx context.Context, connection mo
 }
 
 func (s *Service) cachedAttachmentSnapshotFor(ctx context.Context, folder string, uid uint32, attachmentID string, snapshot attachmentSnapshotPosition) (model.Attachment, []byte, bool) {
+	return s.cachedAttachmentSnapshot(ctx, MessageLocator{Folder: folder, UID: uid}, attachmentID, snapshot, false)
+}
+
+func (s *Service) cachedAttachmentSnapshotForLocator(ctx context.Context, connection model.Connection, loc MessageLocator, attachmentID string, snapshot attachmentSnapshotPosition) (model.Attachment, []byte, bool) {
+	return s.cachedAttachmentSnapshot(ctx, loc, attachmentID, snapshot, config.NativeMail(connection))
+}
+
+func (s *Service) cachedAttachmentSnapshot(ctx context.Context, loc MessageLocator, attachmentID string, snapshot attachmentSnapshotPosition, native bool) (model.Attachment, []byte, bool) {
 	ledger, err := s.ensureState()
 	if err != nil {
 		return model.Attachment{}, nil, false
 	}
-	key := messageCacheKey(snapshot.CacheID, folder, snapshot.UIDValidity, uid) + "/" + attachmentID
+	key := messageCacheKey(snapshot.CacheID, loc.Folder, snapshot.UIDValidity, loc.UID) + "/" + attachmentID
+	if native {
+		key = nativeAttachmentCacheKey(snapshot.CacheID, loc.ID, attachmentID)
+	}
 	entry, ok, err := ledger.Get(ctx, "attachment", key, false)
 	if err != nil || !ok {
 		return model.Attachment{}, nil, false

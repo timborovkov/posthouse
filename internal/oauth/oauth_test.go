@@ -139,6 +139,15 @@ func TestGmailMailScopesAreSingleRestrictedModify(t *testing.T) {
 	if len(withCalendar) != 3 || withCalendar[0] != "https://www.googleapis.com/auth/gmail.modify" {
 		t.Fatalf("gmail mail+calendar scopes = %#v", withCalendar)
 	}
+	calendarOnly := Scopes(ProviderGoogle, false, true)
+	if len(calendarOnly) != 3 || calendarOnly[0] != "https://www.googleapis.com/auth/userinfo.email" {
+		t.Fatalf("gmail calendar-only scopes = %#v", calendarOnly)
+	}
+	for _, scope := range calendarOnly {
+		if scope == "https://www.googleapis.com/auth/gmail.modify" {
+			t.Fatal("calendar-only Google scopes requested gmail.modify")
+		}
+	}
 }
 
 func TestCheckBrowserURLRejectsNonHTTP(t *testing.T) {
@@ -166,6 +175,40 @@ func TestLoopbackRejectsNonLoopbackBind(t *testing.T) {
 	_, err = Loopback(context.Background(), cfg)
 	if err == nil || !strings.Contains(err.Error(), "127.0.0.1") {
 		t.Fatalf("Loopback non-loopback = %v", err)
+	}
+}
+
+func TestHTTPClientPersistsRotatedRefreshToken(t *testing.T) {
+	var persisted string
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/token" {
+			writer.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(writer).Encode(map[string]any{
+				"access_token": "graph-access", "refresh_token": "refresh-rotated", "token_type": "Bearer", "expires_in": 3600,
+			})
+			return
+		}
+		writer.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	cfg := Config{
+		Credentials:    Credentials{ClientID: "public-client"},
+		Endpoint:       MicrosoftEndpoint,
+		HTTPClient:     server.Client(),
+		PersistRefresh: func(next string) error { persisted = next; return nil },
+	}
+	cfg.Endpoint.TokenURL = server.URL + "/token"
+	client, err := HTTPClient(context.Background(), cfg, "refresh-original")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := client.Get(server.URL + "/me")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if persisted != "refresh-rotated" {
+		t.Fatal("HTTPClient did not persist the rotated refresh token")
 	}
 }
 

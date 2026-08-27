@@ -310,3 +310,104 @@ func TestPutEventSerializesAttendeesAndAllDay(t *testing.T) {
 		t.Fatalf("payload = %#v", body)
 	}
 }
+
+func TestListEventsUsesFullBodyContent(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/token" {
+			writer.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(writer).Encode(map[string]any{"access_token": "graph-access", "token_type": "Bearer", "expires_in": 3600})
+			return
+		}
+		if request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/me/events") {
+			if !strings.Contains(request.URL.RawQuery, "body") {
+				http.Error(writer, "missing body select", http.StatusBadRequest)
+				return
+			}
+			_ = json.NewEncoder(writer).Encode(map[string]any{"value": []map[string]any{{
+				"id": "evt-1", "iCalUId": "uid-1", "subject": "Planning",
+				"bodyPreview": "Dana, this is the time",
+				"body":        map[string]string{"contentType": "text", "content": "Dana, this is the time you selected for our orientation. Please bring the notes."},
+				"start":       map[string]string{"dateTime": "2026-08-17T09:00:00", "timeZone": "UTC"},
+				"end":         map[string]string{"dateTime": "2026-08-17T10:00:00", "timeZone": "UTC"},
+			}}})
+			return
+		}
+		http.NotFound(writer, request)
+	}))
+	defer server.Close()
+	t.Setenv("POSTHOUSE_MICROSOFT_CLIENT_ID", "public-client")
+	origBase, origToken := APIBase, TokenURL
+	APIBase, TokenURL = server.URL, server.URL+"/token"
+	defer func() { APIBase, TokenURL = origBase, origToken }()
+	events, err := ListEvents(context.Background(), model.Connection{ID: "ms", Calendar: &model.CalendarConfig{Kind: "microsoft", ResolvedSecret: "refresh-ms"}}, time.Time{}, time.Time{}, "")
+	if err != nil || len(events) != 1 || !strings.Contains(events[0].Description, "Please bring the notes") {
+		t.Fatalf("ListEvents body = %#v, %v", events, err)
+	}
+}
+
+func TestSearchKeepsCustomFolderQueryHits(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/token" {
+			writer.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(writer).Encode(map[string]any{"access_token": "graph-access", "token_type": "Bearer", "expires_in": 3600})
+			return
+		}
+		if strings.Contains(request.URL.Path, "/mailFolders/AAMkCustom/messages") {
+			_ = json.NewEncoder(writer).Encode(map[string]any{"value": []map[string]any{{
+				"id": "custom-1", "subject": "renewal", "receivedDateTime": "2026-08-17T12:00:00Z", "isRead": true,
+				"parentFolderId": "folder-custom",
+			}}})
+			return
+		}
+		if strings.HasPrefix(request.URL.Path, "/me/mailFolders/") {
+			_ = json.NewEncoder(writer).Encode(map[string]any{"id": "folder-well-known"})
+			return
+		}
+		http.NotFound(writer, request)
+	}))
+	defer server.Close()
+	t.Setenv("POSTHOUSE_MICROSOFT_CLIENT_ID", "public-client")
+	origBase, origToken := APIBase, TokenURL
+	APIBase, TokenURL = server.URL, server.URL+"/token"
+	defer func() { APIBase, TokenURL = origBase, origToken }()
+	result, err := Search(context.Background(), model.Connection{ID: "ms", Mail: &model.MailConfig{Kind: "microsoft", ResolvedSecret: "refresh-ms"}}, postmail.SearchOptions{Folder: "AAMkCustom", Query: "renewal", Limit: 10})
+	if err != nil || len(result.Messages) != 1 || result.Messages[0].ID != "custom-1" || result.Messages[0].Folder != "AAMkCustom" {
+		t.Fatalf("Search custom folder = %#v, %v", result, err)
+	}
+}
+
+func TestSearchUnreadFilterIncludesOrderedReceivedDateTime(t *testing.T) {
+	var filter, order string
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/token" {
+			writer.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(writer).Encode(map[string]any{"access_token": "graph-access", "token_type": "Bearer", "expires_in": 3600})
+			return
+		}
+		if strings.Contains(request.URL.Path, "/mailFolders/inbox/messages") {
+			filter = request.URL.Query().Get("$filter")
+			order = request.URL.Query().Get("$orderby")
+			if strings.Contains(filter, "isRead") && (!strings.Contains(filter, "receivedDateTime") || strings.Index(filter, "receivedDateTime") > strings.Index(filter, "isRead")) {
+				http.Error(writer, `{"error":{"code":"InefficientFilter","message":"The restriction or sort order is too complex for this operation."}}`, http.StatusBadRequest)
+				return
+			}
+			_ = json.NewEncoder(writer).Encode(map[string]any{"value": []map[string]any{{
+				"id": "unread-1", "subject": "Hello", "receivedDateTime": "2026-08-17T12:00:00Z", "isRead": false,
+			}}})
+			return
+		}
+		http.NotFound(writer, request)
+	}))
+	defer server.Close()
+	t.Setenv("POSTHOUSE_MICROSOFT_CLIENT_ID", "public-client")
+	origBase, origToken := APIBase, TokenURL
+	APIBase, TokenURL = server.URL, server.URL+"/token"
+	defer func() { APIBase, TokenURL = origBase, origToken }()
+	result, err := Search(context.Background(), model.Connection{ID: "ms", Mail: &model.MailConfig{Kind: "microsoft", ResolvedSecret: "refresh-ms"}}, postmail.SearchOptions{Unread: true, Limit: 10})
+	if err != nil || len(result.Messages) != 1 {
+		t.Fatalf("Search unread = %#v, %v filter=%q order=%q", result, err, filter, order)
+	}
+	if !strings.Contains(order, "receivedDateTime") || !strings.Contains(filter, "isRead eq false") || !strings.Contains(filter, "receivedDateTime ge") {
+		t.Fatalf("unread query filter=%q order=%q", filter, order)
+	}
+}

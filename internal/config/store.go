@@ -687,6 +687,13 @@ func rejectAndReturn(value string) (string, error) {
 	return value, nil
 }
 
+func PersistOAuthRefresh(connection model.Connection) func(string) error {
+	name := OAuthSecretName(connection)
+	return func(value string) error {
+		return SetKeychainSecret(name, value)
+	}
+}
+
 func SetKeychainSecret(name, value string) error {
 	if err := validateSecretName(name); err != nil {
 		return err

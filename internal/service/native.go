@@ -135,13 +135,7 @@ func (s *Service) AuthorizeConnection(ctx context.Context, id string, device boo
 }
 
 func oauthKeychainName(connection model.Connection) string {
-	if connection.Mail != nil && strings.TrimSpace(connection.Mail.Secret.Keychain) != "" {
-		return connection.Mail.Secret.Keychain
-	}
-	if connection.Calendar != nil && strings.TrimSpace(connection.Calendar.Secret.Keychain) != "" {
-		return connection.Calendar.Secret.Keychain
-	}
-	return "posthouse-" + connection.ID
+	return config.OAuthSecretName(connection)
 }
 
 func authorizedIdentity(ctx context.Context, s *Service, connection model.Connection) ([]string, error) {
@@ -157,7 +151,13 @@ func authorizedIdentity(ctx context.Context, s *Service, connection model.Connec
 	}
 	switch config.NativeKind(connection) {
 	case config.MailKindGmail:
-		email, err := gmail.ProfileEmail(ctx, connection)
+		var email string
+		var err error
+		if config.NativeMail(connection) {
+			email, err = gmail.ProfileEmail(ctx, connection)
+		} else {
+			email, err = gmail.UserInfoEmail(ctx, connection)
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -233,7 +233,12 @@ func (s *Service) doctorNative(ctx context.Context, connection model.Connection,
 	if provider == oauth.ProviderMicrosoft && microsoft.TokenURL != "" {
 		endpoint.TokenURL = microsoft.TokenURL
 	}
-	token, refreshErr := oauth.Refresh(ctx, oauth.Config{Credentials: creds, Endpoint: endpoint, Scopes: oauth.Scopes(provider, config.NativeMail(connection), config.NativeCalendar(connection))}, secret)
+	token, refreshErr := oauth.Refresh(ctx, oauth.Config{
+		Credentials:    creds,
+		Endpoint:       endpoint,
+		Scopes:         oauth.Scopes(provider, config.NativeMail(connection), config.NativeCalendar(connection)),
+		PersistRefresh: config.PersistOAuthRefresh(connection),
+	}, secret)
 	if refreshErr != nil {
 		add("oauth.token", fmt.Errorf("refresh access token failed"))
 		return
@@ -241,6 +246,9 @@ func (s *Service) doctorNative(ctx context.Context, connection model.Connection,
 	if token == nil || token.AccessToken == "" {
 		add("oauth.token", fmt.Errorf("refresh access token failed"))
 		return
+	}
+	if token.RefreshToken != "" {
+		secret = token.RefreshToken
 	}
 	add("oauth.token", nil)
 	if config.NativeMail(connection) {
@@ -299,6 +307,9 @@ func executeNativeMail(ctx context.Context, connection model.Connection, kind st
 		id := nativeMessageID(action)
 		if id == "" {
 			return nil, fmt.Errorf("message id is required")
+		}
+		if err := assertNativeDraftVersion(ctx, connection, id, action.Precondition); err != nil {
+			return nil, err
 		}
 		switch kind {
 		case "mail.mark":
@@ -528,7 +539,7 @@ func assertNativeDraftVersion(ctx context.Context, connection model.Connection, 
 		return err
 	}
 	if expected.Version == "" || current != expected.Version {
-		return fmt.Errorf("draft changed since it was prepared; prepare it again")
+		return fmt.Errorf("changed since it was prepared; prepare it again")
 	}
 	return nil
 }

@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/timborovkov/posthouse/internal/config"
 	postmail "github.com/timborovkov/posthouse/internal/mail"
 	"github.com/timborovkov/posthouse/internal/model"
 	"github.com/timborovkov/posthouse/internal/oauth"
@@ -23,6 +24,7 @@ import (
 
 var APIBase = "https://gmail.googleapis.com/gmail/v1"
 var CalendarAPIBase = "https://www.googleapis.com/calendar/v3"
+var UserInfoURL = "https://openidconnect.googleapis.com/v1/userinfo"
 var TokenURL string
 
 const nativeUIDValidity uint32 = 1
@@ -63,6 +65,9 @@ func Search(ctx context.Context, connection model.Connection, options postmail.S
 	query := url.Values{}
 	query.Set("q", searchQuery(options))
 	query.Set("maxResults", strconv.Itoa(options.Limit+1))
+	if includeSpamTrash(options.Folder) {
+		query.Set("includeSpamTrash", "true")
+	}
 	pageToken := options.PageToken
 	messages := make([]model.Message, 0, options.Limit+1)
 	nextPage := ""
@@ -86,6 +91,12 @@ func Search(ctx context.Context, connection model.Connection, options postmail.S
 		}
 		for _, message := range page {
 			if !afterCursor(message, options) {
+				continue
+			}
+			if !options.Since.IsZero() && message.ReceivedAt.Before(options.Since) {
+				continue
+			}
+			if !options.Before.IsZero() && !message.ReceivedAt.Before(options.Before) {
 				continue
 			}
 			messages = append(messages, message)
@@ -213,6 +224,24 @@ func ProfileEmail(ctx context.Context, connection model.Connection) (string, err
 	email := strings.TrimSpace(profile.EmailAddress)
 	if email == "" {
 		return "", fmt.Errorf("gmail profile did not include an email address")
+	}
+	return email, nil
+}
+
+func UserInfoEmail(ctx context.Context, connection model.Connection) (string, error) {
+	client, err := httpClient(ctx, connection)
+	if err != nil {
+		return "", err
+	}
+	var profile struct {
+		Email string `json:"email"`
+	}
+	if err := doJSON(ctx, client, http.MethodGet, UserInfoURL, nil, &profile); err != nil {
+		return "", err
+	}
+	email := strings.TrimSpace(profile.Email)
+	if email == "" {
+		return "", fmt.Errorf("Google userinfo did not include an email address")
 	}
 	return email, nil
 }
@@ -618,10 +647,10 @@ func searchQuery(options postmail.SearchOptions) string {
 		parts = append(parts, "is:unread")
 	}
 	if !options.Since.IsZero() {
-		parts = append(parts, "after:"+options.Since.UTC().Format("2006/01/02"))
+		parts = append(parts, "after:"+strconv.FormatInt(options.Since.UTC().Unix(), 10))
 	}
 	if !options.Before.IsZero() {
-		parts = append(parts, "before:"+options.Before.UTC().Format("2006/01/02"))
+		parts = append(parts, "before:"+strconv.FormatInt(options.Before.UTC().Unix(), 10))
 	}
 	switch strings.ToUpper(options.Folder) {
 	case "", "INBOX":
@@ -632,8 +661,19 @@ func searchQuery(options postmail.SearchOptions) string {
 		parts = append(parts, "in:drafts")
 	case "TRASH":
 		parts = append(parts, "in:trash")
+	case "SPAM", "JUNK":
+		parts = append(parts, "in:spam")
 	}
 	return strings.Join(parts, " ")
+}
+
+func includeSpamTrash(folder string) bool {
+	switch strings.ToUpper(strings.TrimSpace(folder)) {
+	case "TRASH", "SPAM", "JUNK":
+		return true
+	default:
+		return false
+	}
 }
 
 func afterCursor(message model.Message, options postmail.SearchOptions) bool {
@@ -717,7 +757,12 @@ func httpClient(ctx context.Context, connection model.Connection) (*http.Client,
 	if TokenURL != "" {
 		endpoint.TokenURL = TokenURL
 	}
-	return oauth.HTTPClient(ctx, oauth.Config{Credentials: creds, Endpoint: endpoint, Scopes: oauth.MailScopes(oauth.ProviderGoogle, true)}, secret)
+	return oauth.HTTPClient(ctx, oauth.Config{
+		Credentials:    creds,
+		Endpoint:       endpoint,
+		Scopes:         oauth.MailScopes(oauth.ProviderGoogle, true),
+		PersistRefresh: config.PersistOAuthRefresh(connection),
+	}, secret)
 }
 
 func resolvedRefreshToken(connection model.Connection) string {

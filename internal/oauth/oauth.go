@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/oauth2"
@@ -54,15 +55,16 @@ type Credentials struct {
 }
 
 type Config struct {
-	Provider     string
-	Credentials  Credentials
-	Scopes       []string
-	Endpoint     oauth2.Endpoint
-	HTTPClient   *http.Client
-	OpenBrowser  func(string) error
-	PrintDevice  func(verificationURL, userCode string)
-	Listen       func(context.Context) (net.Listener, error)
-	RedirectPath string
+	Provider       string
+	Credentials    Credentials
+	Scopes         []string
+	Endpoint       oauth2.Endpoint
+	HTTPClient     *http.Client
+	OpenBrowser    func(string) error
+	PrintDevice    func(verificationURL, userCode string)
+	Listen         func(context.Context) (net.Listener, error)
+	RedirectPath   string
+	PersistRefresh func(string) error
 }
 
 func CredentialsFor(provider string) (Credentials, error) {
@@ -243,6 +245,9 @@ func Refresh(ctx context.Context, cfg Config, refreshToken string) (*oauth2.Toke
 	if err != nil {
 		return nil, fmt.Errorf("refresh access token: %w", err)
 	}
+	if err := persistRotatedRefresh(cfg.PersistRefresh, refreshToken, token.RefreshToken); err != nil {
+		return nil, err
+	}
 	return token, nil
 }
 
@@ -250,8 +255,45 @@ func HTTPClient(ctx context.Context, cfg Config, refreshToken string) (*http.Cli
 	if strings.TrimSpace(refreshToken) == "" {
 		return nil, fmt.Errorf("refresh token is missing")
 	}
-	base := cfg.oauth2().Client(contextClient(ctx, cfg.HTTPClient), &oauth2.Token{RefreshToken: refreshToken})
-	return base, nil
+	ctx = contextClient(ctx, cfg.HTTPClient)
+	source := cfg.oauth2().TokenSource(ctx, &oauth2.Token{RefreshToken: refreshToken})
+	if cfg.PersistRefresh != nil {
+		source = &persistTokenSource{inner: source, current: refreshToken, persist: cfg.PersistRefresh}
+	}
+	return oauth2.NewClient(ctx, source), nil
+}
+
+type persistTokenSource struct {
+	inner   oauth2.TokenSource
+	current string
+	persist func(string) error
+	mu      sync.Mutex
+}
+
+func (s *persistTokenSource) Token() (*oauth2.Token, error) {
+	token, err := s.inner.Token()
+	if err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := persistRotatedRefresh(s.persist, s.current, token.RefreshToken); err != nil {
+		return nil, err
+	}
+	if token.RefreshToken != "" {
+		s.current = token.RefreshToken
+	}
+	return token, nil
+}
+
+func persistRotatedRefresh(persist func(string) error, current, next string) error {
+	if persist == nil || next == "" || next == current {
+		return nil
+	}
+	if err := persist(next); err != nil {
+		return fmt.Errorf("persist rotated refresh token: %w", err)
+	}
+	return nil
 }
 
 func Scopes(provider string, mail, calendar bool) []string {
@@ -275,6 +317,11 @@ func Scopes(provider string, mail, calendar bool) []string {
 			// trash. Do not also request gmail.readonly / gmail.send / gmail.compose —
 			// those stack extra restricted/sensitive scopes on the consent screen.
 			scopes = append(scopes, "https://www.googleapis.com/auth/gmail.modify")
+		}
+		if calendar && !mail {
+			// Calendar-only tokens cannot call Gmail's profile API. userinfo.email is
+			// non-restricted and covers identity matching during authorize.
+			scopes = append(scopes, "https://www.googleapis.com/auth/userinfo.email")
 		}
 		if calendar {
 			scopes = append(scopes, "https://www.googleapis.com/auth/calendar.readonly", "https://www.googleapis.com/auth/calendar.events")

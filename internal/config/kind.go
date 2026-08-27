@@ -72,3 +72,27 @@ func CanSendMail(connection model.Connection) bool {
 	}
 	return connection.Mail.SMTP.Address != ""
 }
+
+func OAuthSecretName(connection model.Connection) string {
+	if connection.Mail != nil && strings.TrimSpace(connection.Mail.Secret.Keychain) != "" {
+		return strings.TrimSpace(connection.Mail.Secret.Keychain)
+	}
+	if connection.Calendar != nil && strings.TrimSpace(connection.Calendar.Secret.Keychain) != "" {
+		return strings.TrimSpace(connection.Calendar.Secret.Keychain)
+	}
+	return "posthouse-" + connection.ID
+}
+
+func ConnectionReferencesOAuthSecret(connection model.Connection, name string) bool {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return false
+	}
+	if connection.Mail != nil && strings.TrimSpace(connection.Mail.Secret.Keychain) == name {
+		return true
+	}
+	if connection.Calendar != nil && strings.TrimSpace(connection.Calendar.Secret.Keychain) == name {
+		return true
+	}
+	return false
+}

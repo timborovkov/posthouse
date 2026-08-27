@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -261,5 +262,76 @@ func TestUnreadCountUsesLabel(t *testing.T) {
 	count, err := UnreadCount(context.Background(), model.Connection{ID: "gmail-work", Mail: &model.MailConfig{Kind: "gmail", ResolvedSecret: "refresh"}}, "")
 	if err != nil || count != 4 {
 		t.Fatalf("UnreadCount = %d, %v", count, err)
+	}
+}
+
+func TestSearchQueryUsesUnixSeconds(t *testing.T) {
+	since := time.Date(2026, 8, 17, 15, 4, 5, 0, time.UTC)
+	before := since.Add(time.Hour)
+	query := searchQuery(postmail.SearchOptions{Since: since, Before: before, Folder: "INBOX"})
+	if !strings.Contains(query, "after:"+strconv.FormatInt(since.Unix(), 10)) || !strings.Contains(query, "before:"+strconv.FormatInt(before.Unix(), 10)) {
+		t.Fatalf("searchQuery = %q", query)
+	}
+}
+
+func TestSearchTrashSetsIncludeSpamTrash(t *testing.T) {
+	var include string
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/token" {
+			writer.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(writer).Encode(map[string]any{"access_token": "ya29.access", "token_type": "Bearer", "expires_in": 3600})
+			return
+		}
+		if request.URL.Path == "/gmail/v1/users/me/messages" {
+			include = request.URL.Query().Get("includeSpamTrash")
+			if !strings.Contains(request.URL.Query().Get("q"), "in:trash") {
+				http.Error(writer, "missing in:trash", http.StatusBadRequest)
+				return
+			}
+			_ = json.NewEncoder(writer).Encode(map[string]any{"messages": []map[string]string{}})
+			return
+		}
+		http.NotFound(writer, request)
+	}))
+	defer server.Close()
+	t.Setenv("POSTHOUSE_GOOGLE_CLIENT_ID", "desktop.apps.googleusercontent.com")
+	origBase, origToken := APIBase, TokenURL
+	APIBase, TokenURL = server.URL+"/gmail/v1", server.URL+"/token"
+	defer func() { APIBase, TokenURL = origBase, origToken }()
+	_, err := Search(context.Background(), model.Connection{ID: "gmail-work", Mail: &model.MailConfig{Kind: "gmail", ResolvedSecret: "refresh"}}, postmail.SearchOptions{Folder: "TRASH", Limit: 10})
+	if err != nil || include != "true" {
+		t.Fatalf("includeSpamTrash=%q err=%v", include, err)
+	}
+}
+
+func TestSearchDropsSameDayMessagesBeforeSince(t *testing.T) {
+	early := time.Date(2026, 8, 17, 8, 0, 0, 0, time.UTC)
+	since := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/token" {
+			writer.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(writer).Encode(map[string]any{"access_token": "ya29.access", "token_type": "Bearer", "expires_in": 3600})
+			return
+		}
+		switch {
+		case request.Method == http.MethodGet && request.URL.Path == "/gmail/v1/users/me/messages":
+			_ = json.NewEncoder(writer).Encode(map[string]any{"messages": []map[string]string{{"id": "early"}}})
+		case request.Method == http.MethodGet && strings.Contains(request.URL.Path, "/messages/early"):
+			_ = json.NewEncoder(writer).Encode(map[string]any{
+				"id": "early", "internalDate": strconv.FormatInt(early.UnixMilli(), 10), "labelIds": []string{"INBOX"},
+				"payload": map[string]any{"headers": []map[string]string{{"name": "Subject", "value": "Too early"}}},
+			})
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+	t.Setenv("POSTHOUSE_GOOGLE_CLIENT_ID", "desktop.apps.googleusercontent.com")
+	origBase, origToken := APIBase, TokenURL
+	APIBase, TokenURL = server.URL+"/gmail/v1", server.URL+"/token"
+	defer func() { APIBase, TokenURL = origBase, origToken }()
+	result, err := Search(context.Background(), model.Connection{ID: "gmail-work", Mail: &model.MailConfig{Kind: "gmail", ResolvedSecret: "refresh"}}, postmail.SearchOptions{Since: since, Limit: 10})
+	if err != nil || len(result.Messages) != 0 {
+		t.Fatalf("Search Since filtered = %#v, %v", result, err)
 	}
 }

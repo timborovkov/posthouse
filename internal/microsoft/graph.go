@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/timborovkov/posthouse/internal/config"
 	postmail "github.com/timborovkov/posthouse/internal/mail"
 	"github.com/timborovkov/posthouse/internal/model"
 	"github.com/timborovkov/posthouse/internal/oauth"
@@ -59,7 +60,11 @@ type graphEvent struct {
 	ICalUID     string `json:"iCalUId"`
 	Subject     string `json:"subject"`
 	BodyPreview string `json:"bodyPreview"`
-	Location    *struct {
+	Body        *struct {
+		ContentType string `json:"contentType"`
+		Content     string `json:"content"`
+	} `json:"body"`
+	Location *struct {
 		DisplayName string `json:"displayName"`
 	} `json:"location"`
 	Start     *graphDateTime  `json:"start"`
@@ -95,17 +100,19 @@ func Search(ctx context.Context, connection model.Connection, options postmail.S
 	values.Set("$select", "id,subject,bodyPreview,receivedDateTime,isRead,flag,hasAttachments,internetMessageId,from,toRecipients,parentFolderId")
 	if options.Query == "" {
 		values.Set("$orderby", "receivedDateTime desc")
-		filters := make([]string, 0, 3)
-		if options.Unread {
-			filters = append(filters, "isRead eq false")
-		}
-		if !options.Since.IsZero() {
-			filters = append(filters, "receivedDateTime ge "+options.Since.UTC().Format(time.RFC3339))
-		}
-		if !options.Before.IsZero() {
-			filters = append(filters, "receivedDateTime lt "+options.Before.UTC().Format(time.RFC3339))
-		}
-		if len(filters) > 0 {
+		if options.Unread || !options.Since.IsZero() || !options.Before.IsZero() {
+			// Graph InefficientFilter: $orderby properties must appear first in $filter.
+			since := "1970-01-01T00:00:00Z"
+			if !options.Since.IsZero() {
+				since = options.Since.UTC().Format(time.RFC3339)
+			}
+			filters := []string{"receivedDateTime ge " + since}
+			if !options.Before.IsZero() {
+				filters = append(filters, "receivedDateTime lt "+options.Before.UTC().Format(time.RFC3339))
+			}
+			if options.Unread {
+				filters = append(filters, "isRead eq false")
+			}
 			values.Set("$filter", strings.Join(filters, " and "))
 		}
 	} else {
@@ -123,14 +130,7 @@ func Search(ctx context.Context, connection model.Connection, options postmail.S
 			return postmail.SearchResult{}, err
 		}
 		for _, item := range listed.Value {
-			folder := listedFolder
-			if options.Query != "" && item.ParentFolderID != "" {
-				folder = folderFromParent(ctx, client, connection.ID, item.ParentFolderID)
-				if canonicalMailFolder(folder) != listedFolder {
-					continue
-				}
-			}
-			message := item.model(connection.ID, folder)
+			message := item.model(connection.ID, listedFolder)
 			if options.Query != "" {
 				if options.Unread && !message.Unread {
 					continue
@@ -357,7 +357,7 @@ func ListEvents(ctx context.Context, connection model.Connection, start, end tim
 		return nil, err
 	}
 	values := url.Values{}
-	values.Set("$select", "id,iCalUId,subject,bodyPreview,location,start,end,isAllDay,changeKey,attendees")
+	values.Set("$select", "id,iCalUId,subject,body,bodyPreview,location,start,end,isAllDay,changeKey,attendees")
 	values.Set("$top", "1000")
 	endpoint := APIBase + "/me/events"
 	if !start.IsZero() && !end.IsZero() {
@@ -379,7 +379,7 @@ func ListEvents(ctx context.Context, connection model.Connection, start, end tim
 			return nil, err
 		}
 		for _, item := range listed.Value {
-			if query != "" && !strings.Contains(strings.ToLower(item.Subject+" "+item.BodyPreview), strings.ToLower(query)) {
+			if query != "" && !strings.Contains(strings.ToLower(item.Subject+" "+item.description()), strings.ToLower(query)) {
 				continue
 			}
 			events = append(events, item.model(connection.ID))
@@ -474,7 +474,7 @@ func (item graphEvent) model(connectionID string) model.Event {
 	if etag == "" {
 		etag = item.ChangeKey
 	}
-	event := model.Event{ConnectionID: connectionID, ID: id, Href: item.ID, Title: item.Subject, Description: item.BodyPreview, AllDay: item.IsAllDay, ETag: etag}
+	event := model.Event{ConnectionID: connectionID, ID: id, Href: item.ID, Title: item.Subject, Description: item.description(), AllDay: item.IsAllDay, ETag: etag}
 	if item.Location != nil {
 		event.Location = item.Location.DisplayName
 	}
@@ -486,6 +486,13 @@ func (item graphEvent) model(connectionID string) model.Event {
 		}
 	}
 	return event
+}
+
+func (item graphEvent) description() string {
+	if item.Body != nil && strings.TrimSpace(item.Body.Content) != "" {
+		return item.Body.Content
+	}
+	return item.BodyPreview
 }
 
 func graphAttendees(values []string) []map[string]any {
@@ -651,7 +658,12 @@ func httpClient(ctx context.Context, connection model.Connection) (*http.Client,
 	if TokenURL != "" {
 		endpoint.TokenURL = TokenURL
 	}
-	return oauth.HTTPClient(ctx, oauth.Config{Credentials: creds, Endpoint: endpoint, Scopes: oauth.MailScopes(oauth.ProviderMicrosoft, true)}, secret)
+	return oauth.HTTPClient(ctx, oauth.Config{
+		Credentials:    creds,
+		Endpoint:       endpoint,
+		Scopes:         oauth.MailScopes(oauth.ProviderMicrosoft, true),
+		PersistRefresh: config.PersistOAuthRefresh(connection),
+	}, secret)
 }
 
 func doJSON(ctx context.Context, client *http.Client, method, rawURL string, body any, dest any) error {

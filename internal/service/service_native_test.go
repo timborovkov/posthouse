@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -418,5 +419,178 @@ func TestNativeUnreadCountsUseBackend(t *testing.T) {
 	summaries, err := application.UnreadCounts(context.Background(), model.Selector{}, "")
 	if err != nil || len(summaries) != 1 || summaries[0].Unread != 7 || summaries[0].Error != "" {
 		t.Fatalf("UnreadCounts = %#v err=%v", summaries, err)
+	}
+}
+
+func TestRemoveNativeConnectionKeepsSharedToken(t *testing.T) {
+	keyring.MockInit()
+	t.Setenv("POSTHOUSE_SECRETS_DIR", t.TempDir())
+	application := serviceWithConnections(t,
+		model.Connection{ID: "ms-work", Name: "Work", Mail: &model.MailConfig{Kind: "microsoft", Secret: model.SecretRef{Keychain: "shared-ms"}}},
+		model.Connection{ID: "ms-home", Name: "Home", Mail: &model.MailConfig{Kind: "microsoft", Secret: model.SecretRef{Keychain: "shared-ms"}}},
+	)
+	if err := config.SetKeychainSecret("shared-ms", "refresh-shared"); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.RemoveConnection("ms-work"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := config.ResolveSecret(model.SecretRef{Keychain: "shared-ms"}); err != nil {
+		t.Fatal("shared OAuth token was deleted while another connection still referenced it")
+	}
+}
+
+func TestNativeMailActionRejectsStaleSnapshot(t *testing.T) {
+	var history string
+	var trashed bool
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/token" {
+			writer.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(writer).Encode(map[string]any{"access_token": "ya29.access", "token_type": "Bearer", "expires_in": 3600})
+			return
+		}
+		switch {
+		case request.Method == http.MethodGet && strings.Contains(request.URL.Path, "/messages/"):
+			_ = json.NewEncoder(writer).Encode(map[string]any{"id": "msg-1", "historyId": history})
+		case strings.HasSuffix(request.URL.Path, "/trash"):
+			trashed = true
+			_ = json.NewEncoder(writer).Encode(map[string]any{"id": "msg-1"})
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+	t.Setenv("POSTHOUSE_GOOGLE_CLIENT_ID", "desktop.apps.googleusercontent.com")
+	t.Setenv("GMAIL_REFRESH", "refresh-secret")
+	origBase, origToken := gmail.APIBase, gmail.TokenURL
+	gmail.APIBase, gmail.TokenURL = server.URL+"/gmail/v1", server.URL+"/token"
+	defer func() { gmail.APIBase, gmail.TokenURL = origBase, origToken }()
+	application := serviceWithConnections(t, model.Connection{
+		ID: "gmail-work", Name: "Gmail", Identity: model.Identity{Email: "me@acme.test"},
+		Mail: &model.MailConfig{Kind: "gmail", Secret: model.SecretRef{Env: "GMAIL_REFRESH"}},
+	})
+	history = "1001"
+	action, err := application.PrepareMailAction(context.Background(), "gmail-work", "mail.trash", MailAction{ID: "msg-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	history = "2002"
+	if _, err := application.ExecuteOperation(context.Background(), action.Token); err == nil || trashed {
+		t.Fatalf("stale native mail action executed: err=%v trashed=%v", err, trashed)
+	}
+}
+
+func TestNativeAttachmentSnapshotReturnsCursor(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", "0000000000000000000000000000000000000000000000000000000000000000")
+	raw := []byte("MIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=part\r\n\r\n--part\r\nContent-Type: text/plain\r\n\r\nmessage body\r\n--part\r\nContent-Type: text/plain; name=notes.txt\r\nContent-Disposition: attachment; filename=notes.txt\r\n\r\nattached notes\r\n--part--\r\n")
+	encoded := base64.RawURLEncoding.EncodeToString(raw)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/token" {
+			writer.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(writer).Encode(map[string]any{"access_token": "ya29.access", "token_type": "Bearer", "expires_in": 3600})
+			return
+		}
+		if request.Method == http.MethodGet && strings.Contains(request.URL.Path, "/messages/msg-1") {
+			_ = json.NewEncoder(writer).Encode(map[string]any{"id": "msg-1", "raw": encoded, "labelIds": []string{"INBOX"}, "internalDate": "1152194645000"})
+			return
+		}
+		http.NotFound(writer, request)
+	}))
+	defer server.Close()
+	t.Setenv("POSTHOUSE_GOOGLE_CLIENT_ID", "desktop.apps.googleusercontent.com")
+	t.Setenv("GMAIL_REFRESH", "refresh-secret")
+	origBase, origToken := gmail.APIBase, gmail.TokenURL
+	gmail.APIBase, gmail.TokenURL = server.URL+"/gmail/v1", server.URL+"/token"
+	defer func() { gmail.APIBase, gmail.TokenURL = origBase, origToken }()
+	application := serviceWithConnections(t, model.Connection{
+		ID: "gmail-work", Name: "Gmail", Identity: model.Identity{Email: "me@acme.test"},
+		Mail: &model.MailConfig{Kind: "gmail", Secret: model.SecretRef{Env: "GMAIL_REFRESH"}},
+	})
+	ctx := context.Background()
+	detail, err := application.GetMessageContext(ctx, "gmail-work", MessageLocator{ID: "msg-1"})
+	if err != nil || len(detail.Attachments) != 1 {
+		t.Fatalf("GetMessage = %#v, %v", detail, err)
+	}
+	attachmentID := detail.Attachments[0].ID
+	_, data, cursor, err := application.GetAttachmentSnapshotMode(ctx, "gmail-work", MessageLocator{ID: "msg-1"}, attachmentID, "", "")
+	if err != nil || cursor == "" || string(data) != "attached notes" {
+		t.Fatalf("native attachment snapshot data=%q cursor=%q err=%v", data, cursor, err)
+	}
+	_, continued, continuedCursor, err := application.GetAttachmentSnapshotMode(ctx, "gmail-work", MessageLocator{ID: "msg-1"}, attachmentID, "", cursor)
+	if err != nil || continuedCursor != cursor || string(continued) != "attached notes" {
+		t.Fatalf("native attachment continuation data=%q cursor=%q err=%v", continued, continuedCursor, err)
+	}
+}
+
+func TestAuthorizeCalendarOnlyGmailUsesUserInfo(t *testing.T) {
+	keyring.MockInit()
+	t.Setenv("POSTHOUSE_SECRETS_DIR", t.TempDir())
+	t.Setenv("POSTHOUSE_GOOGLE_CLIENT_ID", "desktop.apps.googleusercontent.com")
+	var profileHits int
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/token" {
+			writer.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(writer).Encode(map[string]any{"access_token": "ya29.access", "token_type": "Bearer", "expires_in": 3600})
+			return
+		}
+		if request.URL.Path == "/userinfo" {
+			_ = json.NewEncoder(writer).Encode(map[string]any{"email": "you@gmail.com"})
+			return
+		}
+		if strings.Contains(request.URL.Path, "/users/me/profile") {
+			profileHits++
+			http.Error(writer, "gmail profile requires mail scope", http.StatusForbidden)
+			return
+		}
+		http.NotFound(writer, request)
+	}))
+	defer server.Close()
+	origBase, origToken, origUser := gmail.APIBase, gmail.TokenURL, gmail.UserInfoURL
+	gmail.APIBase, gmail.TokenURL, gmail.UserInfoURL = server.URL+"/gmail/v1", server.URL+"/token", server.URL+"/userinfo"
+	defer func() { gmail.APIBase, gmail.TokenURL, gmail.UserInfoURL = origBase, origToken, origUser }()
+	application := serviceWithConnections(t, model.Connection{
+		ID: "gmail-cal", Name: "Gmail calendar", Identity: model.Identity{Email: "you@gmail.com"},
+		Calendar: &model.CalendarConfig{Kind: "gmail"},
+	})
+	application.authorizeOAuth = func(context.Context, oauth.Config, bool) (string, error) { return "refresh-secret-value", nil }
+	if _, err := application.AuthorizeConnection(context.Background(), "gmail-cal", false); err != nil || profileHits != 0 {
+		t.Fatalf("AuthorizeConnection calendar-only = %v profileHits=%d", err, profileHits)
+	}
+}
+
+func TestMicrosoftClientPersistsRotatedRefreshToken(t *testing.T) {
+	keyring.MockInit()
+	t.Setenv("POSTHOUSE_SECRETS_DIR", t.TempDir())
+	t.Setenv("POSTHOUSE_MICROSOFT_CLIENT_ID", "public-client")
+	if err := config.SetKeychainSecret("posthouse-ms", "refresh-old"); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/token" {
+			writer.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(writer).Encode(map[string]any{
+				"access_token": "graph-access", "refresh_token": "refresh-rotated", "token_type": "Bearer", "expires_in": 3600,
+			})
+			return
+		}
+		if request.URL.Path == "/me" || strings.HasPrefix(request.URL.Path, "/me") {
+			_ = json.NewEncoder(writer).Encode(map[string]any{"mail": "me@contoso.test", "userPrincipalName": "me@contoso.test"})
+			return
+		}
+		http.NotFound(writer, request)
+	}))
+	defer server.Close()
+	origBase, origToken := microsoft.APIBase, microsoft.TokenURL
+	microsoft.APIBase, microsoft.TokenURL = server.URL, server.URL+"/token"
+	defer func() { microsoft.APIBase, microsoft.TokenURL = origBase, origToken }()
+	connection := model.Connection{
+		ID: "ms", Mail: &model.MailConfig{Kind: "microsoft", Secret: model.SecretRef{Keychain: "posthouse-ms"}, ResolvedSecret: "refresh-old"},
+	}
+	if err := microsoft.Ping(context.Background(), connection); err != nil {
+		t.Fatal(err)
+	}
+	got, err := config.ResolveSecret(model.SecretRef{Keychain: "posthouse-ms"})
+	if err != nil || got != "refresh-rotated" {
+		t.Fatal("rotated Microsoft refresh token was not persisted")
 	}
 }
