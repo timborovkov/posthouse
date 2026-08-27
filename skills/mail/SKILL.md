@@ -34,7 +34,7 @@ posthouse mail attachment --connection acme --message-id MESSAGE_ID --id ATTACH_
 posthouse mail attachment --connection acme --message-id MESSAGE_ID --id ATTACH_ID --extract-text
 ```
 
-`MESSAGE_ID` is the opaque `id` from list/search (connection + `id`). Do not invent IMAP `--uid` values for Gmail or Microsoft. Pass `--cursor` from `next_cursor` with identical filters. `--offline` = cache only; `--refresh` refuses stale fallback. `mail get` includes `markdown`. `--extract-text` is PDF-only; empty extraction is an error.
+`MESSAGE_ID` is the opaque `id` from list, search, or triage (connection + `id`). Do not invent IMAP `--uid` values for Gmail or Microsoft. Pass `--cursor` from `next_cursor` with identical filters. `--offline` = cache only; `--refresh` refuses stale fallback. `mail get` includes `markdown`. `--extract-text` is PDF-only; empty extraction is an error.
 
 ## File
 

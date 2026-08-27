@@ -22,6 +22,9 @@ var APIBase = "https://graph.microsoft.com/v1.0"
 var TokenURL string
 
 const nativeUIDValidity uint32 = 1
+const graphJSONLimit int64 = 8 << 20
+const maxEventPages = 50
+const immutableIDPrefer = `IdType="ImmutableId"`
 
 var wellKnownFolders sync.Map
 
@@ -59,9 +62,18 @@ type graphEvent struct {
 	Location    *struct {
 		DisplayName string `json:"displayName"`
 	} `json:"location"`
-	Start    *graphDateTime `json:"start"`
-	End      *graphDateTime `json:"end"`
-	IsAllDay bool           `json:"isAllDay"`
+	Start     *graphDateTime  `json:"start"`
+	End       *graphDateTime  `json:"end"`
+	IsAllDay  bool            `json:"isAllDay"`
+	ETag      string          `json:"@odata.etag"`
+	ChangeKey string          `json:"changeKey"`
+	Attendees []graphAttendee `json:"attendees"`
+}
+
+type graphAttendee struct {
+	EmailAddress struct {
+		Address string `json:"address"`
+	} `json:"emailAddress"`
 }
 
 type graphDateTime struct {
@@ -78,68 +90,74 @@ func Search(ctx context.Context, connection model.Connection, options postmail.S
 		options.Limit = 25
 	}
 	endpoint := APIBase + mailFolderPath(options.Folder) + "/messages"
-	if options.PageToken != "" {
-		endpoint = options.PageToken
+	values := url.Values{}
+	values.Set("$top", fmt.Sprint(options.Limit+1))
+	values.Set("$select", "id,subject,bodyPreview,receivedDateTime,isRead,flag,hasAttachments,internetMessageId,from,toRecipients,parentFolderId")
+	if options.Query == "" {
+		values.Set("$orderby", "receivedDateTime desc")
+		filters := make([]string, 0, 3)
+		if options.Unread {
+			filters = append(filters, "isRead eq false")
+		}
+		if !options.Since.IsZero() {
+			filters = append(filters, "receivedDateTime ge "+options.Since.UTC().Format(time.RFC3339))
+		}
+		if !options.Before.IsZero() {
+			filters = append(filters, "receivedDateTime lt "+options.Before.UTC().Format(time.RFC3339))
+		}
+		if len(filters) > 0 {
+			values.Set("$filter", strings.Join(filters, " and "))
+		}
 	} else {
-		values := url.Values{}
-		values.Set("$top", fmt.Sprint(options.Limit+1))
-		values.Set("$select", "id,subject,bodyPreview,receivedDateTime,isRead,flag,hasAttachments,internetMessageId,from,toRecipients,parentFolderId")
-		if options.Query == "" {
-			values.Set("$orderby", "receivedDateTime desc")
-			filters := make([]string, 0, 3)
-			if options.Unread {
-				filters = append(filters, "isRead eq false")
-			}
-			if !options.Since.IsZero() {
-				filters = append(filters, "receivedDateTime ge "+options.Since.UTC().Format(time.RFC3339))
-			}
-			if !options.Before.IsZero() {
-				filters = append(filters, "receivedDateTime lt "+options.Before.UTC().Format(time.RFC3339))
-			}
-			if len(filters) > 0 {
-				values.Set("$filter", strings.Join(filters, " and "))
-			}
-		} else {
-			values.Set("$search", `"`+strings.ReplaceAll(options.Query, `"`, ``)+`"`)
-			endpoint = APIBase + "/me/messages"
-		}
-		endpoint += "?" + values.Encode()
+		values.Set("$search", `"`+strings.ReplaceAll(options.Query, `"`, ``)+`"`)
 	}
-	var listed struct {
-		Value    []graphMessage `json:"value"`
-		NextLink string         `json:"@odata.nextLink"`
-	}
-	if err := doJSON(ctx, client, http.MethodGet, endpoint, nil, &listed); err != nil {
-		return postmail.SearchResult{}, err
-	}
-	messages := make([]model.Message, 0, len(listed.Value))
+	endpoint += "?" + values.Encode()
+	messages := make([]model.Message, 0, options.Limit+1)
 	listedFolder := canonicalMailFolder(options.Folder)
-	for _, item := range listed.Value {
-		folder := listedFolder
-		if options.Query != "" {
-			folder = folderFromParent(ctx, client, connection.ID, item.ParentFolderID)
+	for {
+		var listed struct {
+			Value    []graphMessage `json:"value"`
+			NextLink string         `json:"@odata.nextLink"`
 		}
-		message := item.model(connection.ID, folder)
-		if options.Query != "" {
-			if options.Unread && !message.Unread {
-				continue
+		if err := doJSON(ctx, client, http.MethodGet, endpoint, nil, &listed); err != nil {
+			return postmail.SearchResult{}, err
+		}
+		for _, item := range listed.Value {
+			folder := listedFolder
+			if options.Query != "" && item.ParentFolderID != "" {
+				folder = folderFromParent(ctx, client, connection.ID, item.ParentFolderID)
+				if canonicalMailFolder(folder) != listedFolder {
+					continue
+				}
 			}
-			if !options.Since.IsZero() && message.ReceivedAt.Before(options.Since) {
-				continue
+			message := item.model(connection.ID, folder)
+			if options.Query != "" {
+				if options.Unread && !message.Unread {
+					continue
+				}
+				if !options.Since.IsZero() && message.ReceivedAt.Before(options.Since) {
+					continue
+				}
+				if !options.Before.IsZero() && !message.ReceivedAt.Before(options.Before) {
+					continue
+				}
 			}
-			if !options.Before.IsZero() && !message.ReceivedAt.Before(options.Before) {
-				continue
+			if options.CursorTime.IsZero() && options.CursorID == "" || afterCursor(message, options) {
+				messages = append(messages, message)
+				if len(messages) > options.Limit {
+					break
+				}
 			}
 		}
-		if options.CursorTime.IsZero() && options.CursorID == "" || afterCursor(message, options) {
-			messages = append(messages, message)
+		if len(listed.Value) == 0 || len(messages) > options.Limit || listed.NextLink == "" {
+			hasMore := listed.NextLink != "" || len(messages) > options.Limit
+			if len(messages) > options.Limit {
+				messages = messages[:options.Limit]
+			}
+			return postmail.SearchResult{Messages: messages, HasMore: hasMore, UIDValidity: nativeUIDValidity}, nil
 		}
+		endpoint = listed.NextLink
 	}
-	hasMore := listed.NextLink != "" || len(messages) > options.Limit
-	if len(messages) > options.Limit {
-		messages = messages[:options.Limit]
-	}
-	return postmail.SearchResult{Messages: messages, HasMore: hasMore, UIDValidity: nativeUIDValidity}, nil
 }
 
 func Get(ctx context.Context, connection model.Connection, id string) (postmail.FetchedMessage, error) {
@@ -155,12 +173,13 @@ func Get(ctx context.Context, connection model.Connection, id string) (postmail.
 	if err != nil {
 		return postmail.FetchedMessage{}, err
 	}
+	applyGraphHeaders(request, false)
 	response, err := client.Do(request)
 	if err != nil {
 		return postmail.FetchedMessage{}, err
 	}
 	defer response.Body.Close()
-	raw, err := io.ReadAll(io.LimitReader(response.Body, 8<<20))
+	raw, err := postmail.ReadBounded(response.Body, postmail.MaxMessageBytes)
 	if err != nil {
 		return postmail.FetchedMessage{}, err
 	}
@@ -194,6 +213,7 @@ func Send(ctx context.Context, connection model.Connection, raw []byte) error {
 		return err
 	}
 	request.Header.Set("Content-Type", "text/plain")
+	applyGraphHeaders(request, false)
 	response, err := client.Do(request)
 	if err != nil {
 		return err
@@ -247,6 +267,7 @@ func CreateDraft(ctx context.Context, connection model.Connection, raw []byte) (
 		return "", err
 	}
 	request.Header.Set("Content-Type", "text/plain")
+	applyGraphHeaders(request, false)
 	response, err := client.Do(request)
 	if err != nil {
 		return "", err
@@ -275,14 +296,59 @@ func DeleteMessage(ctx context.Context, connection model.Connection, id string) 
 }
 
 func Ping(ctx context.Context, connection model.Connection) error {
+	_, _, err := ProfileEmail(ctx, connection)
+	return err
+}
+
+func ProfileEmail(ctx context.Context, connection model.Connection) (mail, upn string, err error) {
 	client, err := httpClient(ctx, connection)
 	if err != nil {
-		return err
+		return "", "", err
 	}
 	var me struct {
-		ID string `json:"id"`
+		Mail              string `json:"mail"`
+		UserPrincipalName string `json:"userPrincipalName"`
 	}
-	return doJSON(ctx, client, http.MethodGet, APIBase+"/me?$select=id", nil, &me)
+	if err := doJSON(ctx, client, http.MethodGet, APIBase+"/me?$select=mail,userPrincipalName", nil, &me); err != nil {
+		return "", "", err
+	}
+	mail = strings.TrimSpace(me.Mail)
+	upn = strings.TrimSpace(me.UserPrincipalName)
+	if mail == "" && upn == "" {
+		return "", "", fmt.Errorf("graph profile did not include an email address")
+	}
+	return mail, upn, nil
+}
+
+func UnreadCount(ctx context.Context, connection model.Connection, folder string) (int, error) {
+	client, err := httpClient(ctx, connection)
+	if err != nil {
+		return 0, err
+	}
+	var payload struct {
+		Unread int `json:"unreadItemCount"`
+	}
+	if err := doJSON(ctx, client, http.MethodGet, APIBase+mailFolderPath(folder)+"?$select=unreadItemCount", nil, &payload); err != nil {
+		return 0, err
+	}
+	return payload.Unread, nil
+}
+
+func Snapshot(ctx context.Context, connection model.Connection, id string) (string, error) {
+	client, err := httpClient(ctx, connection)
+	if err != nil {
+		return "", err
+	}
+	var payload struct {
+		ChangeKey string `json:"changeKey"`
+	}
+	if err := doJSON(ctx, client, http.MethodGet, APIBase+"/me/messages/"+url.PathEscape(id)+"?$select=id,changeKey", nil, &payload); err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(payload.ChangeKey) == "" {
+		return "", fmt.Errorf("graph message %s is missing a change key", id)
+	}
+	return payload.ChangeKey, nil
 }
 
 func ListEvents(ctx context.Context, connection model.Connection, start, end time.Time, query string) ([]model.Event, error) {
@@ -291,34 +357,39 @@ func ListEvents(ctx context.Context, connection model.Connection, start, end tim
 		return nil, err
 	}
 	values := url.Values{}
-	values.Set("$select", "id,iCalUId,subject,bodyPreview,location,start,end,isAllDay")
-	filters := make([]string, 0, 2)
-	if !start.IsZero() {
-		filters = append(filters, "start/dateTime ge '"+start.UTC().Format("2006-01-02T15:04:05")+`'`)
+	values.Set("$select", "id,iCalUId,subject,bodyPreview,location,start,end,isAllDay,changeKey,attendees")
+	values.Set("$top", "1000")
+	endpoint := APIBase + "/me/events"
+	if !start.IsZero() && !end.IsZero() {
+		endpoint = APIBase + "/me/calendarView"
+		values.Set("startDateTime", start.UTC().Format(time.RFC3339))
+		values.Set("endDateTime", end.UTC().Format(time.RFC3339))
 	}
-	if !end.IsZero() {
-		filters = append(filters, "start/dateTime lt '"+end.UTC().Format("2006-01-02T15:04:05")+`'`)
-	}
-	if len(filters) > 0 {
-		values.Set("$filter", strings.Join(filters, " and "))
-	}
-	if query != "" {
+	if query != "" && start.IsZero() && end.IsZero() {
 		values.Set("$search", `"`+strings.ReplaceAll(query, `"`, ``)+`"`)
 	}
-	var listed struct {
-		Value []graphEvent `json:"value"`
-	}
-	if err := doJSON(ctx, client, http.MethodGet, APIBase+"/me/events?"+values.Encode(), nil, &listed); err != nil {
-		return nil, err
-	}
-	events := make([]model.Event, 0, len(listed.Value))
-	for _, item := range listed.Value {
-		if query != "" && !strings.Contains(strings.ToLower(item.Subject+" "+item.BodyPreview), strings.ToLower(query)) {
-			continue
+	endpoint += "?" + values.Encode()
+	events := make([]model.Event, 0)
+	for page := 0; page < maxEventPages; page++ {
+		var listed struct {
+			Value    []graphEvent `json:"value"`
+			NextLink string       `json:"@odata.nextLink"`
 		}
-		events = append(events, item.model(connection.ID))
+		if err := doJSON(ctx, client, http.MethodGet, endpoint, nil, &listed); err != nil {
+			return nil, err
+		}
+		for _, item := range listed.Value {
+			if query != "" && !strings.Contains(strings.ToLower(item.Subject+" "+item.BodyPreview), strings.ToLower(query)) {
+				continue
+			}
+			events = append(events, item.model(connection.ID))
+		}
+		if listed.NextLink == "" {
+			return events, nil
+		}
+		endpoint = listed.NextLink
 	}
-	return events, nil
+	return nil, fmt.Errorf("graph calendar listing exceeded %d pages", maxEventPages)
 }
 
 func PutEvent(ctx context.Context, connection model.Connection, event model.Event, create bool) (model.Event, error) {
@@ -326,37 +397,52 @@ func PutEvent(ctx context.Context, connection model.Connection, event model.Even
 	if err != nil {
 		return model.Event{}, err
 	}
+	if event.RecurrenceRule != "" || len(event.RecurrenceDates) > 0 || len(event.ExceptionDates) > 0 || len(event.RecurrencePeriods) > 0 || event.RecurrenceRange != "" || event.RecurrenceID != "" {
+		return model.Event{}, fmt.Errorf("Microsoft Graph calendar writes do not serialize recurrence; omit recurrence fields")
+	}
+	start, end := graphEventTimes(event)
 	payload := map[string]any{
 		"subject":  event.Title,
 		"body":     map[string]string{"contentType": "Text", "content": event.Description},
-		"start":    map[string]string{"dateTime": event.Start.UTC().Format("2006-01-02T15:04:05"), "timeZone": "UTC"},
-		"end":      map[string]string{"dateTime": event.End.UTC().Format("2006-01-02T15:04:05"), "timeZone": "UTC"},
+		"start":    start,
+		"end":      end,
 		"isAllDay": event.AllDay,
 	}
 	if event.Location != "" {
 		payload["location"] = map[string]string{"displayName": event.Location}
 	}
+	if attendees := graphAttendees(event.Attendees); len(attendees) > 0 {
+		payload["attendees"] = attendees
+	}
 	method, path := http.MethodPost, APIBase+"/me/events"
+	var headers http.Header
 	if !create {
 		id := event.Href
 		if id == "" {
 			id = event.ID
 		}
 		method, path = http.MethodPatch, APIBase+"/me/events/"+url.PathEscape(id)
+		if strings.TrimSpace(event.ETag) != "" {
+			headers = http.Header{"If-Match": []string{event.ETag}}
+		}
 	}
 	var saved graphEvent
-	if err := doJSON(ctx, client, method, path, payload, &saved); err != nil {
+	if err := doJSONHeaders(ctx, client, method, path, payload, &saved, headers); err != nil {
 		return model.Event{}, err
 	}
 	return saved.model(connection.ID), nil
 }
 
-func DeleteEvent(ctx context.Context, connection model.Connection, id string) error {
+func DeleteEvent(ctx context.Context, connection model.Connection, id, etag string) error {
 	client, err := httpClient(ctx, connection)
 	if err != nil {
 		return err
 	}
-	return doJSON(ctx, client, http.MethodDelete, APIBase+"/me/events/"+url.PathEscape(id), nil, nil)
+	var headers http.Header
+	if strings.TrimSpace(etag) != "" {
+		headers = http.Header{"If-Match": []string{etag}}
+	}
+	return doJSONHeaders(ctx, client, http.MethodDelete, APIBase+"/me/events/"+url.PathEscape(id), nil, nil, headers)
 }
 
 func (item graphMessage) model(connectionID, folder string) model.Message {
@@ -384,13 +470,46 @@ func (item graphEvent) model(connectionID string) model.Event {
 	if id == "" {
 		id = item.ID
 	}
-	event := model.Event{ConnectionID: connectionID, ID: id, Href: item.ID, Title: item.Subject, Description: item.BodyPreview, AllDay: item.IsAllDay}
+	etag := item.ETag
+	if etag == "" {
+		etag = item.ChangeKey
+	}
+	event := model.Event{ConnectionID: connectionID, ID: id, Href: item.ID, Title: item.Subject, Description: item.BodyPreview, AllDay: item.IsAllDay, ETag: etag}
 	if item.Location != nil {
 		event.Location = item.Location.DisplayName
 	}
 	event.Start = parseGraphTime(item.Start)
 	event.End = parseGraphTime(item.End)
+	for _, attendee := range item.Attendees {
+		if email := strings.TrimSpace(attendee.EmailAddress.Address); email != "" {
+			event.Attendees = append(event.Attendees, email)
+		}
+	}
 	return event
+}
+
+func graphAttendees(values []string) []map[string]any {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make([]map[string]any, 0, len(values))
+	for _, value := range values {
+		if email := strings.TrimSpace(value); email != "" {
+			out = append(out, map[string]any{"emailAddress": map[string]string{"address": email}, "type": "required"})
+		}
+	}
+	return out
+}
+
+func graphEventTimes(event model.Event) (map[string]string, map[string]string) {
+	start := event.Start.UTC()
+	end := event.End.UTC()
+	if event.AllDay {
+		start = time.Date(start.Year(), start.Month(), start.Day(), 0, 0, 0, 0, time.UTC)
+		end = time.Date(end.Year(), end.Month(), end.Day(), 0, 0, 0, 0, time.UTC)
+	}
+	return map[string]string{"dateTime": start.Format("2006-01-02T15:04:05"), "timeZone": "UTC"},
+		map[string]string{"dateTime": end.Format("2006-01-02T15:04:05"), "timeZone": "UTC"}
 }
 
 func parseGraphTime(value *graphDateTime) time.Time {
@@ -536,6 +655,10 @@ func httpClient(ctx context.Context, connection model.Connection) (*http.Client,
 }
 
 func doJSON(ctx context.Context, client *http.Client, method, rawURL string, body any, dest any) error {
+	return doJSONHeaders(ctx, client, method, rawURL, body, dest, nil)
+}
+
+func doJSONHeaders(ctx context.Context, client *http.Client, method, rawURL string, body any, dest any, headers http.Header) error {
 	var reader io.Reader
 	if body != nil {
 		data, err := json.Marshal(body)
@@ -551,15 +674,18 @@ func doJSON(ctx context.Context, client *http.Client, method, rawURL string, bod
 	if body != nil {
 		request.Header.Set("Content-Type", "application/json")
 	}
-	if strings.Contains(rawURL, "$search=") {
-		request.Header.Set("ConsistencyLevel", "eventual")
+	applyGraphHeaders(request, strings.Contains(rawURL, "$search=") || strings.Contains(rawURL, "%24search="))
+	for key, values := range headers {
+		for _, value := range values {
+			request.Header.Add(key, value)
+		}
 	}
 	response, err := client.Do(request)
 	if err != nil {
 		return err
 	}
 	defer response.Body.Close()
-	payload, err := io.ReadAll(io.LimitReader(response.Body, 8<<20))
+	payload, err := postmail.ReadBounded(response.Body, graphJSONLimit)
 	if err != nil {
 		return err
 	}
@@ -573,4 +699,11 @@ func doJSON(ctx context.Context, client *http.Client, method, rawURL string, bod
 		return nil
 	}
 	return json.Unmarshal(payload, dest)
+}
+
+func applyGraphHeaders(request *http.Request, search bool) {
+	request.Header.Set("Prefer", immutableIDPrefer)
+	if search {
+		request.Header.Set("ConsistencyLevel", "eventual")
+	}
 }

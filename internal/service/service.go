@@ -54,6 +54,7 @@ type Service struct {
 	mailboxUIDValidity     func(context.Context, model.Connection, string) (uint32, error)
 	calendarListCalDAV     func(context.Context, model.Connection, []string, time.Time, time.Time, string) ([]model.Event, error)
 	authorizeOAuth         func(context.Context, oauth.Config, bool) (string, error)
+	nativeIdentity         func(context.Context, model.Connection) (string, error)
 	stateMu                sync.Mutex
 	state                  *state.Store
 	stateErr               error
@@ -245,9 +246,13 @@ func (s *Service) UpsertConnection(connection model.Connection, replace bool) er
 }
 
 func (s *Service) RemoveConnection(id string) error {
+	var secretName string
 	err := s.store.Update(func(cfg model.Config) (model.Config, error) {
 		for index, connection := range cfg.Connections {
 			if connection.ID == id {
+				if config.NativeMail(connection) || config.NativeCalendar(connection) {
+					secretName = oauthKeychainName(connection)
+				}
 				cfg.Connections = append(cfg.Connections[:index], cfg.Connections[index+1:]...)
 				return cfg, nil
 			}
@@ -256,6 +261,11 @@ func (s *Service) RemoveConnection(id string) error {
 	})
 	if err != nil {
 		return err
+	}
+	if secretName != "" {
+		if delErr := config.DeleteKeychainSecret(secretName); delErr != nil {
+			return fmt.Errorf("delete owned OAuth token after removing connection %s: %w", id, delErr)
+		}
 	}
 	ledger, err := s.ensureState()
 	if err != nil {
@@ -272,6 +282,7 @@ type mailCursorState struct {
 	UIDNext     uint32    `json:"uid_next,omitempty"`
 	BeforeTime  time.Time `json:"before_time,omitempty"`
 	BeforeUID   uint32    `json:"before_uid,omitempty"`
+	BeforeID    string    `json:"before_id,omitempty"`
 }
 
 type mailCursorPosition struct {
@@ -332,6 +343,7 @@ func (s *Service) SearchMessagesContext(ctx context.Context, selection model.Sel
 		connectionOptions.Limit = pageSize + 1
 		connectionOptions.CursorTime = cursorState.BeforeTime
 		connectionOptions.CursorUID = cursorState.BeforeUID
+		connectionOptions.CursorID = cursorState.BeforeID
 		connectionOptions.MaxUIDExclusive = cursorState.UIDNext
 		connectionOptions.ExpectedUIDValidity = cursorState.UIDValidity
 		var result postmail.SearchResult
@@ -461,6 +473,7 @@ func (s *Service) SearchMessagesContext(ctx context.Context, selection model.Sel
 			state := position.Connections[connection.ID]
 			state.BeforeTime = messageTime(last)
 			state.BeforeUID = last.UID
+			state.BeforeID = last.ID
 			position.Connections[connection.ID] = state
 		}
 	}
@@ -1107,7 +1120,7 @@ func (s *Service) PrepareMailAction(ctx context.Context, connectionID, kind stri
 		return model.PreparedOperation{}, fmt.Errorf("mail action accepts at most %d uids", maxBatchMailUIDs)
 	}
 	if len(uids) == 0 && payload.ID != "" {
-		payload.Precondition, err = s.snapshotMessage(ctx, connection, payload.Folder, payload.UID)
+		payload.Precondition, err = s.snapshotMessageLocator(ctx, connection, MessageLocator{ID: payload.ID, Folder: payload.Folder, UID: payload.UID})
 		if err != nil {
 			return model.PreparedOperation{}, err
 		}
@@ -1190,7 +1203,7 @@ func (s *Service) PrepareDraft(ctx context.Context, connectionID, kind string, l
 		if payload.ID == "" && payload.UID != 0 {
 			payload.ID = postmail.EncodeIMAPID(payload.Folder, loc.UIDValidity, payload.UID)
 		}
-		payload.Precondition, err = s.snapshotMessage(ctx, connection, loc.Folder, loc.UID)
+		payload.Precondition, err = s.snapshotMessageLocator(ctx, connection, loc)
 		if err != nil {
 			return model.PreparedOperation{}, err
 		}
@@ -1220,7 +1233,7 @@ func (s *Service) PrepareCalendarWrite(ctx context.Context, connectionID, kind s
 	if kind != "calendar.create" && kind != "calendar.update" {
 		return model.PreparedOperation{}, fmt.Errorf("unsupported calendar operation %q", kind)
 	}
-	if kind == "calendar.update" && event.ETag == "" && !config.NativeCalendar(connection) {
+	if kind == "calendar.update" && event.ETag == "" {
 		return model.PreparedOperation{}, fmt.Errorf("calendar update requires the current ETag")
 	}
 	if kind == "calendar.update" && event.ETag != "" && !config.NativeCalendar(connection) {
@@ -1233,6 +1246,14 @@ func (s *Service) PrepareCalendarWrite(ctx context.Context, connectionID, kind s
 	}
 	if kind == "calendar.update" && event.RecurrenceID == "" && event.SeriesID != "" && event.ID != event.SeriesID {
 		return model.PreparedOperation{}, fmt.Errorf("cannot replace a recurring series from an expanded occurrence; refresh and edit the series master")
+	}
+	if config.NativeCalendar(connection) {
+		if event.RecurrenceID != "" {
+			return model.PreparedOperation{}, fmt.Errorf("native calendar writes do not support occurrence overrides; refresh and edit the series master")
+		}
+		if config.CalendarKind(connection.Calendar) == config.CalendarKindMicrosoft && nativeRecurrenceSet(event) {
+			return model.PreparedOperation{}, fmt.Errorf("Microsoft Graph calendar writes do not serialize recurrence; omit recurrence fields")
+		}
 	}
 	if !config.NativeCalendar(connection) {
 		if err := calendar.ValidateCalDAVHref(connection, event.CollectionID, event.Href); err != nil {
@@ -1290,6 +1311,9 @@ func (s *Service) PrepareCalendarDelete(ctx context.Context, connectionID, colle
 	if config.NativeCalendar(connection) {
 		if href == "" {
 			return model.PreparedOperation{}, fmt.Errorf("calendar delete requires the provider event id")
+		}
+		if etag == "" {
+			return model.PreparedOperation{}, fmt.Errorf("calendar delete requires the current ETag")
 		}
 		return s.prepare(ctx, "calendar.delete", connection, calendarDeletePayload{Href: href, ETag: etag}, map[string]any{
 			"acting_identity": connection.Identity, "href": href,
@@ -1770,13 +1794,21 @@ func (s *Service) execute(ctx context.Context, connection model.Connection, kind
 }
 
 func (s *Service) snapshotMessage(ctx context.Context, connection model.Connection, folder string, uid uint32) (postmail.MessagePrecondition, error) {
+	return s.snapshotMessageLocator(ctx, connection, MessageLocator{Folder: folder, UID: uid})
+}
+
+func (s *Service) snapshotMessageLocator(ctx context.Context, connection model.Connection, loc MessageLocator) (postmail.MessagePrecondition, error) {
 	if config.NativeMail(connection) {
-		return postmail.MessagePrecondition{}, nil
+		version, err := nativeSnapshot(ctx, connection, loc.ID)
+		if err != nil {
+			return postmail.MessagePrecondition{}, err
+		}
+		return postmail.MessagePrecondition{Version: version}, nil
 	}
 	if s.mailSnapshot != nil {
-		return s.mailSnapshot(connection, folder, uid)
+		return s.mailSnapshot(connection, loc.Folder, loc.UID)
 	}
-	return s.mailSnapshotContext(ctx, connection, folder, uid)
+	return s.mailSnapshotContext(ctx, connection, loc.Folder, loc.UID)
 }
 
 func (s *Service) GetMessage(connectionID, folder string, uid uint32) (model.MessageDetail, error) {
@@ -2267,7 +2299,7 @@ func digestResolvedConnection(connection model.Connection) (string, error) {
 		if err := writeSecret("calendar.url", connection.Calendar.ResolvedURL); err != nil {
 			return "", err
 		}
-		if connection.Calendar.Kind == "caldav" {
+		if connection.Calendar.Kind == "caldav" || config.NativeCalendar(connection) {
 			if err := writeSecret("calendar.secret", connection.Calendar.ResolvedSecret); err != nil {
 				return "", err
 			}
@@ -2541,6 +2573,7 @@ func (s *Service) TriageMessages(ctx context.Context, selection model.Selector, 
 	for _, message := range page.Messages {
 		items = append(items, model.TriageItem{
 			ConnectionID:   message.ConnectionID,
+			ID:             message.ID,
 			Folder:         message.Folder,
 			UID:            message.UID,
 			From:           message.From,
@@ -2574,7 +2607,7 @@ func (s *Service) UnreadCounts(ctx context.Context, selection model.Selector, fo
 			summaries = append(summaries, summary)
 			continue
 		}
-		count, countErr := postmail.UnreadCountContext(ctx, resolved, summary.Folder)
+		count, countErr := unreadCountFor(ctx, resolved, summary.Folder)
 		if countErr != nil {
 			summary.Error = countErr.Error()
 			summaries = append(summaries, summary)
@@ -2584,6 +2617,17 @@ func (s *Service) UnreadCounts(ctx context.Context, selection model.Selector, fo
 		summaries = append(summaries, summary)
 	}
 	return summaries, nil
+}
+
+func unreadCountFor(ctx context.Context, connection model.Connection, folder string) (int, error) {
+	if config.NativeMail(connection) {
+		return nativeUnreadCount(ctx, connection, folder)
+	}
+	return postmail.UnreadCountContext(ctx, connection, folder)
+}
+
+func nativeRecurrenceSet(event model.Event) bool {
+	return event.RecurrenceRule != "" || event.RecurrenceRange != "" || event.RecurrenceID != "" || len(event.RecurrenceDates) > 0 || len(event.ExceptionDates) > 0 || len(event.RecurrencePeriods) > 0
 }
 
 func mergeDiscoveredConnection(current model.Config, resolvedID, providerID string, discovered model.Connection) (model.Config, model.Connection, error) {
@@ -2948,7 +2992,7 @@ func (s *Service) cachedMailResult(connectionID, folder string, scope any, optio
 			continue
 		}
 		if !cursorState.BeforeTime.IsZero() {
-			boundary := model.Message{ConnectionID: message.ConnectionID, ReceivedAt: cursorState.BeforeTime, UID: cursorState.BeforeUID}
+			boundary := model.Message{ConnectionID: message.ConnectionID, ID: cursorState.BeforeID, ReceivedAt: cursorState.BeforeTime, UID: cursorState.BeforeUID}
 			if !messageBefore(boundary, message) {
 				continue
 			}
@@ -2966,15 +3010,25 @@ func (s *Service) cachedMailResult(connectionID, folder string, scope any, optio
 
 func mergeMailResults(existing, fresh postmail.SearchResult) postmail.SearchResult {
 	combined := fresh
-	byUID := make(map[uint32]model.Message, len(existing.Messages)+len(fresh.Messages))
+	type mergeKey struct {
+		uid uint32
+		id  string
+	}
+	keyFor := func(message model.Message) mergeKey {
+		if message.UID != 0 {
+			return mergeKey{uid: message.UID}
+		}
+		return mergeKey{id: message.ID}
+	}
+	byKey := make(map[mergeKey]model.Message, len(existing.Messages)+len(fresh.Messages))
 	for _, message := range existing.Messages {
-		byUID[message.UID] = message
+		byKey[keyFor(message)] = message
 	}
 	for _, message := range fresh.Messages {
-		byUID[message.UID] = message
+		byKey[keyFor(message)] = message
 	}
-	combined.Messages = make([]model.Message, 0, len(byUID))
-	for _, message := range byUID {
+	combined.Messages = make([]model.Message, 0, len(byKey))
+	for _, message := range byKey {
 		combined.Messages = append(combined.Messages, message)
 	}
 	slices.SortFunc(combined.Messages, func(a, b model.Message) int {
@@ -3681,7 +3735,10 @@ func messageBefore(a, b model.Message) bool {
 	if a.ConnectionID != b.ConnectionID {
 		return a.ConnectionID < b.ConnectionID
 	}
-	return a.UID < b.UID
+	if a.UID != b.UID {
+		return a.UID < b.UID
+	}
+	return a.ID < b.ID
 }
 
 func messageTime(message model.Message) time.Time {

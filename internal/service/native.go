@@ -80,6 +80,28 @@ func (s *Service) AuthorizeConnection(ctx context.Context, id string, device boo
 	if err != nil {
 		return nil, err
 	}
+	authorized := connection
+	if authorized.Mail != nil {
+		mailConfig := *authorized.Mail
+		mailConfig.ResolvedSecret = refresh
+		authorized.Mail = &mailConfig
+	}
+	if authorized.Calendar != nil {
+		calendarConfig := *authorized.Calendar
+		calendarConfig.ResolvedSecret = refresh
+		authorized.Calendar = &calendarConfig
+	}
+	profile, err := s.authorizedIdentity(ctx, authorized)
+	if err != nil {
+		return nil, fmt.Errorf("verify authorized identity: %w", err)
+	}
+	if want := strings.TrimSpace(connection.Identity.Email); want != "" && !identityMatches(want, profile) {
+		got := strings.Join(profile, ", ")
+		if got == "" {
+			got = "unknown"
+		}
+		return nil, fmt.Errorf("authorized identity %s does not match connection identity %s", got, want)
+	}
 	keychainName := oauthKeychainName(connection)
 	if err := config.SetKeychainSecret(keychainName, refresh); err != nil {
 		return nil, err
@@ -120,6 +142,59 @@ func oauthKeychainName(connection model.Connection) string {
 		return connection.Calendar.Secret.Keychain
 	}
 	return "posthouse-" + connection.ID
+}
+
+func authorizedIdentity(ctx context.Context, s *Service, connection model.Connection) ([]string, error) {
+	if s.nativeIdentity != nil {
+		email, err := s.nativeIdentity(ctx, connection)
+		if err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(email) == "" {
+			return nil, nil
+		}
+		return []string{email}, nil
+	}
+	switch config.NativeKind(connection) {
+	case config.MailKindGmail:
+		email, err := gmail.ProfileEmail(ctx, connection)
+		if err != nil {
+			return nil, err
+		}
+		return []string{email}, nil
+	case config.MailKindMicrosoft:
+		mail, upn, err := microsoft.ProfileEmail(ctx, connection)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]string, 0, 2)
+		if mail != "" {
+			out = append(out, mail)
+		}
+		if upn != "" && !strings.EqualFold(upn, mail) {
+			out = append(out, upn)
+		}
+		return out, nil
+	default:
+		return nil, fmt.Errorf("connection %s is not a Gmail or Microsoft OAuth connection", connection.ID)
+	}
+}
+
+func (s *Service) authorizedIdentity(ctx context.Context, connection model.Connection) ([]string, error) {
+	return authorizedIdentity(ctx, s, connection)
+}
+
+func identityMatches(want string, got []string) bool {
+	want = strings.ToLower(strings.TrimSpace(want))
+	if want == "" {
+		return true
+	}
+	for _, item := range got {
+		if strings.EqualFold(strings.TrimSpace(item), want) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Service) doctorNative(ctx context.Context, connection model.Connection, add func(string, error)) {
@@ -176,8 +251,13 @@ func (s *Service) doctorNative(ctx context.Context, connection model.Connection,
 		case config.MailKindMicrosoft:
 			add("graph.api", microsoft.Ping(ctx, connection))
 		}
-	} else if config.NativeCalendar(connection) {
-		connection.Calendar.ResolvedSecret = secret
+	}
+	if config.NativeCalendar(connection) {
+		if connection.Calendar != nil {
+			calendarConfig := *connection.Calendar
+			calendarConfig.ResolvedSecret = secret
+			connection.Calendar = &calendarConfig
+		}
 		switch config.CalendarKind(connection.Calendar) {
 		case config.CalendarKindGmail:
 			_, pingErr := gmail.ListEvents(ctx, connection, s.now(), s.now().Add(time.Hour), "")
@@ -208,7 +288,7 @@ func executeNativeMail(ctx context.Context, connection model.Connection, kind st
 			sendErr = microsoft.Send(ctx, connection, data)
 		}
 		if sendErr != nil {
-			return nil, sendErr
+			return nil, nativeSendError(sendErr)
 		}
 		return map[string]any{"sent": true}, nil
 	case "mail.mark", "mail.move", "mail.archive", "mail.trash", "mail.junk":
@@ -253,6 +333,11 @@ func executeNativeMail(ctx context.Context, connection model.Connection, kind st
 			return nil, err
 		}
 		id := nativeMessageID(MailAction{ID: draft.ID, Folder: draft.Folder, UID: draft.UID})
+		if kind != "mail.draft.create" {
+			if err := assertNativeDraftVersion(ctx, connection, id, draft.Precondition); err != nil {
+				return nil, err
+			}
+		}
 		if kind == "mail.draft.delete" {
 			if err := nativeTrash(ctx, connection, id); err != nil {
 				return nil, err
@@ -304,7 +389,7 @@ func executeNativeCalendar(ctx context.Context, connection model.Connection, kin
 		if id == "" {
 			return nil, fmt.Errorf("calendar delete requires the provider event id")
 		}
-		if err := nativeDeleteEvent(ctx, connection, id); err != nil {
+		if err := nativeDeleteEvent(ctx, connection, id, deletion.ETag); err != nil {
 			return nil, err
 		}
 		return map[string]any{"deleted": true}, nil
@@ -403,13 +488,60 @@ func nativePutEvent(ctx context.Context, connection model.Connection, event mode
 	}
 }
 
-func nativeDeleteEvent(ctx context.Context, connection model.Connection, id string) error {
+func nativeDeleteEvent(ctx context.Context, connection model.Connection, id, etag string) error {
 	switch config.CalendarKind(connection.Calendar) {
 	case config.CalendarKindGmail:
-		return gmail.DeleteEvent(ctx, connection, id)
+		return gmail.DeleteEvent(ctx, connection, id, etag)
 	default:
-		return microsoft.DeleteEvent(ctx, connection, id)
+		return microsoft.DeleteEvent(ctx, connection, id, etag)
 	}
+}
+
+func nativeUnreadCount(ctx context.Context, connection model.Connection, folder string) (int, error) {
+	switch config.MailKind(connection.Mail) {
+	case config.MailKindGmail:
+		return gmail.UnreadCount(ctx, connection, folder)
+	case config.MailKindMicrosoft:
+		return microsoft.UnreadCount(ctx, connection, folder)
+	default:
+		return 0, fmt.Errorf("connection %s is not a native mail backend", connection.ID)
+	}
+}
+
+func nativeSnapshot(ctx context.Context, connection model.Connection, id string) (string, error) {
+	if strings.TrimSpace(id) == "" {
+		return "", fmt.Errorf("message id is required")
+	}
+	switch config.MailKind(connection.Mail) {
+	case config.MailKindGmail:
+		return gmail.Snapshot(ctx, connection, id)
+	case config.MailKindMicrosoft:
+		return microsoft.Snapshot(ctx, connection, id)
+	default:
+		return "", fmt.Errorf("connection %s is not a native mail backend", connection.ID)
+	}
+}
+
+func assertNativeDraftVersion(ctx context.Context, connection model.Connection, id string, expected postmail.MessagePrecondition) error {
+	current, err := nativeSnapshot(ctx, connection, id)
+	if err != nil {
+		return err
+	}
+	if expected.Version == "" || current != expected.Version {
+		return fmt.Errorf("draft changed since it was prepared; prepare it again")
+	}
+	return nil
+}
+
+func nativeSendError(err error) error {
+	if err == nil {
+		return nil
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "gmail API ") || strings.Contains(msg, "graph API ") {
+		return err
+	}
+	return &uncertainOperationError{message: "native send outcome is uncertain: " + msg}
 }
 
 func nativeBodyCacheKey(cacheID, id string) string {
@@ -431,6 +563,7 @@ func (s *Service) getNativeMessageMode(ctx context.Context, connection model.Con
 				if ledger, stateErr := s.ensureState(); stateErr == nil {
 					data, _ := json.Marshal(fetched.Detail)
 					_ = ledger.Put(ctx, state.CacheEntry{Namespace: "message_body", Key: nativeBodyCacheKey(requestCacheID, loc.ID), ConnectionID: connection.ID, Kind: "message_body", ProviderID: loc.ID, ExpiresAt: s.now().Add(s.messageBodyTTL()), Value: data})
+					s.cacheNativeAttachments(ctx, ledger, connection, requestCacheID, loc.ID, fetched)
 				}
 			}
 			return fetched.Detail, nil
@@ -472,30 +605,98 @@ func (s *Service) cachedNativeMessage(connection model.Connection, id string) (m
 }
 
 func (s *Service) getNativeAttachment(ctx context.Context, connection model.Connection, loc MessageLocator, attachmentID, mode string) (model.Attachment, []byte, error) {
-	detail, err := s.getNativeMessageMode(ctx, connection, loc, mode)
-	if err != nil {
-		return model.Attachment{}, nil, err
-	}
-	fetched, fetchErr := nativeGetMessage(ctx, connection, loc.ID)
-	if mode != "offline" && fetchErr == nil {
-		data, ok := fetched.Attachments[attachmentID]
-		if !ok {
-			return model.Attachment{}, nil, fmt.Errorf("no cached attachment %q", attachmentID)
+	if mode == "offline" {
+		if attachment, data, ok := s.cachedNativeAttachment(ctx, connection, loc.ID, attachmentID); ok {
+			attachment.Stale = true
+			return attachment, data, nil
 		}
-		for _, attachment := range fetched.Detail.Attachments {
-			if attachment.ID == attachmentID {
-				return attachment, data, nil
+		if detail, ok := s.cachedNativeMessage(connection, loc.ID); ok {
+			for _, attachment := range detail.Attachments {
+				if attachment.ID == attachmentID {
+					return attachment, nil, fmt.Errorf("no cached attachment %q", attachmentID)
+				}
 			}
 		}
-		return model.Attachment{ID: attachmentID, Size: int64(len(data))}, data, nil
+		return model.Attachment{}, nil, fmt.Errorf("no cached attachment %q", attachmentID)
 	}
-	for _, attachment := range detail.Attachments {
-		if attachment.ID == attachmentID {
-			return attachment, nil, fmt.Errorf("no cached attachment %q", attachmentID)
+	var resolveErr error
+	connection, resolveErr = resolveMailConnection(connection)
+	if resolveErr != nil && mode == "refresh" {
+		return model.Attachment{}, nil, resolveErr
+	}
+	if resolveErr == nil {
+		fetched, fetchErr := nativeGetMessage(ctx, connection, loc.ID)
+		if fetchErr == nil {
+			if requestCacheID := mailCacheID(connection); requestCacheID != "" {
+				if ledger, stateErr := s.ensureState(); stateErr == nil {
+					data, _ := json.Marshal(fetched.Detail)
+					_ = ledger.Put(ctx, state.CacheEntry{Namespace: "message_body", Key: nativeBodyCacheKey(requestCacheID, loc.ID), ConnectionID: connection.ID, Kind: "message_body", ProviderID: loc.ID, ExpiresAt: s.now().Add(s.messageBodyTTL()), Value: data})
+					s.cacheNativeAttachments(ctx, ledger, connection, requestCacheID, loc.ID, fetched)
+				}
+			}
+			data, ok := fetched.Attachments[attachmentID]
+			if !ok {
+				return model.Attachment{}, nil, fmt.Errorf("no cached attachment %q", attachmentID)
+			}
+			for _, attachment := range fetched.Detail.Attachments {
+				if attachment.ID == attachmentID {
+					return attachment, data, nil
+				}
+			}
+			return model.Attachment{ID: attachmentID, Size: int64(len(data))}, data, nil
+		}
+		if mode == "refresh" {
+			return model.Attachment{}, nil, fetchErr
 		}
 	}
-	if fetchErr != nil {
-		return model.Attachment{}, nil, fetchErr
+	if attachment, data, ok := s.cachedNativeAttachment(ctx, connection, loc.ID, attachmentID); ok {
+		attachment.Stale = true
+		return attachment, data, nil
+	}
+	if resolveErr != nil {
+		return model.Attachment{}, nil, resolveErr
 	}
 	return model.Attachment{}, nil, fmt.Errorf("no cached attachment %q", attachmentID)
+}
+
+func nativeAttachmentCacheKey(cacheID, messageID, attachmentID string) string {
+	return nativeBodyCacheKey(cacheID, messageID) + "/" + attachmentID
+}
+
+func (s *Service) cacheNativeAttachments(ctx context.Context, ledger *state.Store, connection model.Connection, cacheID, messageID string, fetched postmail.FetchedMessage) {
+	expiresAt := s.now().Add(s.messageBodyTTL())
+	for id, data := range fetched.Attachments {
+		key := nativeAttachmentCacheKey(cacheID, messageID, id)
+		_ = ledger.Put(ctx, state.CacheEntry{Namespace: "attachment", Key: key, ConnectionID: connection.ID, Kind: "attachment", ProviderID: id, ExpiresAt: expiresAt, Value: data})
+		for _, attachment := range fetched.Detail.Attachments {
+			if attachment.ID == id {
+				if metadata, err := json.Marshal(attachment); err == nil {
+					_ = ledger.Put(ctx, state.CacheEntry{Namespace: "attachment_metadata", Key: key, ConnectionID: connection.ID, Kind: "message_metadata", ProviderID: id, ExpiresAt: expiresAt, Value: metadata})
+				}
+				break
+			}
+		}
+	}
+}
+
+func (s *Service) cachedNativeAttachment(ctx context.Context, connection model.Connection, messageID, attachmentID string) (model.Attachment, []byte, bool) {
+	ledger, err := s.ensureState()
+	if err != nil {
+		return model.Attachment{}, nil, false
+	}
+	cacheID := mailCacheID(connection)
+	if cacheID == "" {
+		return model.Attachment{}, nil, false
+	}
+	key := nativeAttachmentCacheKey(cacheID, messageID, attachmentID)
+	entry, ok, err := ledger.Get(ctx, "attachment", key, false)
+	if err != nil || !ok {
+		return model.Attachment{}, nil, false
+	}
+	attachment := model.Attachment{ID: attachmentID, Size: int64(len(entry.Value)), CachedAt: entry.CachedAt}
+	if metadata, metaOK, metaErr := ledger.Get(ctx, "attachment_metadata", key, false); metaErr == nil && metaOK {
+		_ = json.Unmarshal(metadata.Value, &attachment)
+		attachment.CachedAt = entry.CachedAt
+	}
+	return attachment, entry.Value, true
 }

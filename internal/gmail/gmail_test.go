@@ -161,3 +161,105 @@ func TestListAndPutCalendarEvents(t *testing.T) {
 		t.Fatalf("PutEvent = %#v, %v created=%v", written, err, created)
 	}
 }
+
+func TestPutEventOmitsGeneratedIDAndKeepsAttendeesAllDay(t *testing.T) {
+	var body map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/token" {
+			writer.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(writer).Encode(map[string]any{"access_token": "ya29.access", "token_type": "Bearer", "expires_in": 3600})
+			return
+		}
+		if request.Method == http.MethodPost && strings.HasSuffix(request.URL.Path, "/events") {
+			_ = json.NewDecoder(request.Body).Decode(&body)
+			_ = json.NewEncoder(writer).Encode(map[string]any{
+				"id": "generated", "iCalUID": "posthouse-abc", "summary": "Offsite",
+				"start": map[string]string{"date": "2026-08-17"}, "end": map[string]string{"date": "2026-08-18"},
+				"attendees": []map[string]string{{"email": "a@example.test"}},
+			})
+			return
+		}
+		http.NotFound(writer, request)
+	}))
+	defer server.Close()
+	t.Setenv("POSTHOUSE_GOOGLE_CLIENT_ID", "desktop.apps.googleusercontent.com")
+	origCal, origToken := CalendarAPIBase, TokenURL
+	CalendarAPIBase, TokenURL = server.URL+"/calendar/v3", server.URL+"/token"
+	defer func() { CalendarAPIBase, TokenURL = origCal, origToken }()
+	start := time.Date(2026, 8, 17, 9, 0, 0, 0, time.UTC)
+	written, err := PutEvent(context.Background(), model.Connection{ID: "gmail-work", Mail: &model.MailConfig{Kind: "gmail", ResolvedSecret: "refresh"}}, model.Event{
+		ID: "posthouse-abc", Title: "Offsite", Start: start, End: start.Add(24 * time.Hour), AllDay: true,
+		Attendees: []string{"a@example.test"}, RecurrenceRule: "FREQ=WEEKLY",
+	}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := body["id"]; ok {
+		t.Fatalf("create payload included provider id: %#v", body)
+	}
+	if body["iCalUID"] != "posthouse-abc" {
+		t.Fatalf("iCalUID = %#v", body["iCalUID"])
+	}
+	startPayload, _ := body["start"].(map[string]any)
+	if startPayload["date"] != "2026-08-17" || startPayload["dateTime"] != nil {
+		t.Fatalf("all-day start = %#v", body["start"])
+	}
+	if written.AllDay != true || len(written.Attendees) != 1 {
+		t.Fatalf("written = %#v", written)
+	}
+}
+
+func TestListEventsFollowsNextPageToken(t *testing.T) {
+	pages := 0
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/token" {
+			writer.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(writer).Encode(map[string]any{"access_token": "ya29.access", "token_type": "Bearer", "expires_in": 3600})
+			return
+		}
+		pages++
+		if request.URL.Query().Get("pageToken") == "" {
+			_ = json.NewEncoder(writer).Encode(map[string]any{
+				"nextPageToken": "page-2",
+				"items":         []map[string]any{{"id": "evt-1", "iCalUID": "uid-1", "summary": "One", "start": map[string]string{"dateTime": "2026-08-17T09:00:00Z"}, "end": map[string]string{"dateTime": "2026-08-17T10:00:00Z"}}},
+			})
+			return
+		}
+		_ = json.NewEncoder(writer).Encode(map[string]any{
+			"items": []map[string]any{{"id": "evt-2", "iCalUID": "uid-2", "summary": "Two", "start": map[string]string{"dateTime": "2026-08-17T11:00:00Z"}, "end": map[string]string{"dateTime": "2026-08-17T12:00:00Z"}}},
+		})
+	}))
+	defer server.Close()
+	t.Setenv("POSTHOUSE_GOOGLE_CLIENT_ID", "desktop.apps.googleusercontent.com")
+	origCal, origToken := CalendarAPIBase, TokenURL
+	CalendarAPIBase, TokenURL = server.URL+"/calendar/v3", server.URL+"/token"
+	defer func() { CalendarAPIBase, TokenURL = origCal, origToken }()
+	events, err := ListEvents(context.Background(), model.Connection{ID: "gmail-work", Mail: &model.MailConfig{Kind: "gmail", ResolvedSecret: "refresh"}}, time.Time{}, time.Time{}, "")
+	if err != nil || pages != 2 || len(events) != 2 || events[1].ID != "uid-2" {
+		t.Fatalf("ListEvents = %#v pages=%d err=%v", events, pages, err)
+	}
+}
+
+func TestUnreadCountUsesLabel(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/token" {
+			writer.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(writer).Encode(map[string]any{"access_token": "ya29.access", "token_type": "Bearer", "expires_in": 3600})
+			return
+		}
+		if !strings.HasSuffix(request.URL.Path, "/labels/INBOX") {
+			http.NotFound(writer, request)
+			return
+		}
+		_ = json.NewEncoder(writer).Encode(map[string]any{"messagesUnread": 4})
+	}))
+	defer server.Close()
+	t.Setenv("POSTHOUSE_GOOGLE_CLIENT_ID", "desktop.apps.googleusercontent.com")
+	origBase, origToken := APIBase, TokenURL
+	APIBase, TokenURL = server.URL+"/gmail/v1", server.URL+"/token"
+	defer func() { APIBase, TokenURL = origBase, origToken }()
+	count, err := UnreadCount(context.Background(), model.Connection{ID: "gmail-work", Mail: &model.MailConfig{Kind: "gmail", ResolvedSecret: "refresh"}}, "")
+	if err != nil || count != 4 {
+		t.Fatalf("UnreadCount = %d, %v", count, err)
+	}
+}

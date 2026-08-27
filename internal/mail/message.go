@@ -25,7 +25,8 @@ import (
 	"github.com/timborovkov/posthouse/internal/model"
 )
 
-const maxMessageBytes = 64 << 20
+const MaxMessageBytes int64 = 64 << 20
+const maxMessageBytes = MaxMessageBytes
 
 type FetchedMessage struct {
 	Detail      model.MessageDetail
@@ -42,6 +43,7 @@ type Discovery struct {
 type MessagePrecondition struct {
 	UIDValidity uint32 `json:"uid_validity"`
 	ModSeq      uint64 `json:"modseq,omitempty"`
+	Version     string `json:"version,omitempty"`
 }
 
 type UncertainAppendError struct{ Err error }
@@ -153,9 +155,18 @@ func messageBodySection() *imap.FetchItemBodySection {
 }
 
 func readBoundedLiteral(reader io.Reader, limit int64) ([]byte, error) {
-	data, err := io.ReadAll(io.LimitReader(reader, limit+1))
+	data, err := ReadBounded(reader, limit)
 	if err != nil {
 		return nil, fmt.Errorf("read IMAP message body: %w", err)
+	}
+	return data, nil
+}
+
+// ReadBounded reads up to limit bytes and rejects input that would exceed it.
+func ReadBounded(reader io.Reader, limit int64) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(reader, limit+1))
+	if err != nil {
+		return nil, err
 	}
 	if int64(len(data)) > limit {
 		return nil, fmt.Errorf("message exceeds 64 MiB read limit")
@@ -232,7 +243,7 @@ func parseMessage(raw []byte) (FetchedMessage, error) {
 		if readErr != nil {
 			return FetchedMessage{}, fmt.Errorf("read MIME part: %w", readErr)
 		}
-		if len(data) > maxMessageBytes {
+		if int64(len(data)) > maxMessageBytes {
 			return FetchedMessage{}, fmt.Errorf("MIME part exceeds 64 MiB read limit")
 		}
 		switch header := part.Header.(type) {

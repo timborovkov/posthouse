@@ -54,7 +54,7 @@ func TestSearchGetSendAndLabelAgainstFixture(t *testing.T) {
 			patched = true
 			_ = json.NewEncoder(writer).Encode(map[string]any{"id": "AAMkAG", "isRead": true})
 		case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/me"):
-			_ = json.NewEncoder(writer).Encode(map[string]any{"id": "user-1"})
+			_ = json.NewEncoder(writer).Encode(map[string]any{"id": "user-1", "mail": "me@contoso.test", "userPrincipalName": "me@contoso.test"})
 		default:
 			http.NotFound(writer, request)
 		}
@@ -188,5 +188,125 @@ func TestSearchSentFolderKeepsSentLabel(t *testing.T) {
 	result, err := Search(context.Background(), connection, postmail.SearchOptions{Folder: "SENT", Limit: 10})
 	if err != nil || len(result.Messages) != 1 || result.Messages[0].Folder != "SENT" {
 		t.Fatalf("Search SENT = %#v, %v", result, err)
+	}
+}
+
+func TestSearchQueryStaysInRequestedFolder(t *testing.T) {
+	var sawInbox, sawAllMail bool
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/token" {
+			writer.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(writer).Encode(map[string]any{"access_token": "graph-access", "token_type": "Bearer", "expires_in": 3600})
+			return
+		}
+		if request.Header.Get("Prefer") != `IdType="ImmutableId"` {
+			http.Error(writer, "missing immutable id prefer", http.StatusBadRequest)
+			return
+		}
+		switch {
+		case strings.Contains(request.URL.Path, "/mailFolders/sentitems/messages"):
+			sawInbox = true
+			_ = json.NewEncoder(writer).Encode(map[string]any{"value": []map[string]any{{
+				"id": "sent-hit", "subject": "renewal", "receivedDateTime": "2026-08-17T12:00:00Z", "isRead": true,
+				"parentFolderId": "folder-sent",
+			}}})
+		case request.URL.Path == "/me/messages":
+			sawAllMail = true
+			http.Error(writer, "search escaped the folder", http.StatusTeapot)
+		case strings.HasPrefix(request.URL.Path, "/me/mailFolders/"):
+			ids := map[string]string{"inbox": "folder-inbox", "sentitems": "folder-sent", "drafts": "folder-drafts", "deleteditems": "folder-trash", "archive": "folder-archive"}
+			name := strings.TrimPrefix(request.URL.Path, "/me/mailFolders/")
+			_ = json.NewEncoder(writer).Encode(map[string]any{"id": ids[name]})
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+	t.Setenv("POSTHOUSE_MICROSOFT_CLIENT_ID", "public-client")
+	origBase, origToken := APIBase, TokenURL
+	APIBase, TokenURL = server.URL, server.URL+"/token"
+	defer func() { APIBase, TokenURL = origBase, origToken }()
+	result, err := Search(context.Background(), model.Connection{ID: "ms", Mail: &model.MailConfig{Kind: "microsoft", ResolvedSecret: "refresh-ms"}}, postmail.SearchOptions{Folder: "SENT", Query: "renewal", Limit: 10})
+	if err != nil || !sawInbox || sawAllMail || len(result.Messages) != 1 || result.Messages[0].Folder != "SENT" {
+		t.Fatalf("Search SENT query = %#v err=%v inbox=%v all=%v", result, err, sawInbox, sawAllMail)
+	}
+}
+
+func TestListEventsUsesCalendarViewAndFollowsNextLink(t *testing.T) {
+	pages := 0
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/token" {
+			writer.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(writer).Encode(map[string]any{"access_token": "graph-access", "token_type": "Bearer", "expires_in": 3600})
+			return
+		}
+		pages++
+		if request.URL.Path == "/me/events" {
+			http.Error(writer, "ranged lists must use calendarView", http.StatusTeapot)
+			return
+		}
+		if request.URL.Path != "/me/calendarView" {
+			http.NotFound(writer, request)
+			return
+		}
+		if request.URL.Query().Get("$skiptoken") == "page-2" || strings.Contains(request.URL.RawQuery, "skiptoken") {
+			_ = json.NewEncoder(writer).Encode(map[string]any{"value": []map[string]any{{
+				"id": "evt-2", "iCalUId": "uid-2", "subject": "Two",
+				"start": map[string]string{"dateTime": "2026-08-17T11:00:00", "timeZone": "UTC"},
+				"end":   map[string]string{"dateTime": "2026-08-17T12:00:00", "timeZone": "UTC"},
+			}}})
+			return
+		}
+		_ = json.NewEncoder(writer).Encode(map[string]any{
+			"value": []map[string]any{{
+				"id": "evt-1", "iCalUId": "uid-1", "subject": "One",
+				"start": map[string]string{"dateTime": "2026-08-17T09:00:00", "timeZone": "UTC"},
+				"end":   map[string]string{"dateTime": "2026-08-17T10:00:00", "timeZone": "UTC"},
+			}},
+			"@odata.nextLink": APIBase + "/me/calendarView?startDateTime=2026-08-17T00:00:00Z&endDateTime=2026-08-18T00:00:00Z&$skiptoken=page-2",
+		})
+	}))
+	defer server.Close()
+	t.Setenv("POSTHOUSE_MICROSOFT_CLIENT_ID", "public-client")
+	origBase, origToken := APIBase, TokenURL
+	APIBase, TokenURL = server.URL, server.URL+"/token"
+	defer func() { APIBase, TokenURL = origBase, origToken }()
+	start := time.Date(2026, 8, 17, 0, 0, 0, 0, time.UTC)
+	events, err := ListEvents(context.Background(), model.Connection{ID: "ms", Calendar: &model.CalendarConfig{Kind: "microsoft", ResolvedSecret: "refresh-ms"}}, start, start.Add(24*time.Hour), "")
+	if err != nil || pages != 2 || len(events) != 2 || events[1].ID != "uid-2" {
+		t.Fatalf("ListEvents = %#v pages=%d err=%v", events, pages, err)
+	}
+}
+
+func TestPutEventSerializesAttendeesAndAllDay(t *testing.T) {
+	var body map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/token" {
+			writer.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(writer).Encode(map[string]any{"access_token": "graph-access", "token_type": "Bearer", "expires_in": 3600})
+			return
+		}
+		_ = json.NewDecoder(request.Body).Decode(&body)
+		_ = json.NewEncoder(writer).Encode(map[string]any{
+			"id": "evt-2", "iCalUId": "uid-2", "subject": "Offsite", "isAllDay": true,
+			"start":     map[string]string{"dateTime": "2026-08-17T00:00:00", "timeZone": "UTC"},
+			"end":       map[string]string{"dateTime": "2026-08-18T00:00:00", "timeZone": "UTC"},
+			"attendees": []map[string]any{{"emailAddress": map[string]string{"address": "a@example.test"}}},
+		})
+	}))
+	defer server.Close()
+	t.Setenv("POSTHOUSE_MICROSOFT_CLIENT_ID", "public-client")
+	origBase, origToken := APIBase, TokenURL
+	APIBase, TokenURL = server.URL, server.URL+"/token"
+	defer func() { APIBase, TokenURL = origBase, origToken }()
+	start := time.Date(2026, 8, 17, 9, 0, 0, 0, time.UTC)
+	written, err := PutEvent(context.Background(), model.Connection{ID: "ms", Calendar: &model.CalendarConfig{Kind: "microsoft", ResolvedSecret: "refresh-ms"}}, model.Event{
+		Title: "Offsite", Start: start, End: start.Add(24 * time.Hour), AllDay: true, Attendees: []string{"a@example.test"},
+	}, true)
+	if err != nil || !written.AllDay || len(written.Attendees) != 1 {
+		t.Fatalf("PutEvent = %#v err=%v", written, err)
+	}
+	if body["isAllDay"] != true {
+		t.Fatalf("payload = %#v", body)
 	}
 }

@@ -27,6 +27,9 @@ var TokenURL string
 
 const nativeUIDValidity uint32 = 1
 const gmailBatchLimit = 50
+const gmailJSONLimit int64 = 8 << 20
+const gmailRawJSONLimit = postmail.MaxMessageBytes + postmail.MaxMessageBytes/2
+const maxEventPages = 50
 const metadataQuery = "format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Subject&metadataHeaders=Date&metadataHeaders=Message-Id"
 
 type listResponse struct {
@@ -109,12 +112,15 @@ func Get(ctx context.Context, connection model.Connection, id string) (postmail.
 		return postmail.FetchedMessage{}, err
 	}
 	var payload rawMessage
-	if err := doJSON(ctx, client, http.MethodGet, APIBase+"/users/me/messages/"+url.PathEscape(id)+"?format=raw", nil, &payload); err != nil {
+	if err := doJSONLimit(ctx, client, http.MethodGet, APIBase+"/users/me/messages/"+url.PathEscape(id)+"?format=raw", nil, &payload, gmailRawJSONLimit); err != nil {
 		return postmail.FetchedMessage{}, err
 	}
 	raw, err := decodeRaw(payload.Raw)
 	if err != nil {
 		return postmail.FetchedMessage{}, err
+	}
+	if int64(len(raw)) > postmail.MaxMessageBytes {
+		return postmail.FetchedMessage{}, fmt.Errorf("message exceeds 64 MiB read limit")
 	}
 	fetched, err := postmail.ParseRFC822(raw)
 	if err != nil {
@@ -189,14 +195,58 @@ func DeleteDraft(ctx context.Context, connection model.Connection, id string) er
 }
 
 func Ping(ctx context.Context, connection model.Connection) error {
+	_, err := ProfileEmail(ctx, connection)
+	return err
+}
+
+func ProfileEmail(ctx context.Context, connection model.Connection) (string, error) {
 	client, err := httpClient(ctx, connection)
 	if err != nil {
-		return err
+		return "", err
 	}
 	var profile struct {
 		EmailAddress string `json:"emailAddress"`
 	}
-	return doJSON(ctx, client, http.MethodGet, APIBase+"/users/me/profile", nil, &profile)
+	if err := doJSON(ctx, client, http.MethodGet, APIBase+"/users/me/profile", nil, &profile); err != nil {
+		return "", err
+	}
+	email := strings.TrimSpace(profile.EmailAddress)
+	if email == "" {
+		return "", fmt.Errorf("gmail profile did not include an email address")
+	}
+	return email, nil
+}
+
+func UnreadCount(ctx context.Context, connection model.Connection, folder string) (int, error) {
+	client, err := httpClient(ctx, connection)
+	if err != nil {
+		return 0, err
+	}
+	label := unreadLabel(folder)
+	var payload struct {
+		MessagesUnread int `json:"messagesUnread"`
+	}
+	if err := doJSON(ctx, client, http.MethodGet, APIBase+"/users/me/labels/"+url.PathEscape(label), nil, &payload); err != nil {
+		return 0, err
+	}
+	return payload.MessagesUnread, nil
+}
+
+func Snapshot(ctx context.Context, connection model.Connection, id string) (string, error) {
+	client, err := httpClient(ctx, connection)
+	if err != nil {
+		return "", err
+	}
+	var payload struct {
+		HistoryID json.Number `json:"historyId"`
+	}
+	if err := doJSON(ctx, client, http.MethodGet, APIBase+"/users/me/messages/"+url.PathEscape(id)+"?format=minimal", nil, &payload); err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(payload.HistoryID.String()) == "" {
+		return "", fmt.Errorf("gmail message %s is missing a history id", id)
+	}
+	return payload.HistoryID.String(), nil
 }
 
 func ListEvents(ctx context.Context, connection model.Connection, start, end time.Time, query string) ([]model.Event, error) {
@@ -215,17 +265,31 @@ func ListEvents(ctx context.Context, connection model.Connection, start, end tim
 		values.Set("q", query)
 	}
 	values.Set("singleEvents", "true")
-	var listed struct {
-		Items []calendarEvent `json:"items"`
+	values.Set("maxResults", "2500")
+	events := make([]model.Event, 0)
+	pageToken := ""
+	for page := 0; page < maxEventPages; page++ {
+		if pageToken != "" {
+			values.Set("pageToken", pageToken)
+		} else {
+			values.Del("pageToken")
+		}
+		var listed struct {
+			Items         []calendarEvent `json:"items"`
+			NextPageToken string          `json:"nextPageToken"`
+		}
+		if err := doJSON(ctx, client, http.MethodGet, CalendarAPIBase+"/calendars/primary/events?"+values.Encode(), nil, &listed); err != nil {
+			return nil, err
+		}
+		for _, item := range listed.Items {
+			events = append(events, item.model(connection.ID))
+		}
+		if listed.NextPageToken == "" {
+			return events, nil
+		}
+		pageToken = listed.NextPageToken
 	}
-	if err := doJSON(ctx, client, http.MethodGet, CalendarAPIBase+"/calendars/primary/events?"+values.Encode(), nil, &listed); err != nil {
-		return nil, err
-	}
-	events := make([]model.Event, 0, len(listed.Items))
-	for _, item := range listed.Items {
-		events = append(events, item.model(connection.ID))
-	}
-	return events, nil
+	return nil, fmt.Errorf("gmail calendar listing exceeded %d pages", maxEventPages)
 }
 
 func PutEvent(ctx context.Context, connection model.Connection, event model.Event, create bool) (model.Event, error) {
@@ -234,46 +298,69 @@ func PutEvent(ctx context.Context, connection model.Connection, event model.Even
 		return model.Event{}, err
 	}
 	payload := calendarEvent{
-		ID:          event.ID,
 		Summary:     event.Title,
 		Description: event.Description,
 		Location:    event.Location,
-		Start:       calendarTime{DateTime: event.Start.UTC().Format(time.RFC3339)},
-		End:         calendarTime{DateTime: event.End.UTC().Format(time.RFC3339)},
 		Status:      event.Status,
-		ICalUID:     event.ID,
+		Attendees:   calendarAttendees(event.Attendees),
+		Recurrence:  calendarRecurrence(event),
+	}
+	if event.AllDay {
+		payload.Start = calendarTime{Date: event.Start.UTC().Format("2006-01-02")}
+		payload.End = calendarTime{Date: event.End.UTC().Format("2006-01-02")}
+	} else {
+		payload.Start = calendarTime{DateTime: event.Start.UTC().Format(time.RFC3339)}
+		payload.End = calendarTime{DateTime: event.End.UTC().Format(time.RFC3339)}
 	}
 	method, path := http.MethodPost, CalendarAPIBase+"/calendars/primary/events"
-	if !create && event.Href != "" {
-		method, path = http.MethodPut, CalendarAPIBase+"/calendars/primary/events/"+url.PathEscape(event.Href)
-	} else if !create && event.ID != "" {
-		method, path = http.MethodPut, CalendarAPIBase+"/calendars/primary/events/"+url.PathEscape(event.ID)
+	var headers http.Header
+	if create {
+		payload.ICalUID = event.ID
+	} else {
+		id := event.Href
+		if id == "" {
+			id = event.ID
+		}
+		method, path = http.MethodPut, CalendarAPIBase+"/calendars/primary/events/"+url.PathEscape(id)
+		if strings.TrimSpace(event.ETag) != "" {
+			headers = http.Header{"If-Match": []string{event.ETag}}
+		}
 	}
 	var saved calendarEvent
-	if err := doJSON(ctx, client, method, path, payload, &saved); err != nil {
+	if err := doJSONHeaders(ctx, client, method, path, payload, &saved, headers, gmailJSONLimit); err != nil {
 		return model.Event{}, err
 	}
 	return saved.model(connection.ID), nil
 }
 
-func DeleteEvent(ctx context.Context, connection model.Connection, id string) error {
+func DeleteEvent(ctx context.Context, connection model.Connection, id, etag string) error {
 	client, err := httpClient(ctx, connection)
 	if err != nil {
 		return err
 	}
-	return doJSON(ctx, client, http.MethodDelete, CalendarAPIBase+"/calendars/primary/events/"+url.PathEscape(id), nil, nil)
+	var headers http.Header
+	if strings.TrimSpace(etag) != "" {
+		headers = http.Header{"If-Match": []string{etag}}
+	}
+	return doJSONHeaders(ctx, client, http.MethodDelete, CalendarAPIBase+"/calendars/primary/events/"+url.PathEscape(id), nil, nil, headers, gmailJSONLimit)
 }
 
 type calendarEvent struct {
-	ID          string       `json:"id"`
-	ICalUID     string       `json:"iCalUID,omitempty"`
-	Summary     string       `json:"summary"`
-	Description string       `json:"description,omitempty"`
-	Location    string       `json:"location,omitempty"`
-	Start       calendarTime `json:"start"`
-	End         calendarTime `json:"end"`
-	Status      string       `json:"status,omitempty"`
-	ETag        string       `json:"etag,omitempty"`
+	ID          string             `json:"id,omitempty"`
+	ICalUID     string             `json:"iCalUID,omitempty"`
+	Summary     string             `json:"summary"`
+	Description string             `json:"description,omitempty"`
+	Location    string             `json:"location,omitempty"`
+	Start       calendarTime       `json:"start"`
+	End         calendarTime       `json:"end"`
+	Status      string             `json:"status,omitempty"`
+	ETag        string             `json:"etag,omitempty"`
+	Attendees   []calendarAttendee `json:"attendees,omitempty"`
+	Recurrence  []string           `json:"recurrence,omitempty"`
+}
+
+type calendarAttendee struct {
+	Email string `json:"email"`
 }
 
 type calendarTime struct {
@@ -290,7 +377,55 @@ func (item calendarEvent) model(connectionID string) model.Event {
 	event.Start = parseCalendarTime(item.Start)
 	event.End = parseCalendarTime(item.End)
 	event.AllDay = item.Start.Date != ""
+	for _, attendee := range item.Attendees {
+		if email := strings.TrimSpace(attendee.Email); email != "" {
+			event.Attendees = append(event.Attendees, email)
+		}
+	}
+	if rule := firstRecurrenceRule(item.Recurrence); rule != "" {
+		event.RecurrenceRule = rule
+	}
 	return event
+}
+
+func calendarAttendees(values []string) []calendarAttendee {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make([]calendarAttendee, 0, len(values))
+	for _, value := range values {
+		if email := strings.TrimSpace(value); email != "" {
+			out = append(out, calendarAttendee{Email: email})
+		}
+	}
+	return out
+}
+
+func calendarRecurrence(event model.Event) []string {
+	lines := make([]string, 0, 1+len(event.RecurrenceDates)+len(event.ExceptionDates))
+	if rule := strings.TrimSpace(event.RecurrenceRule); rule != "" {
+		if !strings.HasPrefix(strings.ToUpper(rule), "RRULE:") {
+			rule = "RRULE:" + rule
+		}
+		lines = append(lines, rule)
+	}
+	for _, value := range event.RecurrenceDates {
+		lines = append(lines, "RDATE:"+value.UTC().Format("20060102T150405Z"))
+	}
+	for _, value := range event.ExceptionDates {
+		lines = append(lines, "EXDATE:"+value.UTC().Format("20060102T150405Z"))
+	}
+	return lines
+}
+
+func firstRecurrenceRule(lines []string) string {
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(strings.ToUpper(trimmed), "RRULE:") {
+			return strings.TrimSpace(trimmed[6:])
+		}
+	}
+	return ""
 }
 
 func parseCalendarTime(value calendarTime) time.Time {
@@ -516,6 +651,23 @@ func afterCursor(message model.Message, options postmail.SearchOptions) bool {
 	return message.ID != options.CursorID
 }
 
+func unreadLabel(folder string) string {
+	switch strings.ToUpper(strings.TrimSpace(folder)) {
+	case "", "INBOX":
+		return "INBOX"
+	case "SENT":
+		return "SENT"
+	case "DRAFTS", "DRAFT":
+		return "DRAFT"
+	case "TRASH":
+		return "TRASH"
+	case "SPAM", "JUNK":
+		return "SPAM"
+	default:
+		return folder
+	}
+}
+
 func folderFromLabels(labels []string) string {
 	for _, label := range labels {
 		switch label {
@@ -579,6 +731,14 @@ func resolvedRefreshToken(connection model.Connection) string {
 }
 
 func doJSON(ctx context.Context, client *http.Client, method, rawURL string, body any, dest any) error {
+	return doJSONHeaders(ctx, client, method, rawURL, body, dest, nil, gmailJSONLimit)
+}
+
+func doJSONLimit(ctx context.Context, client *http.Client, method, rawURL string, body any, dest any, limit int64) error {
+	return doJSONHeaders(ctx, client, method, rawURL, body, dest, nil, limit)
+}
+
+func doJSONHeaders(ctx context.Context, client *http.Client, method, rawURL string, body any, dest any, headers http.Header, limit int64) error {
 	var reader io.Reader
 	if body != nil {
 		data, err := json.Marshal(body)
@@ -594,12 +754,20 @@ func doJSON(ctx context.Context, client *http.Client, method, rawURL string, bod
 	if body != nil {
 		request.Header.Set("Content-Type", "application/json")
 	}
+	for key, values := range headers {
+		for _, value := range values {
+			request.Header.Add(key, value)
+		}
+	}
 	response, err := client.Do(request)
 	if err != nil {
 		return err
 	}
 	defer response.Body.Close()
-	payload, err := io.ReadAll(io.LimitReader(response.Body, 8<<20))
+	if limit <= 0 {
+		limit = gmailJSONLimit
+	}
+	payload, err := postmail.ReadBounded(response.Body, limit)
 	if err != nil {
 		return err
 	}

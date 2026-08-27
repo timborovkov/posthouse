@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/timborovkov/posthouse/internal/config"
 	"github.com/timborovkov/posthouse/internal/gmail"
 	postmail "github.com/timborovkov/posthouse/internal/mail"
 	"github.com/timborovkov/posthouse/internal/microsoft"
@@ -108,6 +109,9 @@ func TestAuthorizeConnectionStoresKeychainRefWithoutToken(t *testing.T) {
 		}
 		return "refresh-secret-value", nil
 	}
+	application.nativeIdentity = func(context.Context, model.Connection) (string, error) {
+		return "", nil
+	}
 	result, err := application.AuthorizeConnection(context.Background(), "gmail-work", true)
 	if err != nil {
 		t.Fatal(err)
@@ -167,6 +171,8 @@ func TestGmailPrepareSendAndLabelExecuteAgainstFixture(t *testing.T) {
 			return
 		}
 		switch {
+		case request.Method == http.MethodGet && strings.Contains(request.URL.Path, "/messages/"):
+			_ = json.NewEncoder(writer).Encode(map[string]any{"id": "msg-1", "historyId": "1001"})
 		case strings.HasSuffix(request.URL.Path, "/messages/send"):
 			sent = true
 			body, _ := io.ReadAll(request.Body)
@@ -286,11 +292,131 @@ func TestNativeCalendarPrepareExecuteAgainstFixture(t *testing.T) {
 	if _, err := application.ExecuteOperation(context.Background(), prepared.Token); err != nil || !created {
 		t.Fatalf("execute create = %v created=%v", err, created)
 	}
-	deletion, err := application.PrepareCalendarDelete(context.Background(), "gmail-work", "", "evt-1", "", "")
+	deletion, err := application.PrepareCalendarDelete(context.Background(), "gmail-work", "", "evt-1", `"etag-1"`, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := application.ExecuteOperation(context.Background(), deletion.Token); err != nil || !deleted {
 		t.Fatalf("execute delete = %v deleted=%v", err, deleted)
+	}
+}
+
+func TestNativeSearchCursorUsesOpaqueID(t *testing.T) {
+	application := serviceWithConnections(t, model.Connection{ID: "gmail-work", Name: "Gmail", Mail: &model.MailConfig{Kind: "gmail", Secret: model.SecretRef{Env: "GMAIL_WORK_REFRESH"}}})
+	t.Setenv("GMAIL_WORK_REFRESH", "refresh")
+	stamp := instant(10)
+	application.mailSearch = func(connection model.Connection, options postmail.SearchOptions) (postmail.SearchResult, error) {
+		messages := []model.Message{
+			{ConnectionID: "gmail-work", ID: "a", Subject: "A", ReceivedAt: stamp},
+			{ConnectionID: "gmail-work", ID: "b", Subject: "B", ReceivedAt: stamp},
+		}
+		if options.CursorID == "" {
+			return postmail.SearchResult{UIDValidity: 1, HasMore: true, Messages: messages}, nil
+		}
+		kept := make([]model.Message, 0)
+		for _, message := range messages {
+			if message.ID != options.CursorID && (options.CursorTime.IsZero() || !message.ReceivedAt.After(options.CursorTime)) {
+				if messageBefore(model.Message{ID: options.CursorID, ReceivedAt: options.CursorTime, ConnectionID: connection.ID}, message) {
+					kept = append(kept, message)
+				}
+			}
+		}
+		return postmail.SearchResult{UIDValidity: 1, Messages: kept}, nil
+	}
+	page, err := application.SearchMessages(model.Selector{}, postmail.SearchOptions{}, 1, "")
+	if err != nil || len(page.Messages) != 1 || page.NextCursor == "" {
+		t.Fatalf("first page = %#v err=%v", page, err)
+	}
+	second, err := application.SearchMessages(model.Selector{}, postmail.SearchOptions{}, 1, page.NextCursor)
+	if err != nil || len(second.Messages) != 1 || second.Messages[0].ID == page.Messages[0].ID {
+		t.Fatalf("second page replayed %q: %#v err=%v", page.Messages[0].ID, second, err)
+	}
+}
+
+func TestAuthorizeConnectionRejectsMismatchedIdentity(t *testing.T) {
+	keyring.MockInit()
+	t.Setenv("POSTHOUSE_GOOGLE_CLIENT_ID", "desktop.apps.googleusercontent.com")
+	application := serviceWithConnections(t, model.Connection{ID: "gmail-work", Name: "Gmail", Identity: model.Identity{Email: "you@gmail.com"}, Mail: &model.MailConfig{Kind: "gmail"}})
+	application.authorizeOAuth = func(context.Context, oauth.Config, bool) (string, error) { return "refresh-secret-value", nil }
+	application.nativeIdentity = func(context.Context, model.Connection) (string, error) { return "other@gmail.com", nil }
+	if _, err := application.AuthorizeConnection(context.Background(), "gmail-work", true); err == nil || !strings.Contains(err.Error(), "does not match") {
+		t.Fatalf("AuthorizeConnection error = %v", err)
+	}
+}
+
+func TestRemoveNativeConnectionDeletesOwnedToken(t *testing.T) {
+	keyring.MockInit()
+	t.Setenv("POSTHOUSE_SECRETS_DIR", t.TempDir())
+	application := serviceWithConnections(t, model.Connection{ID: "gmail-work", Name: "Gmail", Mail: &model.MailConfig{Kind: "gmail"}})
+	if err := config.SetKeychainSecret("posthouse-gmail-work", "refresh-secret-value"); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.RemoveConnection("gmail-work"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := config.ResolveSecret(model.SecretRef{Keychain: "posthouse-gmail-work"}); err == nil {
+		t.Fatal("owned OAuth token remained after RemoveConnection")
+	}
+}
+
+func TestNativeSendTransportLossIsUncertain(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", "0000000000000000000000000000000000000000000000000000000000000000")
+	t.Setenv("POSTHOUSE_GOOGLE_CLIENT_ID", "desktop.apps.googleusercontent.com")
+	t.Setenv("GMAIL_REFRESH", "refresh")
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/token" {
+			writer.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(writer).Encode(map[string]any{"access_token": "ya29.access", "token_type": "Bearer", "expires_in": 3600})
+			return
+		}
+		hijacker, ok := writer.(http.Hijacker)
+		if !ok {
+			http.Error(writer, "no hijack", http.StatusInternalServerError)
+			return
+		}
+		conn, _, err := hijacker.Hijack()
+		if err != nil {
+			return
+		}
+		_ = conn.Close()
+	}))
+	defer server.Close()
+	origBase, origToken := gmail.APIBase, gmail.TokenURL
+	gmail.APIBase, gmail.TokenURL = server.URL+"/gmail/v1", server.URL+"/token"
+	defer func() { gmail.APIBase, gmail.TokenURL = origBase, origToken }()
+	application := serviceWithConnections(t, model.Connection{
+		ID: "gmail-work", Name: "Gmail", Identity: model.Identity{Email: "me@acme.test"},
+		Mail: &model.MailConfig{Kind: "gmail", Secret: model.SecretRef{Env: "GMAIL_REFRESH"}},
+	})
+	application.mailBuild = func(model.Connection, model.SendMessage) ([]byte, error) { return []byte("raw"), nil }
+	prepared, err := application.PrepareSend(context.Background(), model.SendMessage{ConnectionID: "gmail-work", To: []string{"a@example.test"}, Subject: "Hi", Text: "body"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := application.ExecuteOperation(context.Background(), prepared.Token)
+	if err == nil || result.Status != "uncertain" {
+		t.Fatalf("result = %#v err=%v", result, err)
+	}
+}
+
+func TestNativeUnreadCountsUseBackend(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/token" {
+			writer.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(writer).Encode(map[string]any{"access_token": "ya29.access", "token_type": "Bearer", "expires_in": 3600})
+			return
+		}
+		_ = json.NewEncoder(writer).Encode(map[string]any{"messagesUnread": 7})
+	}))
+	defer server.Close()
+	t.Setenv("POSTHOUSE_GOOGLE_CLIENT_ID", "desktop.apps.googleusercontent.com")
+	t.Setenv("GMAIL_REFRESH", "refresh")
+	origBase, origToken := gmail.APIBase, gmail.TokenURL
+	gmail.APIBase, gmail.TokenURL = server.URL+"/gmail/v1", server.URL+"/token"
+	defer func() { gmail.APIBase, gmail.TokenURL = origBase, origToken }()
+	application := serviceWithConnections(t, model.Connection{ID: "gmail-work", Name: "Gmail", Mail: &model.MailConfig{Kind: "gmail", Secret: model.SecretRef{Env: "GMAIL_REFRESH"}}})
+	summaries, err := application.UnreadCounts(context.Background(), model.Selector{}, "")
+	if err != nil || len(summaries) != 1 || summaries[0].Unread != 7 || summaries[0].Error != "" {
+		t.Fatalf("UnreadCounts = %#v err=%v", summaries, err)
 	}
 }

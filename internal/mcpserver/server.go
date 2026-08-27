@@ -367,7 +367,7 @@ func (s *Server) registerTools() {
 			return nil, page, err
 		})
 
-	mcp.AddTool(s.mcp, &mcp.Tool{Name: "messages_triage", Title: "Triage messages", Description: "Compact inbox triage across selected connections: from, subject, date, unread/flagged, attachment hint, and short preview. Start here before messages_get. Pass next_cursor back unchanged with identical filters.", Annotations: readOnly},
+	mcp.AddTool(s.mcp, &mcp.Tool{Name: "messages_triage", Title: "Triage messages", Description: "Compact inbox triage across selected connections: opaque id, from, subject, date, unread/flagged, attachment hint, and short preview. Start here before messages_get. Pass next_cursor back unchanged with identical filters. Use id (not uid) for Gmail and Microsoft messages.", Annotations: readOnly},
 		func(ctx context.Context, _ *mcp.CallToolRequest, input messageSearchInput) (*mcp.CallToolResult, model.TriagePage, error) {
 			page, err := s.service.TriageMessages(ctx, input.selector(), postmail.SearchOptions{Folder: input.Folder, Query: input.Query, Unread: input.Unread, Mode: input.Mode}, input.PageSize, input.Cursor)
 			return nil, page, err

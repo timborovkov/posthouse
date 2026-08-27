@@ -211,8 +211,9 @@ type MessageDetail struct {
 // TriageItem is a compact message summary for agent inbox triage.
 type TriageItem struct {
 	ConnectionID   string    `json:"connection_id"`
+	ID             string    `json:"id,omitempty"`
 	Folder         string    `json:"folder"`
-	UID            uint32    `json:"uid"`
+	UID            uint32    `json:"uid,omitempty"`
 	From           []Address `json:"from,omitempty"`
 	Subject        string    `json:"subject,omitempty"`
 	Date           time.Time `json:"date,omitempty"`
