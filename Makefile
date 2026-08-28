@@ -1,10 +1,14 @@
 .PHONY: build generate generate-check format test test-container test-integration test-e2e vet validate validate-all clean
 
 GOCACHE ?= /tmp/posthouse-go-cache
+POSTHOUSE_GOOGLE_CLIENT_ID ?=
+POSTHOUSE_GOOGLE_CLIENT_SECRET ?=
+POSTHOUSE_MICROSOFT_CLIENT_ID ?=
+LDFLAGS ?= -s -w -X github.com/timborovkov/posthouse/internal/oauth.GoogleClientID=$(POSTHOUSE_GOOGLE_CLIENT_ID) -X github.com/timborovkov/posthouse/internal/oauth.GoogleClientSecret=$(POSTHOUSE_GOOGLE_CLIENT_SECRET) -X github.com/timborovkov/posthouse/internal/oauth.MicrosoftClientID=$(POSTHOUSE_MICROSOFT_CLIENT_ID)
 
 build:
 	mkdir -p bin
-	CGO_ENABLED=0 GOCACHE=$(GOCACHE) go build -trimpath -o bin/posthouse ./cmd/posthouse
+	CGO_ENABLED=0 GOCACHE=$(GOCACHE) go build -trimpath -ldflags="$(LDFLAGS)" -o bin/posthouse ./cmd/posthouse
 
 generate:
 	GOCACHE=$(GOCACHE) go run github.com/grindlemire/go-tui/cmd/tui generate internal/tui/app.gsx
@@ -34,7 +38,7 @@ vet:
 
 validate: vet test
 	test -z "$$(gofmt -l cmd internal)"
-	CGO_ENABLED=0 GOCACHE=$(GOCACHE) go build -o /tmp/posthouse-validate ./cmd/posthouse
+	CGO_ENABLED=0 GOCACHE=$(GOCACHE) go build -ldflags="$(LDFLAGS)" -o /tmp/posthouse-validate ./cmd/posthouse
 
 validate-all: validate generate-check test-container test-integration test-e2e
 

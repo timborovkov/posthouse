@@ -272,6 +272,29 @@ func TestValidateRejectsDuplicateCalendarCollectionIDs(t *testing.T) {
 	}
 }
 
+func TestValidateNativeMailAndCalendarConnections(t *testing.T) {
+	gmailConn := model.Connection{ID: "gmail-work", Name: "Gmail work", Identity: model.Identity{Email: "you@gmail.com"}, Mail: &model.MailConfig{Kind: "gmail"}, Calendar: &model.CalendarConfig{Kind: "gmail"}}
+	if err := Validate(model.Config{Connections: []model.Connection{gmailConn}}); err != nil {
+		t.Fatalf("Validate rejected native Gmail connection: %v", err)
+	}
+	normalized, err := Normalize(model.Config{Connections: []model.Connection{gmailConn}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(normalized.Connections[0].Capabilities, ",")
+	if got != "mail.read,mail.send,calendar.read,calendar.write" {
+		t.Fatalf("native capabilities = %q", got)
+	}
+	gmailConn.Mail.IMAP.Address = "imap.gmail.com:993"
+	if err := Validate(model.Config{Connections: []model.Connection{gmailConn}}); err == nil {
+		t.Fatal("Validate accepted Gmail IMAP hostname")
+	}
+	microsoftConn := model.Connection{ID: "ms", Name: "Microsoft", Mail: &model.MailConfig{Kind: "microsoft", Secret: model.SecretRef{Env: "MS_REFRESH"}}}
+	if err := Validate(model.Config{Connections: []model.Connection{microsoftConn}}); err != nil {
+		t.Fatalf("Validate rejected Microsoft connection: %v", err)
+	}
+}
+
 func TestValidateRejectsWhitespaceEquivalentConnectionIDs(t *testing.T) {
 	connection := model.Connection{ID: "work", Name: "Work", Mail: &model.MailConfig{Username: "work@example.test", SecretEnv: "WORK_PASSWORD", IMAP: model.IMAPConfig{Address: "imap.example.test:993", TLS: true}}}
 	spaced := connection
@@ -279,5 +302,55 @@ func TestValidateRejectsWhitespaceEquivalentConnectionIDs(t *testing.T) {
 	spaced.Name = "Spaced"
 	if err := Validate(model.Config{Connections: []model.Connection{connection, spaced}}); err == nil || !strings.Contains(err.Error(), "surrounding whitespace") {
 		t.Fatalf("Validate whitespace-equivalent IDs error = %v", err)
+	}
+}
+
+func TestSetKeychainSecretFallsBackNextToConfig(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := New(filepath.Join(dir, "config.json")); err != nil {
+		t.Fatal(err)
+	}
+	originalSet, originalGet, originalDelete, originalDir := keyringSet, keyringGet, keyringDelete, defaultSecretsDir
+	keyringSet = func(string, string, string) error { return fmt.Errorf("no os keychain") }
+	keyringGet = func(string, string) (string, error) { return "", fmt.Errorf("no os keychain") }
+	keyringDelete = func(string, string) error { return fmt.Errorf("no os keychain") }
+	defer func() {
+		keyringSet, keyringGet, keyringDelete, defaultSecretsDir = originalSet, originalGet, originalDelete, originalDir
+	}()
+
+	if err := SetKeychainSecret("posthouse-gmail-work", "refresh-token"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ResolveSecret(model.SecretRef{Keychain: "posthouse-gmail-work"})
+	if err != nil || got != "refresh-token" {
+		t.Fatalf("fallback resolve = %q, %v", got, err)
+	}
+	info, err := os.Stat(filepath.Join(dir, "secrets", "posthouse-gmail-work"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("secret file mode = %o", info.Mode().Perm())
+	}
+	if err := DeleteKeychainSecret("posthouse-gmail-work"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "secrets", "posthouse-gmail-work")); !os.IsNotExist(err) {
+		t.Fatalf("deleted secret still present: %v", err)
+	}
+}
+
+func TestDeleteKeychainSecretReportsDesktopKeyringErrors(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := New(filepath.Join(dir, "config.json")); err != nil {
+		t.Fatal(err)
+	}
+	originalDelete, originalDir := keyringDelete, defaultSecretsDir
+	keyringDelete = func(string, string) error { return fmt.Errorf("keyring locked") }
+	defer func() {
+		keyringDelete, defaultSecretsDir = originalDelete, originalDir
+	}()
+	if err := DeleteKeychainSecret("posthouse-gmail-work"); err == nil || !strings.Contains(err.Error(), "keyring locked") {
+		t.Fatalf("DeleteKeychainSecret locked = %v", err)
 	}
 }

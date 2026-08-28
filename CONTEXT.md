@@ -5,7 +5,7 @@ Posthouse gives people and agents one consistent language for working across oth
 ## Language
 
 **Connection**:
-One authenticated provider endpoint that offers one or more capabilities, such as mail or calendar, and carries the user's organizational metadata.
+One authenticated provider endpoint that offers one or more capabilities, such as mail or calendar, and carries the user's organizational metadata. Mail may be generic IMAP/SMTP or a native Gmail or Microsoft backend; calendar may be an ICS feed, CalDAV, or the matching native backend. Several Gmail connections are several connections.
 _Avoid_: Account, integration, inbox
 
 **Identity**:
@@ -33,7 +33,7 @@ An opaque, query-bound continuation token that resumes a list or search after it
 _Avoid_: Offset, page number, bookmark
 
 **Message**:
-An email item received from or sent through a mail-capable connection.
+An email item received from or sent through a mail-capable connection. Public identity is the connection plus an opaque `id`; `folder` is mailbox display metadata, and RFC `message_id` remains the header.
 _Avoid_: Mail, email
 
 **Event**:

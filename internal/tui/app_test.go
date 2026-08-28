@@ -121,14 +121,14 @@ func TestProviderReadsRunOffEventLoopAndAreCancellable(t *testing.T) {
 			case "message":
 				app.view.Set(1)
 				app.messages.Set([]model.Message{{ConnectionID: "work", Folder: "INBOX", UID: 1}})
-				app.getMessage = func(ctx context.Context, _, _ string, _ uint32) (model.MessageDetail, error) {
+				app.getMessage = func(ctx context.Context, _ string, _ service.MessageLocator) (model.MessageDetail, error) {
 					wait(ctx)
 					return model.MessageDetail{}, ctx.Err()
 				}
 			case "attachment":
 				app.view.Set(2)
 				app.detail.Set(model.MessageDetail{Message: model.Message{ConnectionID: "work", Folder: "INBOX", UID: 1}, Attachments: []model.Attachment{{ID: "one"}}})
-				app.getAttachment = func(ctx context.Context, _, _ string, _ uint32, _ string) (model.Attachment, []byte, error) {
+				app.getAttachment = func(ctx context.Context, _ string, _ service.MessageLocator, _ string) (model.Attachment, []byte, error) {
 					wait(ctx)
 					return model.Attachment{}, nil, ctx.Err()
 				}
@@ -271,7 +271,7 @@ func TestAttachmentSaveUsesSelectedMessageAttachment(t *testing.T) {
 	app.attachment.Set(model.Attachment{ID: "one", Name: "a.txt"})
 	app.attachmentData.Set([]byte("old"))
 	fetched := make(chan string, 1)
-	app.getAttachment = func(_ context.Context, _, _ string, _ uint32, id string) (model.Attachment, []byte, error) {
+	app.getAttachment = func(_ context.Context, _ string, _ service.MessageLocator, id string) (model.Attachment, []byte, error) {
 		fetched <- id
 		return model.Attachment{ID: id, Name: "b.txt"}, []byte("new"), nil
 	}
@@ -351,15 +351,18 @@ func TestConnectionEditorHelpAndProbePlaceholders(t *testing.T) {
 	if !strings.Contains(app.editorHelp(), "Esc cancels") || !strings.Contains(app.editorHelp(), "Enter saves") || !strings.Contains(app.editorHelp(), "probe") {
 		t.Fatalf("connection help=%q", app.editorHelp())
 	}
-	if app.editorPlaceholder(6) != "blank to probe" || app.editorPlaceholder(7) != "blank to probe" || app.editorPlaceholder(8) != "blank to probe" {
-		t.Fatalf("probe placeholders imap=%q smtp=%q caldav=%q", app.editorPlaceholder(6), app.editorPlaceholder(7), app.editorPlaceholder(8))
+	if app.editorPlaceholder(4) != "imap, gmail, or microsoft" {
+		t.Fatalf("kind placeholder=%q", app.editorPlaceholder(4))
+	}
+	if app.editorPlaceholder(7) != "blank to probe" || app.editorPlaceholder(8) != "blank to probe" || app.editorPlaceholder(9) != "blank to probe" {
+		t.Fatalf("probe placeholders imap=%q smtp=%q caldav=%q", app.editorPlaceholder(7), app.editorPlaceholder(8), app.editorPlaceholder(9))
 	}
 }
 
 func TestEditorFieldEscapeCancelsWhileFocused(t *testing.T) {
 	app := testApp(t)
 	defer app.close()
-	app.beginEditor("connection", []string{"id", "name", "", "", "", "", "", "", "", "", ""})
+	app.beginEditor("connection", []string{"id", "name", "", "", "", "", "", "", "", "", "", ""})
 	field := app.newEditorField(0)
 	dispatch(field.KeyMap(), tui.KeyEvent{Key: tui.KeyEscape})
 	if app.editor.Get() || app.modal.Get() {
@@ -390,7 +393,7 @@ func TestRemapFocusedEscapeReplacesInputBlur(t *testing.T) {
 func TestEditorFieldKeepsWidgetForSameState(t *testing.T) {
 	app := testApp(t)
 	defer app.close()
-	app.beginEditor("connection", make([]string, 11))
+	app.beginEditor("connection", make([]string, 12))
 	field := app.newEditorField(0)
 	inner := field.input
 	field.UpdateProps(app.newEditorField(0))
@@ -407,7 +410,7 @@ func TestEditorFieldKeepsWidgetForSameState(t *testing.T) {
 func TestConnectionEditorUsesSubmissionStartTLS(t *testing.T) {
 	app := testApp(t)
 	defer app.close()
-	app.beginEditor("connection", []string{"smtp", "SMTP", "work", "sender@example.test", "sender@example.test", "SMTP_PASSWORD", "", "smtp.example.test:587", "", "", ""})
+	app.beginEditor("connection", []string{"smtp", "SMTP", "work", "sender@example.test", "", "sender@example.test", "SMTP_PASSWORD", "", "smtp.example.test:587", "", "", ""})
 	app.submitEditor()
 	if app.errorText.Get() != "" {
 		t.Fatalf("SMTP 587 onboarding failed: %s", app.errorText.Get())
@@ -421,7 +424,7 @@ func TestConnectionEditorUsesSubmissionStartTLS(t *testing.T) {
 func TestConnectionEditorSupportsSMTPOnlyOnboarding(t *testing.T) {
 	app := testApp(t)
 	defer app.close()
-	app.beginEditor("connection", []string{"smtp", "SMTP", "work", "sender@example.test", "sender@example.test", "SMTP_PASSWORD", "", "smtp.example.test:465", "", "", ""})
+	app.beginEditor("connection", []string{"smtp", "SMTP", "work", "sender@example.test", "", "sender@example.test", "SMTP_PASSWORD", "", "smtp.example.test:465", "", "", ""})
 	app.submitEditor()
 	if app.errorText.Get() != "" {
 		t.Fatalf("SMTP-only onboarding failed: %s", app.errorText.Get())
@@ -475,13 +478,91 @@ func TestOnboardEnterStartsDiscoverFromModalKeys(t *testing.T) {
 		close(started)
 		return model.Connection{ID: id}, nil
 	}
-	app.beginEditor("connection", []string{"smtp", "SMTP", "work", "sender@example.test", "sender@example.test", "SMTP_PASSWORD", "", "smtp.example.test:465", "", "", ""})
+	app.beginEditor("connection", []string{"smtp", "SMTP", "work", "sender@example.test", "", "sender@example.test", "SMTP_PASSWORD", "", "smtp.example.test:465", "", "", ""})
 	app.submitEditor()
 	dispatch(app.modalKeyMap(), tui.KeyEvent{Key: tui.KeyEnter})
 	select {
 	case <-started:
 	case <-time.After(time.Second):
 		t.Fatal("Enter after onboard did not start discover")
+	}
+}
+
+func TestConnectionEditorOnboardsGmailAndOffersAuth(t *testing.T) {
+	app := testApp(t)
+	defer app.close()
+	app.beginEditor("connection", []string{"gmail-work", "Gmail", "work", "you@gmail.com", "gmail", "", "", "", "", "", "", ""})
+	app.submitEditor()
+	if app.errorText.Get() != "" {
+		t.Fatalf("gmail onboarding failed: %s", app.errorText.Get())
+	}
+	if app.pendingAuth.Get() != "gmail-work" || app.pendingDiscover.Get() != "" || !strings.Contains(app.modalText.Get(), "authorizes") {
+		t.Fatalf("onboarding did not offer auth: pendingAuth=%q pendingDiscover=%q modal=%q", app.pendingAuth.Get(), app.pendingDiscover.Get(), app.modalText.Get())
+	}
+	connections, err := app.service.Connections(model.Selector{})
+	if err != nil || len(connections) != 1 || connections[0].Mail == nil || connections[0].Mail.Kind != "gmail" || connections[0].Calendar == nil || connections[0].Calendar.Kind != "gmail" {
+		t.Fatalf("connections=%#v err=%v", connections, err)
+	}
+}
+
+func TestOnboardEnterStartsAuthFromModalKeys(t *testing.T) {
+	app := testApp(t)
+	defer app.close()
+	started := make(chan struct{})
+	app.authorizeConnection = func(ctx context.Context, id string, device bool) (map[string]any, error) {
+		if id != "gmail-work" || device {
+			t.Fatalf("auth id=%q device=%v", id, device)
+		}
+		close(started)
+		return map[string]any{"ok": true, "connection": id}, nil
+	}
+	app.beginEditor("connection", []string{"gmail-work", "Gmail", "work", "you@gmail.com", "gmail", "", "", "", "", "", "", ""})
+	app.submitEditor()
+	dispatch(app.modalKeyMap(), tui.KeyEvent{Key: tui.KeyEnter})
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("Enter after native onboard did not start auth")
+	}
+}
+
+func TestAuthorizeSelectedRejectsGenericConnections(t *testing.T) {
+	app := testApp(t)
+	defer app.close()
+	app.view.Set(0)
+	app.connections.Set([]model.Connection{{ID: "work", Mail: &model.MailConfig{IMAP: model.IMAPConfig{Address: "imap.example.test:993"}}}})
+	called := false
+	app.authorizeConnection = func(context.Context, string, bool) (map[string]any, error) {
+		called = true
+		return nil, nil
+	}
+	app.authorizeSelected()
+	if called || !strings.Contains(app.modalText.Get(), "Gmail and Microsoft") {
+		t.Fatalf("generic auth called=%v modal=%q", called, app.modalText.Get())
+	}
+}
+
+func TestAuthorizeSelectedStartsNativeAuth(t *testing.T) {
+	app := testApp(t)
+	defer app.close()
+	started := make(chan string, 1)
+	app.view.Set(0)
+	app.connections.Set([]model.Connection{{ID: "gmail-work", Mail: &model.MailConfig{Kind: "gmail"}}})
+	app.authorizeConnection = func(_ context.Context, id string, device bool) (map[string]any, error) {
+		if device {
+			t.Fatal("TUI auth should use browser loopback")
+		}
+		started <- id
+		return map[string]any{"ok": true, "connection": id}, nil
+	}
+	app.authorizeSelected()
+	select {
+	case id := <-started:
+		if id != "gmail-work" {
+			t.Fatalf("auth id=%q", id)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("authorizeSelected did not start auth")
 	}
 }
 

@@ -1,11 +1,13 @@
 ---
 name: posthouse-rest
-description: Call a self-hosted Posthouse REST /v1 API. Use when posthouse serve is up and the agent should use HTTP instead of the CLI.
+description: Call a self-hosted Posthouse REST /v1 API. Use when posthouse serve is up and the agent should use HTTP instead of the CLI. Do not collect OAuth tokens over HTTP.
 ---
 
 # Posthouse REST API
 
 Personal `posthouse serve` deployment: REST at `/v1`, MCP at `/mcp`. Prefer CLI skills when `posthouse` is local.
+
+If `GET /v1/connections` is empty, tell the user to connect the mailbox in a **shell** on that host (`connection auth` in a browser, or Microsoft `connection auth --device`). There is no REST OAuth or device-code endpoint. Do not accept refresh tokens in REST bodies.
 
 ## Auth
 
@@ -21,7 +23,7 @@ Base URL: `http://127.0.0.1:8791` or the user's HTTPS origin. Discover routes wi
 
 JSON bodies match MCP tool inputs. Writes need exact `connection` and return a prepared operation. Only `POST /v1/operations/execute` with `{"token":"..."}` performs the side effect. Show the preview and wait for confirmation. Policy deny classes (`mail.send`, `calendar.write`, …) still apply to prepare and execute over REST.
 
-Use base64 `data` on attachments (no filesystem `path`). ≤ 25 MiB total per mail/draft operation.
+Use base64 `data` on attachments (no filesystem `path`). ≤ 25 MiB total per mail/draft operation. Message identity is `connection` plus opaque `id` (not IMAP folder+UID).
 
 ```sh
 curl -sS -H "Authorization: Bearer $POSTHOUSE_ACCESS_KEY" "$POSTHOUSE_URL/v1/connections"

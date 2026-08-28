@@ -194,6 +194,36 @@ func TestSearchMessagesCompositeCursor(t *testing.T) {
 	}
 }
 
+func TestSearchAndGetRoundTripOpaqueMessageID(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	application := serviceWithConnections(t, mailConnection("work"))
+	application.mailSearch = func(_ model.Connection, _ postmail.SearchOptions) (postmail.SearchResult, error) {
+		return postmail.SearchResult{Messages: []model.Message{{ConnectionID: "work", Folder: "INBOX", UID: 42, Subject: "renewal"}}, UIDValidity: 9, UIDNext: 43}, nil
+	}
+	application.mailGetMessage = func(_ context.Context, connection model.Connection, folder string, uid uint32) (postmail.FetchedMessage, error) {
+		if folder != "INBOX" || uid != 42 {
+			t.Fatalf("get %s/%d", folder, uid)
+		}
+		return postmail.FetchedMessage{Detail: model.MessageDetail{Message: model.Message{ConnectionID: connection.ID, Folder: folder, UID: uid, Subject: "renewal"}, Text: "body"}, UIDValidity: 9}, nil
+	}
+	page, err := application.SearchMessages(model.Selector{}, postmail.SearchOptions{}, 10, "")
+	if err != nil || len(page.Messages) != 1 {
+		t.Fatalf("search page = %#v, %v", page, err)
+	}
+	wantID := postmail.EncodeIMAPID("INBOX", 9, 42)
+	if page.Messages[0].ID != wantID || page.Messages[0].UID != 42 {
+		t.Fatalf("search identity = %#v", page.Messages[0])
+	}
+	byID, err := application.GetMessageModeContext(context.Background(), "work", MessageLocator{ID: page.Messages[0].ID}, "")
+	if err != nil || byID.ID != wantID || byID.UID != 42 || byID.Text != "body" {
+		t.Fatalf("get by id = %#v, %v", byID, err)
+	}
+	byUID, err := application.GetMessageMode("work", "INBOX", 42, "")
+	if err != nil || byUID.ID != wantID || byUID.UID != 42 {
+		t.Fatalf("get by deprecated uid = %#v, %v", byUID, err)
+	}
+}
+
 func TestSearchMessagesOfflineCachePaginatesMergedLiveTraversal(t *testing.T) {
 	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
 	application := serviceWithConnections(t, mailConnection("work"))
@@ -439,6 +469,55 @@ func TestProviderCacheIdentityUsesResolvedSecretValues(t *testing.T) {
 	}
 }
 
+func TestNativeMailCacheIDStableAcrossTokenRotation(t *testing.T) {
+	connection := model.Connection{
+		ID:       "gmail-work",
+		Identity: model.Identity{Email: "me@acme.test"},
+		Mail:     &model.MailConfig{Kind: "gmail", ResolvedSecret: "refresh-one"},
+	}
+	first := mailCacheID(connection)
+	connection.Mail.ResolvedSecret = "refresh-two"
+	second := mailCacheID(connection)
+	if first == "" || first != second {
+		t.Fatalf("native mail cache identity changed across token rotation: %q then %q", first, second)
+	}
+	connection.Identity.Email = ""
+	fallback := mailCacheID(connection)
+	if fallback == "" || fallback == first {
+		t.Fatalf("native mail cache identity without email = %q first=%q", fallback, first)
+	}
+}
+
+func TestNativeMailCacheIDIncludesBackendKind(t *testing.T) {
+	gmailConn := model.Connection{ID: "mail", Identity: model.Identity{Email: "me@example.test"}, Mail: &model.MailConfig{Kind: "gmail", Secret: model.SecretRef{Keychain: "shared"}}}
+	microsoftConn := gmailConn
+	microsoftConn.Mail = &model.MailConfig{Kind: "microsoft", Secret: model.SecretRef{Keychain: "shared"}}
+	if mailCacheID(gmailConn) == "" || mailCacheID(gmailConn) == mailCacheID(microsoftConn) {
+		t.Fatalf("gmail and microsoft cache identities collided: %q", mailCacheID(gmailConn))
+	}
+}
+
+func TestNativeOperationDigestIgnoresRotatedRefreshToken(t *testing.T) {
+	connection := model.Connection{
+		ID: "gmail-work", Identity: model.Identity{Email: "me@gmail.com"},
+		Mail: &model.MailConfig{Kind: "gmail", Secret: model.SecretRef{Keychain: "posthouse-gmail-work"}, ResolvedSecret: "token-one"},
+	}
+	first, err := digestOperationConnection(connection, "mail.send")
+	if err != nil || first == "" {
+		t.Fatalf("first digest = %q, %v", first, err)
+	}
+	connection.Mail.ResolvedSecret = "token-two"
+	second, err := digestOperationConnection(connection, "mail.send")
+	if err != nil || first != second {
+		t.Fatalf("rotated native digest changed: %q vs %q err=%v", first, second, err)
+	}
+	connection.Identity.Email = "other@gmail.com"
+	third, err := digestOperationConnection(connection, "mail.send")
+	if err != nil || third == first {
+		t.Fatalf("identity change did not change digest: %q vs %q err=%v", first, third, err)
+	}
+}
+
 func TestCalendarFetchUsesOneResolvedProviderSnapshot(t *testing.T) {
 	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
 	t.Setenv("SECRET_FEED_URL", "https://calendar-one.example.test/feed.ics")
@@ -558,7 +637,7 @@ func TestReplyPreparationUsesOneProviderSnapshotBeforeMessageRead(t *testing.T) 
 		t.Setenv("PASSWORD", "rotated-during-read")
 		return postmail.FetchedMessage{Detail: model.MessageDetail{Message: model.Message{MessageID: "original", From: []model.Address{{Email: "sender@example.test"}}, Subject: "subject"}, Text: "original"}, UIDValidity: 7}, nil
 	}
-	prepared, err := application.PrepareReply(context.Background(), "work", "INBOX", 1, "reply", "")
+	prepared, err := application.PrepareReply(context.Background(), "work", MessageLocator{Folder: "INBOX", UID: 1}, "reply", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -601,7 +680,7 @@ func TestHTMLOnlyReplyLeavesTextEmptyForDerivedFallback(t *testing.T) {
 	application.mailGetMessage = func(context.Context, model.Connection, string, uint32) (postmail.FetchedMessage, error) {
 		return postmail.FetchedMessage{Detail: model.MessageDetail{Message: model.Message{MessageID: "original", From: []model.Address{{Email: "sender@example.test"}}, Subject: "subject"}, Text: "original", HTML: "<p>original</p>"}, UIDValidity: 7}, nil
 	}
-	prepared, err := application.PrepareReply(context.Background(), "work", "INBOX", 1, "", "<p>Thanks</p>")
+	prepared, err := application.PrepareReply(context.Background(), "work", MessageLocator{Folder: "INBOX", UID: 1}, "", "<p>Thanks</p>")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1273,6 +1352,38 @@ func TestOfflineBodySearchReportsReducedSemantics(t *testing.T) {
 	}
 }
 
+func TestOfflineNativeBodySearchMatchesOpaqueID(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	t.Setenv("GMAIL_REFRESH", "refresh")
+	application := serviceWithConnections(t, model.Connection{
+		ID: "gmail-work", Name: "Gmail", Identity: model.Identity{Email: "me@acme.test"},
+		Mail: &model.MailConfig{Kind: "gmail", Secret: model.SecretRef{Env: "GMAIL_REFRESH"}},
+	})
+	message := model.Message{ConnectionID: "gmail-work", Folder: "INBOX", ID: "msg-1", Subject: "Unrelated", ReceivedAt: instant(12)}
+	if err := application.cacheMailResult("gmail-work", "INBOX", "seed", postmail.SearchOptions{}, postmail.SearchResult{UIDValidity: 1, Messages: []model.Message{message}}); err != nil {
+		t.Fatal(err)
+	}
+	connection, err := application.exactConnection("gmail-work", "mail.read")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger, err := application.ensureState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	detail, err := json.Marshal(model.MessageDetail{Message: message, Text: "body contains the needle"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ledger.Put(context.Background(), state.CacheEntry{Namespace: "message_body", Key: nativeBodyCacheKey(mailCacheID(connection), "msg-1"), ConnectionID: "gmail-work", Kind: "message_body", ExpiresAt: time.Now().Add(time.Hour), Value: detail}); err != nil {
+		t.Fatal(err)
+	}
+	page, err := application.SearchMessages(model.Selector{}, postmail.SearchOptions{Mode: "offline", Query: "needle"}, 10, "")
+	if err != nil || len(page.Messages) != 1 || page.Messages[0].ID != "msg-1" || len(page.Errors) != 1 || page.Errors[0].Code != "offline_search_incomplete" {
+		t.Fatalf("offline native body search = %#v, %v", page, err)
+	}
+}
+
 func TestScopedMailCacheTrustsProviderBodyQueryMatch(t *testing.T) {
 	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
 	application := serviceWithConnections(t, mailConnection("work"))
@@ -1375,7 +1486,7 @@ func TestDraftPreconditionRefreshPropagatesCancellation(t *testing.T) {
 		<-ctx.Done()
 		return postmail.MessagePrecondition{}, ctx.Err()
 	}
-	prepared, err := application.PrepareDraft(context.Background(), "work", "mail.draft.update", "Drafts", 7, model.SendMessage{To: []string{"person@example.test"}, Subject: "draft", Text: "body"})
+	prepared, err := application.PrepareDraft(context.Background(), "work", "mail.draft.update", MessageLocator{Folder: "Drafts", UID: 7}, model.SendMessage{To: []string{"person@example.test"}, Subject: "draft", Text: "body"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1401,7 +1512,7 @@ func TestIMAPMutationTransportLossPersistsUncertainStatus(t *testing.T) {
 	application.mailMarkDeleted = func(model.Connection, string, uint32, postmail.MessagePrecondition) error {
 		return &postmail.UncertainMutationError{Err: errors.New("connection closed")}
 	}
-	prepared, err := application.PrepareDraft(context.Background(), "work", "mail.draft.delete", "Drafts", 7, model.SendMessage{})
+	prepared, err := application.PrepareDraft(context.Background(), "work", "mail.draft.delete", MessageLocator{Folder: "Drafts", UID: 7}, model.SendMessage{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1518,6 +1629,39 @@ func TestOfflineMessageAndAttachmentReads(t *testing.T) {
 	}
 }
 
+func TestOpaqueIMAPIDRejectsStaleUIDValidityOnOfflineReads(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	application := serviceWithConnections(t, mailConnection("work"))
+	ledger, err := application.ensureState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	connection, err := application.exactConnection("work", "mail.read")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cacheID := mailCacheID(connection)
+	detail := model.MessageDetail{Message: model.Message{ConnectionID: "work", Folder: "INBOX", UID: 7, Subject: "new generation"}, Text: "wrong body"}
+	data, _ := json.Marshal(detail)
+	ctx := context.Background()
+	if err := application.cacheMailboxUIDValidity(ledger, "work", "INBOX", 12); err != nil {
+		t.Fatal(err)
+	}
+	if err := ledger.Put(ctx, state.CacheEntry{Namespace: "message_body", Key: messageCacheKey(cacheID, "INBOX", 12, 7), Kind: "message_body", CachedAt: time.Now(), Value: data}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ledger.Put(ctx, state.CacheEntry{Namespace: "attachment", Key: messageCacheKey(cacheID, "INBOX", 12, 7) + "/file", Kind: "attachment", CachedAt: time.Now(), Value: []byte("wrong")}); err != nil {
+		t.Fatal(err)
+	}
+	staleID := postmail.EncodeIMAPID("INBOX", 9, 7)
+	if _, err := application.GetMessageModeContext(ctx, "work", MessageLocator{ID: staleID}, "offline"); err == nil || !strings.Contains(err.Error(), "UIDVALIDITY") {
+		t.Fatalf("offline opaque id after reset = %v", err)
+	}
+	if _, _, err := application.GetAttachmentByLocator(ctx, "work", MessageLocator{ID: staleID}, "file", "offline"); err == nil || !strings.Contains(err.Error(), "UIDVALIDITY") {
+		t.Fatalf("offline opaque attachment after reset = %v", err)
+	}
+}
+
 func TestMailboxUIDValidityLivesAsLongAsBodyCache(t *testing.T) {
 	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
 	application := serviceWithConnections(t, mailConnection("work"))
@@ -1622,7 +1766,7 @@ func TestAttachmentContinuationKeepsOriginalUIDValiditySnapshot(t *testing.T) {
 		return model.Attachment{ID: "file", Name: "report.pdf"}, []byte(fmt.Sprintf("content-%d", uidValidity)), uidValidity, nil
 	}
 	ctx := context.Background()
-	_, firstData, cursor, err := application.GetAttachmentSnapshotMode(ctx, "work", "INBOX", 7, "file", "", "")
+	_, firstData, cursor, err := application.GetAttachmentSnapshotMode(ctx, "work", MessageLocator{Folder: "INBOX", UID: 7}, "file", "", "")
 	if err != nil || cursor == "" || string(firstData) != "content-11" || fetches != 1 {
 		t.Fatalf("first snapshot chunk data=%q cursor=%q fetches=%d err=%v", firstData, cursor, fetches, err)
 	}
@@ -1630,7 +1774,7 @@ func TestAttachmentContinuationKeepsOriginalUIDValiditySnapshot(t *testing.T) {
 	if _, data, err := application.GetAttachmentMode(ctx, "work", "INBOX", 7, "file", "refresh"); err != nil || string(data) != "content-12" {
 		t.Fatalf("replacement mailbox fetch data=%q err=%v", data, err)
 	}
-	attachment, continuedData, continuedCursor, err := application.GetAttachmentSnapshotMode(ctx, "work", "INBOX", 7, "file", "", cursor)
+	attachment, continuedData, continuedCursor, err := application.GetAttachmentSnapshotMode(ctx, "work", MessageLocator{Folder: "INBOX", UID: 7}, "file", "", cursor)
 	if err != nil || attachment.Stale || string(continuedData) != "content-11" || continuedCursor != cursor || fetches != 2 {
 		t.Fatalf("continuation mixed snapshots: attachment=%#v data=%q cursor=%q fetches=%d err=%v", attachment, continuedData, continuedCursor, fetches, err)
 	}
@@ -1643,7 +1787,7 @@ func TestAttachmentSnapshotCarriesFetchedUIDValidity(t *testing.T) {
 		return model.Attachment{ID: "file"}, []byte("old bytes"), 11, nil
 	}
 	ctx := context.Background()
-	_, data, snapshot, err := application.getAttachmentModeSnapshot(ctx, "work", "INBOX", 7, "file", "refresh")
+	_, data, snapshot, err := application.getAttachmentModeSnapshot(ctx, "work", MessageLocator{Folder: "INBOX", UID: 7}, "file", "refresh")
 	if err != nil || snapshot.UIDValidity != 11 || string(data) != "old bytes" {
 		t.Fatalf("fetched snapshot = %#v %q, %v", snapshot, data, err)
 	}
@@ -1675,7 +1819,7 @@ func TestAttachmentSnapshotReturnsCursorlessDataAfterCacheEviction(t *testing.T)
 	application.mailGetAttachment = func(context.Context, model.Connection, string, uint32, string) (model.Attachment, []byte, uint32, error) {
 		return model.Attachment{ID: "file"}, []byte("fetched bytes"), 11, nil
 	}
-	attachment, data, cursor, err := application.GetAttachmentSnapshotMode(context.Background(), "work", "INBOX", 7, "file", "refresh", "")
+	attachment, data, cursor, err := application.GetAttachmentSnapshotMode(context.Background(), "work", MessageLocator{Folder: "INBOX", UID: 7}, "file", "refresh", "")
 	if err != nil || attachment.ID != "file" || string(data) != "fetched bytes" || cursor != "" {
 		t.Fatalf("cursorless fetched attachment = %#v %q %q, %v", attachment, data, cursor, err)
 	}
@@ -1778,12 +1922,12 @@ func TestMessageFetchReceivesContextAndRejectsOldMailboxCache(t *testing.T) {
 		}
 		return postmail.FetchedMessage{}, errors.New("new mailbox message missing")
 	}
-	if detail, err := application.GetMessageModeContext(context.Background(), "work", "INBOX", 7, ""); err == nil || detail.Subject == "old mailbox" {
+	if detail, err := application.GetMessageModeContext(context.Background(), "work", MessageLocator{Folder: "INBOX", UID: 7}, ""); err == nil || detail.Subject == "old mailbox" {
 		t.Fatalf("UIDVALIDITY mismatch returned old body %#v: %v", detail, err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := application.GetMessageModeContext(ctx, "work", "INBOX", 7, "refresh"); !errors.Is(err, context.Canceled) {
+	if _, err := application.GetMessageModeContext(ctx, "work", MessageLocator{Folder: "INBOX", UID: 7}, "refresh"); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled message fetch returned %v", err)
 	}
 }
@@ -1968,7 +2112,7 @@ func TestFailedDraftDeleteDoesNotClaimDeletion(t *testing.T) {
 	application.mailMarkDeleted = func(model.Connection, string, uint32, postmail.MessagePrecondition) error {
 		return fmt.Errorf("provider rejected delete")
 	}
-	prepared, err := application.PrepareDraft(context.Background(), "work", "mail.draft.delete", "Drafts", 7, model.SendMessage{})
+	prepared, err := application.PrepareDraft(context.Background(), "work", "mail.draft.delete", MessageLocator{Folder: "Drafts", UID: 7}, model.SendMessage{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2020,7 +2164,7 @@ func TestAppendTransportFailureIsUncertain(t *testing.T) {
 	application.mailAppend = func(model.Connection, string, model.SendMessage, []imap.Flag) (uint32, error) {
 		return 0, &postmail.UncertainAppendError{Err: fmt.Errorf("connection closed")}
 	}
-	prepared, err := application.PrepareDraft(context.Background(), "work", "mail.draft.create", "Drafts", 0, model.SendMessage{})
+	prepared, err := application.PrepareDraft(context.Background(), "work", "mail.draft.create", MessageLocator{Folder: "Drafts"}, model.SendMessage{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2199,7 +2343,7 @@ func TestPrepareDraftPreviewIncludesEverySerializedField(t *testing.T) {
 	connection.Mail.Folders.Drafts = "Drafts"
 	application := serviceWithConnections(t, connection)
 	message := model.SendMessage{To: []string{"to@example.test"}, CC: []string{"cc@example.test"}, BCC: []string{"bcc@example.test"}, Subject: "subject", Text: "body", HTML: "<p>body</p>", ReplyTo: "reply@example.test", InReplyTo: "parent", References: []string{"one", "two"}}
-	prepared, err := application.PrepareDraft(context.Background(), "work", "mail.draft.create", "Drafts", 0, message)
+	prepared, err := application.PrepareDraft(context.Background(), "work", "mail.draft.create", MessageLocator{Folder: "Drafts"}, message)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2308,7 +2452,7 @@ func TestDraftUpdateCleanupFailurePreservesAppendedUIDAsUncertain(t *testing.T) 
 	application.mailMarkDeleted = func(model.Connection, string, uint32, postmail.MessagePrecondition) error {
 		return fmt.Errorf("concurrent modification")
 	}
-	prepared, err := application.PrepareDraft(context.Background(), "work", "mail.draft.update", "Drafts", 5, model.SendMessage{Subject: "replacement"})
+	prepared, err := application.PrepareDraft(context.Background(), "work", "mail.draft.update", MessageLocator{Folder: "Drafts", UID: 5}, model.SendMessage{Subject: "replacement"})
 	if err != nil {
 		t.Fatal(err)
 	}

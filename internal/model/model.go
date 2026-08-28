@@ -45,11 +45,12 @@ type Identity struct {
 }
 
 type MailConfig struct {
-	Username  string       `json:"username"`
+	Kind      string       `json:"kind,omitempty"`
+	Username  string       `json:"username,omitempty"`
 	Secret    SecretRef    `json:"secret,omitempty"`
 	SecretEnv string       `json:"secret_env,omitempty"` // v1 migration only
-	IMAP      IMAPConfig   `json:"imap"`
-	SMTP      SMTPConfig   `json:"smtp"`
+	IMAP      IMAPConfig   `json:"imap,omitempty"`
+	SMTP      SMTPConfig   `json:"smtp,omitempty"`
 	Folders   FolderConfig `json:"folders,omitempty"`
 	SentCopy  string       `json:"sent_copy,omitempty"`
 	// ResolvedSecret is request-scoped provider state. It is never persisted or
@@ -125,8 +126,9 @@ type ConnectionPage struct {
 
 type Message struct {
 	ConnectionID   string    `json:"connection_id"`
-	Folder         string    `json:"folder"`
-	UID            uint32    `json:"uid"`
+	ID             string    `json:"id"`
+	Folder         string    `json:"folder,omitempty"`
+	UID            uint32    `json:"uid,omitempty"`
 	MessageID      string    `json:"message_id,omitempty"`
 	From           []Address `json:"from,omitempty"`
 	To             []Address `json:"to,omitempty"`
@@ -209,8 +211,9 @@ type MessageDetail struct {
 // TriageItem is a compact message summary for agent inbox triage.
 type TriageItem struct {
 	ConnectionID   string    `json:"connection_id"`
+	ID             string    `json:"id,omitempty"`
 	Folder         string    `json:"folder"`
-	UID            uint32    `json:"uid"`
+	UID            uint32    `json:"uid,omitempty"`
 	From           []Address `json:"from,omitempty"`
 	Subject        string    `json:"subject,omitempty"`
 	Date           time.Time `json:"date,omitempty"`

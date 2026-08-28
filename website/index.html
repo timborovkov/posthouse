@@ -201,11 +201,11 @@
             <tbody>
               <tr>
                 <td>List / get</td>
-                <td>Across CalDAV collections and read-only ICS feeds.</td>
+                <td>Across CalDAV collections, read-only ICS feeds, and native Gmail/Microsoft calendars.</td>
               </tr>
               <tr>
                 <td>Create / update / delete</td>
-                <td>CalDAV writes with ETag checks; prepare-then-execute.</td>
+                <td>CalDAV or native calendar writes; prepare-then-execute.</td>
               </tr>
               <tr>
                 <td>Portable ICS</td>
@@ -276,11 +276,12 @@
             </p>
           </li>
           <li>
-            <h3>Gmail &amp; Microsoft (coming)</h3>
+            <h3>Gmail &amp; Microsoft</h3>
             <p>
               Native OAuth sign-in in the browser on your device — no Google
-              Cloud or Entra project for you to create. Tokens stay local.
-              Required for that: this site’s
+              Cloud or Entra project for you to create. Tokens stay local
+              (OS keychain, or mode-0600 files next to config when there is no
+              keychain). Required for publisher verification: this site’s
               <a href="privacy.html">privacy policy</a>.
             </p>
           </li>
@@ -344,7 +345,20 @@ set -a; . "$HOME/.config/posthouse/env"; set +a</code></pre>
           <summary><span class="setup-title">Add a mailbox and calendar</span></summary>
           <div class="setup-body">
             <p>
-              Copy
+              Gmail or Microsoft — click Allow in a browser (you do not create a
+              Cloud or Entra project):
+            </p>
+            <pre><code>posthouse connection add --kind gmail --email you@gmail.com
+posthouse connection auth gmail-work
+posthouse connection add --kind microsoft --email you@outlook.com
+posthouse connection auth microsoft-work</code></pre>
+            <p>
+              Microsoft on a server: add <code>--device</code> so a phone can
+              click Allow. Gmail needs a browser on that machine. There is no
+              REST or MCP login.
+            </p>
+            <p>
+              Generic IMAP/CalDAV: copy
               <a href="https://github.com/timborovkov/posthouse/blob/main/examples/connection.json"
                 >examples/connection.json</a
               >, put a <strong>provider app password</strong> (not your login password) in the environment, then:
@@ -356,7 +370,7 @@ posthouse connection discover acme
 posthouse connection doctor acme</code></pre>
             <p>Or use the terminal UI:</p>
             <pre><code>posthouse tui
-# Tab areas · ? help · q quit — writes still show a preview first</code></pre>
+# Tab areas · ? help · o authorize Gmail/Microsoft · q quit — writes still show a preview first</code></pre>
           </div>
         </details>
 
@@ -515,12 +529,16 @@ ACME_CALENDAR_PASSWORD=…</code></pre>
                 <code>0.0.0.0:$PORT</code>. Open a public HTTPS domain on the service.
               </li>
               <li>
-                Put a connection config on the volume (first boot via volume file
-                or local CLI against that store). Example shape:
+                Connect a mailbox <strong>in a Railway shell</strong> (there is
+                no REST/MCP login). Microsoft:
+                <pre><code>posthouse --config /data/config.json connection add --kind microsoft --email you@outlook.com
+posthouse --config /data/config.json connection auth microsoft-work --device</code></pre>
+                Gmail needs a browser on that machine (<code>connection auth</code>
+                without <code>--device</code>). Generic IMAP: put
                 <a href="https://github.com/timborovkov/posthouse/blob/main/examples/connection.json"
                   >examples/connection.json</a
                 >
-                as <code>/data/config.json</code>.
+                on the volume as <code>/data/config.json</code> with app-password env refs.
               </li>
               <li>
                 Point agents / HTTP clients at the public host.
@@ -641,8 +659,7 @@ curl -sS -H "Authorization: Bearer $POSTHOUSE_ACCESS_KEY" \
           <a href="https://github.com/timborovkov/posthouse/blob/main/LICENSE">MIT License</a>.
           Mail and calendar data live in a local encrypted cache you control.
           There is no backend that receives your mailbox. See
-          <a href="privacy.html">Privacy</a> for the full statement (including
-          forward-looking Google/Microsoft OAuth verification language).
+          <a href="privacy.html">Privacy</a> for the full statement.
           Host this <code>website/</code> folder on a domain you own (canonicals
           assume <code>https://posthouse.timb.dev/</code>) before pasting those
           URLs into a consent screen.

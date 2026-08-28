@@ -1,6 +1,6 @@
 # Native Gmail API and Microsoft Graph backends
 
-Temporary. Delete this file and `handoffs/` when native Gmail and Microsoft connections ship.
+Implemented in the current branch. Keep this brief until verified publisher IDs land, then delete `handoffs/`. Remaining maintainer work is [publisher-gmail-microsoft.md](./publisher-gmail-microsoft.md).
 
 ## Context
 
@@ -42,7 +42,7 @@ Publisher registration, privacy-policy website, and Google/Microsoft verificatio
 6. `internal/config/store.go` — `SecretRef` is env or keychain only; `ResolveSecret` / `SetKeychainSecret`. Refresh tokens use this, not `config.json`.
 7. `internal/mcpserver/server.go` — tool contracts Hermes already calls (`messages_search`, `messages_get`, prepare/execute).
 8. `internal/mail/imap.go` and `internal/calendar/caldav.go` — keep as the generic backends.
-9. `TODO.md` — this work is after v0.2, not the v0.2.0 release gate.
+9. `TODO.md` — native backends are shipped; publisher verification stays outside the v0.2.0 release gate.
 10. Conversation decisions in this file’s **Decisions** section. Those override any impulse to do IMAP XOAUTH2 for Gmail/Microsoft.
 
 ## Decisions (already settled)
@@ -97,10 +97,8 @@ Completion: a fixture OAuth token endpoint plus a fake loopback/device-code exch
 
 Implement list/search, get (text + sanitized HTML + attachments), send, reply/forward, mark/flag, archive, trash, drafts against Gmail API. Map Posthouse actions onto Gmail labels (INBOX, TRASH, etc.). Use scopes no broader than:
 
-- `https://www.googleapis.com/auth/gmail.readonly`
-- `https://www.googleapis.com/auth/gmail.send`
-- `https://www.googleapis.com/auth/gmail.compose` if drafts need it
-- `https://www.googleapis.com/auth/gmail.modify` only if archive/trash/labels cannot be done otherwise
+- `https://www.googleapis.com/auth/gmail.modify` (restricted; covers read, send, drafts, archive, trash — do not also stack `gmail.readonly` / `gmail.send` / `gmail.compose`)
+- Calendar: `calendar.readonly` and `calendar.events`
 
 Do not request `https://mail.google.com/`.
 

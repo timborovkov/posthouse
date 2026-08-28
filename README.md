@@ -21,8 +21,9 @@ write tools. Recipients are raw addresses; there is no contacts registry.
 Built by [Tim Borovkov](https://timb.dev). Landing + privacy pages:
 [`website/`](./website/).
 
-v0.2. IMAP/SMTP, CalDAV, and ICS feeds today. OAuth / native Gmail and
-Microsoft are on the roadmap — see [TODO.md](./TODO.md).
+v0.2 protocol surface stays. Generic IMAP/SMTP, CalDAV, and ICS feeds, plus
+native Gmail API and Microsoft Graph backends behind the same selector. Verified
+publisher client IDs are still maintainer work — see [TODO.md](./TODO.md).
 
 ## Features
 
@@ -56,10 +57,10 @@ connection, with a ten-minute prepare → preview → execute flow.
 
 | Action | Notes |
 | --- | --- |
-| List / get | Across CalDAV collections and read-only ICS feeds. |
-| Create / update / delete | CalDAV writes with ETag checks; prepare-then-execute. |
+| List / get | Across CalDAV collections, read-only ICS feeds, and native Gmail/Microsoft calendars. |
+| Create / update / delete | CalDAV or native calendar writes; prepare-then-execute. |
 | Portable ICS | Generate invitation/cancel files without a provider write. |
-| Discover | Pull folders and calendar collections into config. |
+| Discover | Pull IMAP folders and CalDAV collections into config. |
 
 ### How you use it
 
@@ -96,7 +97,7 @@ posthouse skill list
 
 Add `--all` (or `mcp` / `rest`) when the agent should also use MCP or the HTTP API. Re-running install refreshes files and removes retired skill folders (`cli`, `email-inboxes`, `email-send`). `--agent codex` installs into `~/.agents/skills` and also refreshes `~/.codex/skills` for older Codex builds.
 
-Non-technical path (first connection, agents, private server):
+Non-technical path (Gmail, Microsoft, Hermes, Codex, your own server):
 [GETTING-STARTED.md](./GETTING-STARTED.md).
 
 Full CLI, MCP, REST, policy, and deploy detail:

@@ -1,8 +1,9 @@
 # Installation and usage
 
 Posthouse is a personal switchboard, not a hosted product. You run it on your
-laptop or on a machine you control. A shorter first-run path is in
-[GETTING-STARTED.md](./GETTING-STARTED.md).
+laptop or on a machine you control. Start with
+[GETTING-STARTED.md](./GETTING-STARTED.md) (Gmail, Microsoft, Hermes, Codex).
+This page is the reference for flags, IMAP, Docker, and Railway.
 
 ## Install
 
@@ -30,9 +31,19 @@ make build
 
 **Docker** (MCP + REST HTTP, not the TUI): see [Docker](#docker).
 
-You need IMAP/SMTP and/or CalDAV (or an ICS feed URL). Use an app password,
-not your normal login. OAuth is not in v0.2; the static [website/](./website/)
-privacy page is prepared for future Google/Microsoft verification.
+You need a connected mailbox: Gmail, Microsoft, or generic IMAP/SMTP (and
+optional CalDAV or an ICS feed). Gmail and Microsoft: `posthouse connection add
+--kind gmail --email you@gmail.com` then `posthouse connection auth gmail-work`
+(browser on this computer). Microsoft on a server: add `--device` so a phone can
+click Allow. Gmail `--device` is not the supported path (Google Desktop apps
+often refuse it). You do not create a Google Cloud or Microsoft app. Generic
+servers use an app password, not your normal login. There is no REST or MCP
+login — connect from a shell.
+
+If `connection auth` says login is not configured, this build does not include
+Posthouse's Google/Microsoft ID yet. That is on the maintainer.
+
+Landing and privacy pages for publisher verification: [website/](./website/).
 
 ## Secrets
 
@@ -42,14 +53,20 @@ posthouse setup
 
 Prints two values (or pass `--write-env PATH` for a mode-`0600` file):
 
-- `POSTHOUSE_CACHE_KEY` encrypts local Posthouse state. Desktop use can skip
-  this and let Posthouse store a key in the OS keychain; headless and Docker
-  **must** set it.
+- `POSTHOUSE_CACHE_KEY` encrypts local Posthouse state (the SQLite cache).
+  Desktop use can skip this and let Posthouse store a key in the OS keychain;
+  headless and Docker **must** set it. It does **not** encrypt OAuth refresh
+  tokens.
 - `POSTHOUSE_ACCESS_KEY` protects HTTP (MCP + REST). Stdio MCP on your machine
   does not need it. `POSTHOUSE_MCP_TOKEN` is accepted as an alias; if both are
   set they must match. The access key must be at least 16 characters.
 
-Do not commit env files that contain these values.
+OAuth refresh tokens go in the OS keychain. If this machine has no keychain
+(typical in Docker/Railway), Posthouse writes mode-`0600` files next to the
+config (`<configDir>/secrets/<name>`). Those are local files, not a vault —
+same class as IMAP passwords in `.env`, weaker than the encrypted cache.
+
+Do not commit env files or `secrets/` files that contain these values.
 
 ## Add a connection
 
@@ -90,11 +107,28 @@ posthouse connection doctor acme
 SPECIAL-USE when advertised) and calendar collections. The printed JSON is
 redacted — do not feed it to `connection update`.
 
-In the TUI, press `c` on Connections, fill ID/name/email/secret, leave IMAP/SMTP
-blank to probe, then Enter to save. Esc closes the form without creating a
-connection. After save, Enter discovers folders.
+In the TUI, press `c` on Connections, fill ID/name/email/kind/secret, leave
+IMAP/SMTP blank to probe, then Enter to save. Esc closes the form without
+creating a connection. After save, Enter discovers IMAP folders or, for Gmail
+and Microsoft, authorizes in a browser.
 
 Read-only ICS feed: [examples/feed-connection.json](./examples/feed-connection.json).
+Gmail and Microsoft can skip JSON files:
+
+```sh
+posthouse connection add --kind gmail --email you@gmail.com
+posthouse connection auth gmail-work
+```
+
+On a server, Microsoft `--device` prints a link and code for a phone to click
+Allow. Gmail needs a browser on that machine. Connect mailboxes before Hermes
+or Codex uses them; there is no MCP or REST login tool. `discover` is only for
+generic IMAP folders and CalDAV collections.
+
+Gmail archive and trash request the restricted Google scope `gmail.modify`
+(one restricted mail scope). Until the maintainer finishes publisher
+verification, Google may show an unverified-app warning. That is not a prompt
+to create your own Cloud project.
 
 Config path: `posthouse config path` (or `--config` / `POSTHOUSE_CONFIG`).
 State is `posthouse.db` next to it.
@@ -156,7 +190,8 @@ posthouse tui
 
 `Tab` / `Shift+Tab` cycle areas and form fields, arrows or `j`/`k` to move,
 `/` search, `r` refresh the current page, `c` compose or create, `a` actions,
-`d` discover the selected connection, `s` save a loaded attachment (0600,
+`d` discover the selected connection, `o` authorize a Gmail or Microsoft
+connection in a browser, `s` save a loaded attachment (0600,
 never overwrite), `n` / `PageDown` and `p` / `PageUp` page inbox (25) and
 agenda (100) with opaque cursors, `Enter` open/confirm/prepare, `Esc` back
 or cancel a form without submitting, `?` help, `q` quit.
@@ -188,8 +223,8 @@ posthouse mail unread --category work
 posthouse mail search --query renewal --page-size 25
 posthouse calendar list --collection team --start 2026-08-01T00:00:00Z
 
-posthouse mail get --connection work --folder INBOX --uid 42
-posthouse mail attachment --connection work --folder INBOX --uid 42 --id ATTACHMENT_ID --extract-text --output -
+posthouse mail get --connection work --id MESSAGE_ID
+posthouse mail attachment --connection work --message-id MESSAGE_ID --id ATTACHMENT_ID --extract-text --output -
 posthouse mail send --connection work --to teammate@example.test --subject Status --body-file status.txt
 posthouse mail send --connection work --to teammate@example.test --subject Status --html-file status.html
 posthouse mail forward --connection work --folder INBOX --uid 42 --to teammate@example.test --verbatim
@@ -199,8 +234,8 @@ posthouse mail archive --connection work --folder INBOX --uids 42,43,44
 posthouse operation show 'TOKEN'
 posthouse operation execute 'TOKEN'
 
-posthouse mail reply --connection work --folder INBOX --uid 42 --body 'Thanks'
-posthouse mail archive --connection work --folder INBOX --uid 42
+posthouse mail reply --connection work --id MESSAGE_ID --body 'Thanks'
+posthouse mail archive --connection work --id MESSAGE_ID
 
 posthouse calendar create --connection work --file event.json
 posthouse calendar ics --title Planning --start 2026-08-17T09:00:00+03:00 --end 2026-08-17T10:00:00+03:00 --output planning.ics
@@ -228,7 +263,7 @@ execute fail on CLI, MCP, and TUI.
 | `mail.trash` | trash |
 | `mail.junk` | junk |
 | `mail.draft` | draft create / update / delete |
-| `calendar.write` | CalDAV create / update / delete |
+| `calendar.write` | CalDAV or native Gmail/Microsoft create / update / delete |
 
 ```sh
 posthouse policy show
