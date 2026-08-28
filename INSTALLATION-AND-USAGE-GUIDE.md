@@ -263,7 +263,7 @@ execute fail on CLI, MCP, and TUI.
 | `mail.trash` | trash |
 | `mail.junk` | junk |
 | `mail.draft` | draft create / update / delete |
-| `calendar.write` | CalDAV create / update / delete |
+| `calendar.write` | CalDAV or native Gmail/Microsoft create / update / delete |
 
 ```sh
 posthouse policy show

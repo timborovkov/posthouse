@@ -732,3 +732,77 @@ func TestGmailDraftUpdateAndDeleteUseDraftResources(t *testing.T) {
 		t.Fatalf("execute draft delete path=%s err=%v", deletePath, err)
 	}
 }
+
+func TestAuthorizeConnectionRejectsIdentityChangeDuringConsent(t *testing.T) {
+	keyring.MockInit()
+	t.Setenv("POSTHOUSE_GOOGLE_CLIENT_ID", "desktop.apps.googleusercontent.com")
+	application := serviceWithConnections(t, model.Connection{ID: "gmail-work", Name: "Gmail", Identity: model.Identity{Email: "a@gmail.com"}, Mail: &model.MailConfig{Kind: "gmail"}})
+	application.authorizeOAuth = func(context.Context, oauth.Config, bool) (string, error) {
+		if err := application.UpsertConnection(model.Connection{ID: "gmail-work", Name: "Gmail", Identity: model.Identity{Email: "b@gmail.com"}, Mail: &model.MailConfig{Kind: "gmail"}}, true); err != nil {
+			return "", err
+		}
+		return "refresh-secret-value", nil
+	}
+	application.nativeIdentity = func(context.Context, model.Connection) (string, error) { return "a@gmail.com", nil }
+	if _, err := application.AuthorizeConnection(context.Background(), "gmail-work", true); err == nil || !strings.Contains(err.Error(), "changed during authorization") {
+		t.Fatalf("AuthorizeConnection during edit = %v", err)
+	}
+}
+
+func TestGmailPrepareCalendarWriteRejectsRecurrencePeriods(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	t.Setenv("POSTHOUSE_GOOGLE_CLIENT_ID", "desktop.apps.googleusercontent.com")
+	t.Setenv("GMAIL_REFRESH", "refresh-secret")
+	application := serviceWithConnections(t, model.Connection{
+		ID: "gmail-work", Name: "Gmail", Identity: model.Identity{Email: "me@acme.test"},
+		Calendar: &model.CalendarConfig{Kind: "gmail", Secret: model.SecretRef{Env: "GMAIL_REFRESH"}},
+	})
+	start := time.Date(2026, 8, 17, 9, 0, 0, 0, time.UTC)
+	_, err := application.PrepareCalendarWrite(context.Background(), "gmail-work", "calendar.create", model.Event{
+		Title: "Range", Start: start, End: start.Add(time.Hour), RecurrencePeriods: []model.RecurrencePeriod{{Start: start, End: start.Add(24 * time.Hour)}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "period-form recurrence") {
+		t.Fatalf("PrepareCalendarWrite periods = %v", err)
+	}
+}
+
+func TestDoctorMixedIMAPCalendarUsesCalendarOAuthSecret(t *testing.T) {
+	var refresh string
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/token" {
+			_ = request.ParseForm()
+			refresh = request.Form.Get("refresh_token")
+			if refresh == "imap-password" {
+				http.Error(writer, "imap password is not an oauth token", http.StatusBadRequest)
+				return
+			}
+			writer.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(writer).Encode(map[string]any{"access_token": "ya29.access", "token_type": "Bearer", "expires_in": 3600})
+			return
+		}
+		_ = json.NewEncoder(writer).Encode(map[string]any{"items": []map[string]any{}})
+	}))
+	defer server.Close()
+	t.Setenv("POSTHOUSE_GOOGLE_CLIENT_ID", "desktop.apps.googleusercontent.com")
+	t.Setenv("IMAP_PASSWORD", "imap-password")
+	t.Setenv("GMAIL_CAL_REFRESH", "refresh-secret")
+	origCal, origToken := gmail.CalendarAPIBase, gmail.TokenURL
+	gmail.CalendarAPIBase, gmail.TokenURL = server.URL+"/calendar/v3", server.URL+"/token"
+	defer func() { gmail.CalendarAPIBase, gmail.TokenURL = origCal, origToken }()
+	application := serviceWithConnections(t, model.Connection{
+		ID: "mixed", Name: "Mixed", Identity: model.Identity{Email: "me@example.test"},
+		Mail:     &model.MailConfig{Username: "me@example.test", Secret: model.SecretRef{Env: "IMAP_PASSWORD"}, IMAP: model.IMAPConfig{Address: "localhost:1993", Insecure: true}},
+		Calendar: &model.CalendarConfig{Kind: "gmail", Secret: model.SecretRef{Env: "GMAIL_CAL_REFRESH"}},
+	})
+	result, err := application.DoctorConnection(context.Background(), "mixed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if refresh != "refresh-secret" {
+		t.Fatalf("doctor used refresh %q", refresh)
+	}
+	encoded, _ := json.Marshal(result)
+	if strings.Contains(string(encoded), "imap-password") || strings.Contains(string(encoded), "refresh-secret") {
+		t.Fatalf("doctor leaked secret: %s", encoded)
+	}
+}

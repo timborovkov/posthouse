@@ -537,3 +537,42 @@ func TestRejectOversizedMIME(t *testing.T) {
 		t.Fatalf("RejectOversizedMIME = %v", err)
 	}
 }
+
+func TestMailFolderPathMapsJunk(t *testing.T) {
+	if mailFolderPath("JUNK") != "/me/mailFolders/junkemail" || graphDestination("JUNK") != "junkemail" || canonicalMailFolder("JUNKEMAIL") != "JUNK" {
+		t.Fatalf("junk mapping path=%s dest=%s folder=%s", mailFolderPath("JUNK"), graphDestination("JUNK"), canonicalMailFolder("JUNKEMAIL"))
+	}
+}
+
+func TestListEventsNormalizesHTMLBodyAndMarksOccurrences(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/token" {
+			writer.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(writer).Encode(map[string]any{"access_token": "graph-access", "token_type": "Bearer", "expires_in": 3600})
+			return
+		}
+		_ = json.NewEncoder(writer).Encode(map[string]any{"value": []map[string]any{{
+			"id": "occ-1", "iCalUId": "uid-series", "seriesMasterId": "master-1", "type": "occurrence",
+			"subject":       "Standup",
+			"body":          map[string]string{"contentType": "HTML", "content": "<p>Bring the <b>notes</b>.</p>"},
+			"originalStart": map[string]string{"dateTime": "2026-08-17T09:00:00", "timeZone": "UTC"},
+			"start":         map[string]string{"dateTime": "2026-08-17T09:00:00", "timeZone": "UTC"},
+			"end":           map[string]string{"dateTime": "2026-08-17T09:30:00", "timeZone": "UTC"},
+		}}})
+	}))
+	defer server.Close()
+	t.Setenv("POSTHOUSE_MICROSOFT_CLIENT_ID", "public-client")
+	origBase, origToken := APIBase, TokenURL
+	APIBase, TokenURL = server.URL, server.URL+"/token"
+	defer func() { APIBase, TokenURL = origBase, origToken }()
+	events, err := ListEvents(context.Background(), model.Connection{ID: "ms", Calendar: &model.CalendarConfig{Kind: "microsoft", ResolvedSecret: "refresh-ms"}}, time.Time{}, time.Time{}, "")
+	if err != nil || len(events) != 1 {
+		t.Fatalf("ListEvents = %#v, %v", events, err)
+	}
+	if events[0].RecurrenceID != "2026-08-17T09:00:00Z" || events[0].SeriesID != "uid-series" {
+		t.Fatalf("occurrence identity = %#v", events[0])
+	}
+	if strings.Contains(events[0].Description, "<") || !strings.Contains(events[0].Description, "notes") {
+		t.Fatalf("HTML body was not normalized: %q", events[0].Description)
+	}
+}

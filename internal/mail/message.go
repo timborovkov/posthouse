@@ -361,6 +361,8 @@ func htmlToText(value string) string {
 	return strings.TrimSpace(html.UnescapeString(value))
 }
 
+func HTMLToText(value string) string { return htmlToText(value) }
+
 // HTMLToMarkdown converts sanitized HTML into a compact markdown approximation for agents.
 func HTMLToMarkdown(value string) string {
 	value = strings.TrimSpace(value)

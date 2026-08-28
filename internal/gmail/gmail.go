@@ -417,6 +417,9 @@ func ListEvents(ctx context.Context, connection model.Connection, start, end tim
 }
 
 func PutEvent(ctx context.Context, connection model.Connection, event model.Event, create bool) (model.Event, error) {
+	if len(event.RecurrencePeriods) > 0 {
+		return model.Event{}, fmt.Errorf("Gmail calendar writes do not serialize period-form recurrence; omit recurrence_periods")
+	}
 	client, err := httpClient(ctx, connection)
 	if err != nil {
 		return model.Event{}, err
@@ -445,7 +448,7 @@ func PutEvent(ctx context.Context, connection model.Connection, event model.Even
 		if id == "" {
 			id = event.ID
 		}
-		method, path = http.MethodPut, CalendarAPIBase+"/calendars/primary/events/"+url.PathEscape(id)
+		method, path = http.MethodPatch, CalendarAPIBase+"/calendars/primary/events/"+url.PathEscape(id)
 		if strings.TrimSpace(event.ETag) != "" {
 			headers = http.Header{"If-Match": []string{event.ETag}}
 		}
@@ -470,17 +473,19 @@ func DeleteEvent(ctx context.Context, connection model.Connection, id, etag stri
 }
 
 type calendarEvent struct {
-	ID          string             `json:"id,omitempty"`
-	ICalUID     string             `json:"iCalUID,omitempty"`
-	Summary     string             `json:"summary"`
-	Description string             `json:"description,omitempty"`
-	Location    string             `json:"location,omitempty"`
-	Start       calendarTime       `json:"start"`
-	End         calendarTime       `json:"end"`
-	Status      string             `json:"status,omitempty"`
-	ETag        string             `json:"etag,omitempty"`
-	Attendees   []calendarAttendee `json:"attendees,omitempty"`
-	Recurrence  []string           `json:"recurrence,omitempty"`
+	ID                string             `json:"id,omitempty"`
+	ICalUID           string             `json:"iCalUID,omitempty"`
+	RecurringEventID  string             `json:"recurringEventId,omitempty"`
+	OriginalStartTime calendarTime       `json:"originalStartTime,omitempty"`
+	Summary           string             `json:"summary"`
+	Description       string             `json:"description,omitempty"`
+	Location          string             `json:"location,omitempty"`
+	Start             calendarTime       `json:"start"`
+	End               calendarTime       `json:"end"`
+	Status            string             `json:"status,omitempty"`
+	ETag              string             `json:"etag,omitempty"`
+	Attendees         []calendarAttendee `json:"attendees,omitempty"`
+	Recurrence        []string           `json:"recurrence,omitempty"`
 }
 
 type calendarAttendee struct {
@@ -497,10 +502,17 @@ func (item calendarEvent) model(connectionID string) model.Event {
 	if id == "" {
 		id = item.ID
 	}
-	event := model.Event{ConnectionID: connectionID, ID: id, Href: item.ID, Title: item.Summary, Description: item.Description, Location: item.Location, Status: item.Status, ETag: item.ETag}
+	event := model.Event{ConnectionID: connectionID, ID: id, SeriesID: id, Href: item.ID, Title: item.Summary, Description: item.Description, Location: item.Location, Status: item.Status, ETag: item.ETag}
 	event.Start = parseCalendarTime(item.Start)
 	event.End = parseCalendarTime(item.End)
 	event.AllDay = item.Start.Date != ""
+	if item.RecurringEventID != "" {
+		original := parseCalendarTime(item.OriginalStartTime)
+		if original.IsZero() {
+			original = event.Start
+		}
+		event.RecurrenceID = original.UTC().Format(time.RFC3339)
+	}
 	for _, attendee := range item.Attendees {
 		if email := strings.TrimSpace(attendee.Email); email != "" {
 			event.Attendees = append(event.Attendees, email)
@@ -581,6 +593,9 @@ func metadataMany(ctx context.Context, client *http.Client, connectionID string,
 		if len(chunk) == 1 {
 			message, err := metadata(ctx, client, connectionID, chunk[0])
 			if err != nil {
+				if isGmailNotFound(err) {
+					continue
+				}
 				return nil, err
 			}
 			out = append(out, message)
@@ -591,6 +606,9 @@ func metadataMany(ctx context.Context, client *http.Client, connectionID string,
 			for _, id := range chunk {
 				message, metaErr := metadata(ctx, client, connectionID, id)
 				if metaErr != nil {
+					if isGmailNotFound(metaErr) {
+						continue
+					}
 					return nil, metaErr
 				}
 				out = append(out, message)
@@ -654,6 +672,10 @@ func metadataBatch(ctx context.Context, client *http.Client, connectionID string
 			return nil, err
 		}
 		if status >= 300 {
+			if status == http.StatusNotFound {
+				order++
+				continue
+			}
 			return nil, fmt.Errorf("gmail batch item %s: %s", strings.TrimSpace(string(jsonBody)), strings.TrimSpace(string(jsonBody)))
 		}
 		var payload rawMessage
@@ -667,11 +689,9 @@ func metadataBatch(ctx context.Context, client *http.Client, connectionID string
 	}
 	messages := make([]model.Message, 0, len(ids))
 	for index := range ids {
-		message, ok := byIndex[index]
-		if !ok {
-			return nil, fmt.Errorf("gmail batch missing item %d", index)
+		if message, ok := byIndex[index]; ok {
+			messages = append(messages, message)
 		}
-		messages = append(messages, message)
 	}
 	return messages, nil
 }
@@ -788,6 +808,8 @@ func searchQuery(options postmail.SearchOptions) string {
 		parts = append(parts, "in:trash")
 	case "SPAM", "JUNK":
 		parts = append(parts, "in:spam")
+	case "ARCHIVE":
+		parts = append(parts, "-in:inbox", "-in:sent", "-in:drafts", "-in:spam", "-in:trash")
 	}
 	return strings.Join(parts, " ")
 }
@@ -856,6 +878,10 @@ func containsLabel(labels []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func isGmailNotFound(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "gmail API 404")
 }
 
 func decodeRaw(value string) ([]byte, error) {

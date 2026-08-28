@@ -488,6 +488,15 @@ func TestNativeMailCacheIDStableAcrossTokenRotation(t *testing.T) {
 	}
 }
 
+func TestNativeMailCacheIDIncludesBackendKind(t *testing.T) {
+	gmailConn := model.Connection{ID: "mail", Identity: model.Identity{Email: "me@example.test"}, Mail: &model.MailConfig{Kind: "gmail", Secret: model.SecretRef{Keychain: "shared"}}}
+	microsoftConn := gmailConn
+	microsoftConn.Mail = &model.MailConfig{Kind: "microsoft", Secret: model.SecretRef{Keychain: "shared"}}
+	if mailCacheID(gmailConn) == "" || mailCacheID(gmailConn) == mailCacheID(microsoftConn) {
+		t.Fatalf("gmail and microsoft cache identities collided: %q", mailCacheID(gmailConn))
+	}
+}
+
 func TestCalendarFetchUsesOneResolvedProviderSnapshot(t *testing.T) {
 	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
 	t.Setenv("SECRET_FEED_URL", "https://calendar-one.example.test/feed.ics")
@@ -1596,6 +1605,39 @@ func TestOfflineMessageAndAttachmentReads(t *testing.T) {
 	}
 	if _, _, err := application.GetAttachmentMode(ctx, "work", "INBOX", 7, "file", "offline"); err == nil {
 		t.Fatal("offline read reused a cached attachment after UIDVALIDITY changed")
+	}
+}
+
+func TestOpaqueIMAPIDRejectsStaleUIDValidityOnOfflineReads(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	application := serviceWithConnections(t, mailConnection("work"))
+	ledger, err := application.ensureState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	connection, err := application.exactConnection("work", "mail.read")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cacheID := mailCacheID(connection)
+	detail := model.MessageDetail{Message: model.Message{ConnectionID: "work", Folder: "INBOX", UID: 7, Subject: "new generation"}, Text: "wrong body"}
+	data, _ := json.Marshal(detail)
+	ctx := context.Background()
+	if err := application.cacheMailboxUIDValidity(ledger, "work", "INBOX", 12); err != nil {
+		t.Fatal(err)
+	}
+	if err := ledger.Put(ctx, state.CacheEntry{Namespace: "message_body", Key: messageCacheKey(cacheID, "INBOX", 12, 7), Kind: "message_body", CachedAt: time.Now(), Value: data}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ledger.Put(ctx, state.CacheEntry{Namespace: "attachment", Key: messageCacheKey(cacheID, "INBOX", 12, 7) + "/file", Kind: "attachment", CachedAt: time.Now(), Value: []byte("wrong")}); err != nil {
+		t.Fatal(err)
+	}
+	staleID := postmail.EncodeIMAPID("INBOX", 9, 7)
+	if _, err := application.GetMessageModeContext(ctx, "work", MessageLocator{ID: staleID}, "offline"); err == nil || !strings.Contains(err.Error(), "UIDVALIDITY") {
+		t.Fatalf("offline opaque id after reset = %v", err)
+	}
+	if _, _, err := application.GetAttachmentByLocator(ctx, "work", MessageLocator{ID: staleID}, "file", "offline"); err == nil || !strings.Contains(err.Error(), "UIDVALIDITY") {
+		t.Fatalf("offline opaque attachment after reset = %v", err)
 	}
 }
 

@@ -57,23 +57,26 @@ type graphAddr struct {
 }
 
 type graphEvent struct {
-	ID          string `json:"id"`
-	ICalUID     string `json:"iCalUId"`
-	Subject     string `json:"subject"`
-	BodyPreview string `json:"bodyPreview"`
-	Body        *struct {
+	ID             string `json:"id"`
+	ICalUID        string `json:"iCalUId"`
+	SeriesMasterID string `json:"seriesMasterId"`
+	Type           string `json:"type"`
+	Subject        string `json:"subject"`
+	BodyPreview    string `json:"bodyPreview"`
+	Body           *struct {
 		ContentType string `json:"contentType"`
 		Content     string `json:"content"`
 	} `json:"body"`
 	Location *struct {
 		DisplayName string `json:"displayName"`
 	} `json:"location"`
-	Start     *graphDateTime  `json:"start"`
-	End       *graphDateTime  `json:"end"`
-	IsAllDay  bool            `json:"isAllDay"`
-	ETag      string          `json:"@odata.etag"`
-	ChangeKey string          `json:"changeKey"`
-	Attendees []graphAttendee `json:"attendees"`
+	Start         *graphDateTime  `json:"start"`
+	End           *graphDateTime  `json:"end"`
+	OriginalStart *graphDateTime  `json:"originalStart"`
+	IsAllDay      bool            `json:"isAllDay"`
+	ETag          string          `json:"@odata.etag"`
+	ChangeKey     string          `json:"changeKey"`
+	Attendees     []graphAttendee `json:"attendees"`
 }
 
 type graphAttendee struct {
@@ -380,7 +383,7 @@ func ListEvents(ctx context.Context, connection model.Connection, start, end tim
 		return nil, err
 	}
 	values := url.Values{}
-	values.Set("$select", "id,iCalUId,subject,body,bodyPreview,location,start,end,isAllDay,changeKey,attendees")
+	values.Set("$select", "id,iCalUId,seriesMasterId,type,originalStart,subject,body,bodyPreview,location,start,end,isAllDay,changeKey,attendees")
 	values.Set("$top", "1000")
 	endpoint := APIBase + "/me/events"
 	if !start.IsZero() && !end.IsZero() {
@@ -502,12 +505,19 @@ func (item graphEvent) model(connectionID string) model.Event {
 	if etag == "" {
 		etag = item.ChangeKey
 	}
-	event := model.Event{ConnectionID: connectionID, ID: id, Href: item.ID, Title: item.Subject, Description: item.description(), AllDay: item.IsAllDay, ETag: etag}
+	event := model.Event{ConnectionID: connectionID, ID: id, SeriesID: id, Href: item.ID, Title: item.Subject, Description: item.description(), AllDay: item.IsAllDay, ETag: etag}
 	if item.Location != nil {
 		event.Location = item.Location.DisplayName
 	}
 	event.Start = parseGraphTime(item.Start)
 	event.End = parseGraphTime(item.End)
+	if item.Type == "occurrence" || item.Type == "exception" || (item.SeriesMasterID != "" && item.Type != "seriesMaster" && item.Type != "singleInstance") {
+		original := parseGraphTime(item.OriginalStart)
+		if original.IsZero() {
+			original = event.Start
+		}
+		event.RecurrenceID = original.UTC().Format(time.RFC3339)
+	}
 	for _, attendee := range item.Attendees {
 		if email := strings.TrimSpace(attendee.EmailAddress.Address); email != "" {
 			event.Attendees = append(event.Attendees, email)
@@ -518,6 +528,9 @@ func (item graphEvent) model(connectionID string) model.Event {
 
 func (item graphEvent) description() string {
 	if item.Body != nil && strings.TrimSpace(item.Body.Content) != "" {
+		if strings.EqualFold(strings.TrimSpace(item.Body.ContentType), "html") {
+			return postmail.HTMLToText(item.Body.Content)
+		}
 		return item.Body.Content
 	}
 	return item.BodyPreview
@@ -590,6 +603,8 @@ func canonicalMailFolder(folder string) string {
 		return "TRASH"
 	case "ARCHIVE":
 		return "ARCHIVE"
+	case "JUNK", "SPAM", "JUNKEMAIL":
+		return "JUNK"
 	default:
 		return folder
 	}
@@ -620,6 +635,7 @@ func loadWellKnownFolders(ctx context.Context, client *http.Client, connectionID
 		{"sentitems", "SENT"},
 		{"drafts", "DRAFTS"},
 		{"deleteditems", "TRASH"},
+		{"junkemail", "JUNK"},
 		{"archive", "ARCHIVE"},
 	} {
 		var folder struct {
@@ -648,6 +664,8 @@ func mailFolderPath(folder string) string {
 		return "/me/mailFolders/deleteditems"
 	case "ARCHIVE":
 		return "/me/mailFolders/archive"
+	case "JUNK", "SPAM", "JUNKEMAIL":
+		return "/me/mailFolders/junkemail"
 	default:
 		return "/me/mailFolders/" + url.PathEscape(folder)
 	}
@@ -665,6 +683,8 @@ func graphDestination(folder string) string {
 		return "deleteditems"
 	case "ARCHIVE":
 		return "archive"
+	case "JUNK", "SPAM", "JUNKEMAIL":
+		return "junkemail"
 	default:
 		return folder
 	}

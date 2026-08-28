@@ -1,6 +1,6 @@
 ---
 name: posthouse-calendar
-description: List and mutate Posthouse calendar events via CLI, including ICS export. Use for agenda and CalDAV writes — not mail or connection setup.
+description: List and mutate Posthouse calendar events via CLI, including ICS export. Use for agenda and CalDAV or native Gmail/Microsoft writes — not mail or connection setup.
 ---
 
 # Posthouse calendar
@@ -9,7 +9,7 @@ Local CLI for events. Mail → `posthouse-mail`. Connections → `posthouse-conn
 
 ## Rules
 
-- Writes need exact `--connection` and return a **prepared operation**. Show the preview; only `posthouse operation execute TOKEN` mutates CalDAV.
+- Writes need exact `--connection` and return a **prepared operation**. Show the preview; only `posthouse operation execute TOKEN` mutates CalDAV or native Gmail/Microsoft calendars. Native writes do not support occurrence overrides; Microsoft Graph does not serialize recurrence.
 - `calendar.write` policy deny fails prepare and execute (`posthouse policy show`).
 - Never log event text or tokens unless the user asked.
 
@@ -36,7 +36,7 @@ posthouse calendar update --connection acme --file event.json
 posthouse calendar delete --connection acme --collection COLLECTION_ID --href HREF --etag ETAG
 ```
 
-Create JSON (RFC3339 times; `collection_id` from `connection discover`):
+Create JSON (RFC3339 times). CalDAV needs `collection_id` from `connection discover`; native Gmail/Microsoft omit it and write the primary calendar:
 
 ```json
 {

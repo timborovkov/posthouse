@@ -532,17 +532,17 @@ func (s *Server) registerTools() {
 		})
 
 	if s.profile != policy.MCPProfileReadonly {
-		mcp.AddTool(s.mcp, &mcp.Tool{Name: "event_create_prepare", Title: "Prepare event create", Description: "Prepare creation of one event in an exact CalDAV connection and collection. No event is written until operation_execute.", Annotations: readOnly},
+		mcp.AddTool(s.mcp, &mcp.Tool{Name: "event_create_prepare", Title: "Prepare event create", Description: "Prepare creation of one event in an exact writable calendar connection (CalDAV, Gmail, or Microsoft). CalDAV needs a collection; native Gmail and Microsoft write the primary calendar. Gmail does not serialize period-form recurrence. Microsoft Graph does not serialize recurrence or event status other than confirmed. No event is written until operation_execute.", Annotations: readOnly},
 			func(ctx context.Context, _ *mcp.CallToolRequest, input eventMutationInput) (*mcp.CallToolResult, model.PreparedOperation, error) {
 				prepared, err := s.service.PrepareCalendarWrite(ctx, input.Connection, "calendar.create", input.Event)
 				return nil, prepared, err
 			})
-		mcp.AddTool(s.mcp, &mcp.Tool{Name: "event_update_prepare", Title: "Prepare event update", Description: "Prepare an ETag-guarded update to one CalDAV event. No event is written until operation_execute.", Annotations: readOnly},
+		mcp.AddTool(s.mcp, &mcp.Tool{Name: "event_update_prepare", Title: "Prepare event update", Description: "Prepare an ETag-guarded update to one CalDAV, Gmail, or Microsoft calendar event. Native writes do not support occurrence overrides; refresh and edit the series master. Microsoft Graph does not serialize recurrence. No event is written until operation_execute.", Annotations: readOnly},
 			func(ctx context.Context, _ *mcp.CallToolRequest, input eventMutationInput) (*mcp.CallToolResult, model.PreparedOperation, error) {
 				prepared, err := s.service.PrepareCalendarWrite(ctx, input.Connection, "calendar.update", input.Event)
 				return nil, prepared, err
 			})
-		mcp.AddTool(s.mcp, &mcp.Tool{Name: "event_delete_prepare", Title: "Prepare event delete", Description: "Prepare an ETag-guarded delete of one CalDAV event. No event is deleted until operation_execute.", Annotations: readOnly},
+		mcp.AddTool(s.mcp, &mcp.Tool{Name: "event_delete_prepare", Title: "Prepare event delete", Description: "Prepare an ETag-guarded delete of one CalDAV, Gmail, or Microsoft calendar event. Deletes apply to the series master; expanded occurrences cannot be deleted individually. No event is deleted until operation_execute.", Annotations: readOnly},
 			func(ctx context.Context, _ *mcp.CallToolRequest, input eventDeleteInput) (*mcp.CallToolResult, model.PreparedOperation, error) {
 				prepared, err := s.service.PrepareCalendarDelete(ctx, input.Connection, input.Collection, input.Href, input.ETag, input.RecurrenceID)
 				return nil, prepared, err

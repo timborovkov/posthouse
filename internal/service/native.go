@@ -104,6 +104,24 @@ func (s *Service) AuthorizeConnection(ctx context.Context, id string, device boo
 		return nil, fmt.Errorf("authorized identity %s does not match connection identity %s", got, want)
 	}
 	keychainName := oauthKeychainName(connection)
+	current, err := s.store.Load()
+	if err != nil {
+		return nil, err
+	}
+	matched := false
+	for _, latest := range current.Connections {
+		if latest.ID != connection.ID {
+			continue
+		}
+		if err := assertAuthorizationStillMatches(connection, latest, profile); err != nil {
+			return nil, err
+		}
+		matched = true
+		break
+	}
+	if !matched {
+		return nil, fmt.Errorf("connection %s was removed during authorization", connection.ID)
+	}
 	if err := config.SetKeychainSecret(keychainName, refresh); err != nil {
 		return nil, err
 	}
@@ -112,15 +130,19 @@ func (s *Service) AuthorizeConnection(ctx context.Context, id string, device boo
 			if current.Connections[index].ID != connection.ID {
 				continue
 			}
-			if current.Connections[index].Mail != nil && config.NativeMail(current.Connections[index]) {
-				mailConfig := *current.Connections[index].Mail
+			latest := current.Connections[index]
+			if err := assertAuthorizationStillMatches(connection, latest, profile); err != nil {
+				return current, err
+			}
+			if latest.Mail != nil && config.NativeMail(latest) {
+				mailConfig := *latest.Mail
 				mailConfig.Secret = model.SecretRef{Keychain: keychainName}
 				mailConfig.SecretEnv = ""
 				current.Connections[index].Mail = &mailConfig
 			}
-			if current.Connections[index].Calendar != nil && config.NativeCalendar(current.Connections[index]) {
-				calendarConfig := *current.Connections[index].Calendar
-				if current.Connections[index].Mail == nil || !config.NativeMail(current.Connections[index]) {
+			if latest.Calendar != nil && config.NativeCalendar(latest) {
+				calendarConfig := *latest.Calendar
+				if latest.Mail == nil || !config.NativeMail(latest) {
 					calendarConfig.Secret = model.SecretRef{Keychain: keychainName}
 				}
 				current.Connections[index].Calendar = &calendarConfig
@@ -198,6 +220,20 @@ func identityMatches(want string, got []string) bool {
 	return false
 }
 
+func assertAuthorizationStillMatches(authorized, latest model.Connection, profile []string) error {
+	if config.NativeKind(latest) != config.NativeKind(authorized) || config.MailKind(latest.Mail) != config.MailKind(authorized.Mail) || config.CalendarKind(latest.Calendar) != config.CalendarKind(authorized.Calendar) {
+		return fmt.Errorf("connection %s provider changed during authorization", authorized.ID)
+	}
+	if want := strings.TrimSpace(latest.Identity.Email); want != "" && !identityMatches(want, profile) {
+		got := strings.Join(profile, ", ")
+		if got == "" {
+			got = "unknown"
+		}
+		return fmt.Errorf("connection %s identity changed during authorization; authorized identity %s does not match connection identity %s", authorized.ID, got, want)
+	}
+	return nil
+}
+
 func (s *Service) doctorNative(ctx context.Context, connection model.Connection, add func(string, error)) {
 	provider, err := oauthProvider(connection)
 	if err != nil {
@@ -205,19 +241,16 @@ func (s *Service) doctorNative(ctx context.Context, connection model.Connection,
 		return
 	}
 	secret := ""
-	if connection.Mail != nil {
+	switch {
+	case config.NativeMail(connection) && connection.Mail != nil:
 		secret, err = config.ResolveSecret(connection.Mail.Secret)
 		add("mail.secret", err)
-	}
-	if secret == "" && connection.Calendar != nil {
-		var calErr error
-		secret, calErr = config.ResolveSecret(connection.Calendar.Secret)
-		if connection.Mail == nil {
-			add("calendar.secret", calErr)
-			err = calErr
-		} else if calErr == nil && secret != "" {
-			err = nil
-		}
+	case config.NativeCalendar(connection) && connection.Calendar != nil:
+		secret, err = config.ResolveSecret(connection.Calendar.Secret)
+		add("calendar.secret", err)
+	default:
+		add("oauth.provider", fmt.Errorf("connection %s has no native OAuth secret", connection.ID))
+		return
 	}
 	if err != nil || secret == "" {
 		return

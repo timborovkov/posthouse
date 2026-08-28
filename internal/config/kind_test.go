@@ -1,6 +1,7 @@
 package config
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/timborovkov/posthouse/internal/model"
@@ -29,5 +30,18 @@ func TestOAuthSecretNameDoesNotReuseIMAPKeychainForCalendarOAuth(t *testing.T) {
 	}
 	if got := OAuthSecretName(native); got != "mail-oauth" {
 		t.Fatalf("native mail secret name = %q", got)
+	}
+}
+
+func TestOAuthSecretNameSanitizesGeneratedKeychainNames(t *testing.T) {
+	name := OAuthSecretName(model.Connection{ID: "work/home office", Mail: &model.MailConfig{Kind: "gmail"}})
+	if strings.ContainsAny(name, "/ ") {
+		t.Fatalf("unsafe generated keychain name %q", name)
+	}
+	if err := validateSecretName(name); err != nil {
+		t.Fatalf("generated keychain name %q: %v", name, err)
+	}
+	if got := OAuthSecretName(model.Connection{ID: "gmail-work", Mail: &model.MailConfig{Kind: "gmail"}}); got != "posthouse-gmail-work" {
+		t.Fatalf("simple generated name = %q", got)
 	}
 }

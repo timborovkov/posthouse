@@ -1284,6 +1284,9 @@ func (s *Service) PrepareCalendarWrite(ctx context.Context, connectionID, kind s
 		if config.CalendarKind(connection.Calendar) == config.CalendarKindMicrosoft && nativeRecurrenceSet(event) {
 			return model.PreparedOperation{}, fmt.Errorf("Microsoft Graph calendar writes do not serialize recurrence; omit recurrence fields")
 		}
+		if config.CalendarKind(connection.Calendar) == config.CalendarKindGmail && len(event.RecurrencePeriods) > 0 {
+			return model.PreparedOperation{}, fmt.Errorf("Gmail calendar writes do not serialize period-form recurrence; omit recurrence_periods")
+		}
 		if config.CalendarKind(connection.Calendar) == config.CalendarKindMicrosoft {
 			status := strings.ToUpper(strings.TrimSpace(event.Status))
 			if status != "" && status != "CONFIRMED" {
@@ -1325,7 +1328,7 @@ func (s *Service) PrepareCalendarWrite(ctx context.Context, connectionID, kind s
 	return s.prepare(ctx, kind, connection, payload, map[string]any{
 		"acting_identity": connection.Identity, "calendar": event.CollectionID, "title": event.Title,
 		"start": event.Start, "end": event.End, "attendees": event.Attendees, "changed_fields": event,
-		"side_effects": []string{"write one CalDAV event"},
+		"side_effects": []string{"write one calendar event"},
 	})
 }
 
@@ -1883,13 +1886,13 @@ func (s *Service) getMessageModeWithConnection(ctx context.Context, connection m
 			folder = "INBOX"
 		}
 	}
+	confirmedUIDMismatch := s.locatorNamespaceMismatch(connection, loc, folder)
 	if mode != "offline" {
 		connection, err = resolveMailConnection(connection)
 		if err != nil && mode == "refresh" {
 			return model.MessageDetail{}, err
 		}
 	}
-	confirmedUIDMismatch := false
 	if mode == "" && err == nil {
 		if _, ok := s.cachedMessageFor(connection, folder, uid); ok {
 			ledger, stateErr := s.ensureState()
@@ -1899,7 +1902,7 @@ func (s *Service) getMessageModeWithConnection(ctx context.Context, connection m
 			}
 			liveUIDValidity, validityErr := s.mailboxUIDValidity(ctx, connection, folder)
 			if validityErr == nil {
-				confirmedUIDMismatch = validityOK && liveUIDValidity != cachedUIDValidity
+				confirmedUIDMismatch = confirmedUIDMismatch || (validityOK && liveUIDValidity != cachedUIDValidity)
 				if loc.UIDValidity != 0 {
 					confirmedUIDMismatch = confirmedUIDMismatch || liveUIDValidity != loc.UIDValidity
 				}
@@ -1909,6 +1912,9 @@ func (s *Service) getMessageModeWithConnection(ctx context.Context, connection m
 				}
 			}
 		}
+	}
+	if confirmedUIDMismatch && mode == "offline" {
+		return model.MessageDetail{}, fmt.Errorf("mailbox UIDVALIDITY changed; restart from search")
 	}
 	if mode != "offline" && err == nil {
 		requestCacheID := mailCacheID(connection)
@@ -1996,7 +2002,7 @@ func (s *Service) getAttachmentModeSnapshot(ctx context.Context, connectionID st
 			return model.Attachment{}, nil, attachmentSnapshotPosition{}, err
 		}
 	}
-	confirmedUIDMismatch := false
+	confirmedUIDMismatch := s.locatorNamespaceMismatch(connection, loc, folder)
 	if mode == "" && err == nil {
 		if _, _, ok := s.cachedAttachmentFor(ctx, connection, folder, uid, attachmentID); ok {
 			ledger, stateErr := s.ensureState()
@@ -2006,13 +2012,19 @@ func (s *Service) getAttachmentModeSnapshot(ctx context.Context, connectionID st
 			}
 			liveUIDValidity, validityErr := s.mailboxUIDValidity(ctx, connection, folder)
 			if validityErr == nil {
-				confirmedUIDMismatch = validityOK && liveUIDValidity != cachedUIDValidity
+				confirmedUIDMismatch = confirmedUIDMismatch || (validityOK && liveUIDValidity != cachedUIDValidity)
+				if loc.UIDValidity != 0 {
+					confirmedUIDMismatch = confirmedUIDMismatch || liveUIDValidity != loc.UIDValidity
+				}
 				if stateErr == nil {
 					cacheID := mailCacheID(connection)
 					_, _ = s.commitMailboxUIDValidity(ledger, connection, cacheID, folder, mailboxCacheSnapshot{UIDValidity: cachedUIDValidity, Found: validityOK}, liveUIDValidity)
 				}
 			}
 		}
+	}
+	if confirmedUIDMismatch && mode == "offline" {
+		return model.Attachment{}, nil, attachmentSnapshotPosition{}, fmt.Errorf("mailbox UIDVALIDITY changed; restart from search")
 	}
 	if mode != "offline" && err == nil {
 		requestCacheID := mailCacheID(connection)
@@ -2023,6 +2035,9 @@ func (s *Service) getAttachmentModeSnapshot(ctx context.Context, connectionID st
 		}
 		attachment, data, uidValidity, fetchErr := s.mailGetAttachment(ctx, connection, folder, uid, attachmentID)
 		if fetchErr == nil {
+			if loc.UIDValidity != 0 && uidValidity != loc.UIDValidity {
+				return model.Attachment{}, nil, attachmentSnapshotPosition{}, fmt.Errorf("mailbox UIDVALIDITY changed; restart from search")
+			}
 			digest := sha256.Sum256(data)
 			snapshot := attachmentSnapshotPosition{CacheID: requestCacheID, UIDValidity: uidValidity, Digest: hex.EncodeToString(digest[:])}
 			if stateErr == nil && requestCacheID != "" {
@@ -3529,6 +3544,7 @@ func providerConfigID(connection model.Connection) string {
 		Path string `json:"path"`
 	}
 	type mailIdentity struct {
+		Kind     string           `json:"kind,omitempty"`
 		Username string           `json:"username"`
 		Secret   model.SecretRef  `json:"secret"`
 		IMAP     model.IMAPConfig `json:"imap"`
@@ -3547,7 +3563,7 @@ func providerConfigID(connection model.Connection) string {
 		Calendar *calendarIdentity `json:"calendar,omitempty"`
 	}{}
 	if connection.Mail != nil {
-		provider.Mail = &mailIdentity{Username: connection.Mail.Username, Secret: connection.Mail.Secret, IMAP: connection.Mail.IMAP}
+		provider.Mail = &mailIdentity{Kind: config.MailKind(connection.Mail), Username: connection.Mail.Username, Secret: connection.Mail.Secret, IMAP: connection.Mail.IMAP}
 	}
 	if connection.Calendar != nil {
 		calendar := connection.Calendar
@@ -3635,6 +3651,18 @@ func messageCacheKey(connectionID, folder string, uidValidity, uid uint32) strin
 
 func mailboxCacheKey(connectionID, folder string) string {
 	return framedCacheKey(connectionID, folder)
+}
+
+func (s *Service) locatorNamespaceMismatch(connection model.Connection, loc MessageLocator, folder string) bool {
+	if loc.UIDValidity == 0 {
+		return false
+	}
+	ledger, err := s.ensureState()
+	if err != nil {
+		return false
+	}
+	cached, ok := s.cachedMailboxUIDValidityFor(ledger, connection, folder)
+	return ok && cached != loc.UIDValidity
 }
 
 func framedCacheKey(parts ...string) string {

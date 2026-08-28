@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/hex"
 	"strings"
 
 	"github.com/timborovkov/posthouse/internal/model"
@@ -80,7 +81,21 @@ func OAuthSecretName(connection model.Connection) string {
 	if connection.Calendar != nil && strings.TrimSpace(connection.Calendar.Secret.Keychain) != "" {
 		return strings.TrimSpace(connection.Calendar.Secret.Keychain)
 	}
-	return "posthouse-" + connection.ID
+	return "posthouse-" + sanitizeSecretToken(connection.ID)
+}
+
+func sanitizeSecretToken(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "id"
+	}
+	for _, r := range value {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '.' || r == '_' || r == '-' {
+			continue
+		}
+		return hex.EncodeToString([]byte(value))
+	}
+	return value
 }
 
 func ConnectionReferencesOAuthSecret(connection model.Connection, name string) bool {
