@@ -142,9 +142,7 @@ func (s *Service) AuthorizeConnection(ctx context.Context, id string, device boo
 			}
 			if latest.Calendar != nil && config.NativeCalendar(latest) {
 				calendarConfig := *latest.Calendar
-				if latest.Mail == nil || !config.NativeMail(latest) {
-					calendarConfig.Secret = model.SecretRef{Keychain: keychainName}
-				}
+				calendarConfig.Secret = model.SecretRef{Keychain: keychainName}
 				current.Connections[index].Calendar = &calendarConfig
 			}
 			return current, nil

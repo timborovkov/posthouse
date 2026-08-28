@@ -497,6 +497,27 @@ func TestNativeMailCacheIDIncludesBackendKind(t *testing.T) {
 	}
 }
 
+func TestNativeOperationDigestIgnoresRotatedRefreshToken(t *testing.T) {
+	connection := model.Connection{
+		ID: "gmail-work", Identity: model.Identity{Email: "me@gmail.com"},
+		Mail: &model.MailConfig{Kind: "gmail", Secret: model.SecretRef{Keychain: "posthouse-gmail-work"}, ResolvedSecret: "token-one"},
+	}
+	first, err := digestOperationConnection(connection, "mail.send")
+	if err != nil || first == "" {
+		t.Fatalf("first digest = %q, %v", first, err)
+	}
+	connection.Mail.ResolvedSecret = "token-two"
+	second, err := digestOperationConnection(connection, "mail.send")
+	if err != nil || first != second {
+		t.Fatalf("rotated native digest changed: %q vs %q err=%v", first, second, err)
+	}
+	connection.Identity.Email = "other@gmail.com"
+	third, err := digestOperationConnection(connection, "mail.send")
+	if err != nil || third == first {
+		t.Fatalf("identity change did not change digest: %q vs %q err=%v", first, third, err)
+	}
+}
+
 func TestCalendarFetchUsesOneResolvedProviderSnapshot(t *testing.T) {
 	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
 	t.Setenv("SECRET_FEED_URL", "https://calendar-one.example.test/feed.ics")

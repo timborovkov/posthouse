@@ -203,6 +203,9 @@ func TestGmailPrepareSendAndLabelExecuteAgainstFixture(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if effects, _ := prepared.Preview["side_effects"].([]string); len(effects) == 0 || effects[0] != "send one Gmail API message" {
+		t.Fatalf("gmail send preview = %#v", prepared.Preview["side_effects"])
+	}
 	if _, err := application.ExecuteOperation(context.Background(), prepared.Token); err != nil || !sent {
 		t.Fatalf("execute send = %v sent=%v", err, sent)
 	}
@@ -244,6 +247,9 @@ func TestMicrosoftPrepareSendAgainstFixture(t *testing.T) {
 	prepared, err := application.PrepareSend(context.Background(), model.SendMessage{ConnectionID: "microsoft", To: []string{"teammate@example.test"}, Subject: "Status", Text: "Hello"})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if effects, _ := prepared.Preview["side_effects"].([]string); len(effects) == 0 || effects[0] != "send one Microsoft Graph message" {
+		t.Fatalf("microsoft send preview = %#v", prepared.Preview["side_effects"])
 	}
 	if _, err := application.ExecuteOperation(context.Background(), prepared.Token); err != nil || !sent {
 		t.Fatalf("execute send = %v sent=%v", err, sent)
@@ -804,5 +810,49 @@ func TestDoctorMixedIMAPCalendarUsesCalendarOAuthSecret(t *testing.T) {
 	encoded, _ := json.Marshal(result)
 	if strings.Contains(string(encoded), "imap-password") || strings.Contains(string(encoded), "refresh-secret") {
 		t.Fatalf("doctor leaked secret: %s", encoded)
+	}
+}
+
+func TestAuthorizeConnectionRepointsSplitCalendarSecret(t *testing.T) {
+	keyring.MockInit()
+	t.Setenv("POSTHOUSE_GOOGLE_CLIENT_ID", "desktop.apps.googleusercontent.com")
+	application := serviceWithConnections(t, model.Connection{
+		ID: "gmail-work", Name: "Gmail", Identity: model.Identity{Email: "a@gmail.com"},
+		Mail:     &model.MailConfig{Kind: "gmail", Secret: model.SecretRef{Keychain: "mail-oauth"}},
+		Calendar: &model.CalendarConfig{Kind: "gmail", Secret: model.SecretRef{Keychain: "cal-oauth"}},
+	})
+	application.authorizeOAuth = func(context.Context, oauth.Config, bool) (string, error) { return "refresh-secret-value", nil }
+	application.nativeIdentity = func(context.Context, model.Connection) (string, error) { return "a@gmail.com", nil }
+	if _, err := application.AuthorizeConnection(context.Background(), "gmail-work", true); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := application.store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Connections[0].Mail.Secret.Keychain != "mail-oauth" || cfg.Connections[0].Calendar.Secret.Keychain != "mail-oauth" {
+		t.Fatalf("split secrets after auth mail=%#v calendar=%#v", cfg.Connections[0].Mail.Secret, cfg.Connections[0].Calendar.Secret)
+	}
+}
+
+func TestMicrosoftPrepareCalendarWritePreviewsAttendeeInvitations(t *testing.T) {
+	t.Setenv("POSTHOUSE_CACHE_KEY", base64.RawURLEncoding.EncodeToString(make([]byte, 32)))
+	t.Setenv("POSTHOUSE_MICROSOFT_CLIENT_ID", "public-client")
+	t.Setenv("MS_REFRESH", "refresh-ms")
+	application := serviceWithConnections(t, model.Connection{
+		ID: "microsoft", Name: "Microsoft", Identity: model.Identity{Email: "me@contoso.test"},
+		Calendar: &model.CalendarConfig{Kind: "microsoft", Secret: model.SecretRef{Env: "MS_REFRESH"}},
+	})
+	start := time.Date(2026, 8, 17, 9, 0, 0, 0, time.UTC)
+	prepared, err := application.PrepareCalendarWrite(context.Background(), "microsoft", "calendar.create", model.Event{
+		Title: "Planning", Start: start, End: start.Add(time.Hour), Attendees: []string{"teammate@example.test"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	effects, _ := prepared.Preview["side_effects"].([]string)
+	joined := strings.Join(effects, " ")
+	if !strings.Contains(joined, "write one calendar event") || !strings.Contains(joined, "send attendee invitations") {
+		t.Fatalf("microsoft calendar preview = %#v", prepared.Preview["side_effects"])
 	}
 }

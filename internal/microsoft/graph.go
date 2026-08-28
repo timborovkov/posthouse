@@ -202,6 +202,9 @@ func Get(ctx context.Context, connection model.Connection, id string) (postmail.
 	fetched.Detail.MessageID = meta.InternetMessageID
 	if parsed, err := time.Parse(time.RFC3339, meta.ReceivedDateTime); err == nil {
 		fetched.Detail.ReceivedAt = parsed.UTC()
+		if fetched.Detail.Date.IsZero() {
+			fetched.Detail.Date = parsed.UTC()
+		}
 	}
 	return fetched, nil
 }
@@ -405,7 +408,7 @@ func ListEvents(ctx context.Context, connection model.Connection, start, end tim
 			return nil, err
 		}
 		for _, item := range listed.Value {
-			if query != "" && !strings.Contains(strings.ToLower(item.Subject+" "+item.description()), strings.ToLower(query)) {
+			if query != "" && !graphEventMatchesQuery(item, query) {
 				continue
 			}
 			events = append(events, item.model(connection.ID))
@@ -486,6 +489,7 @@ func (item graphMessage) model(connectionID, folder string) model.Message {
 	}
 	if parsed, err := time.Parse(time.RFC3339, item.ReceivedDateTime); err == nil {
 		message.ReceivedAt = parsed.UTC()
+		message.Date = parsed.UTC()
 	}
 	if item.From != nil {
 		message.From = []model.Address{{Name: item.From.EmailAddress.Name, Email: item.From.EmailAddress.Address}}
@@ -534,6 +538,18 @@ func (item graphEvent) description() string {
 		return item.Body.Content
 	}
 	return item.BodyPreview
+}
+
+func graphEventMatchesQuery(item graphEvent, query string) bool {
+	needle := strings.ToLower(strings.TrimSpace(query))
+	if needle == "" {
+		return true
+	}
+	haystack := strings.ToLower(item.Subject + " " + item.description())
+	if item.Location != nil {
+		haystack += " " + strings.ToLower(item.Location.DisplayName)
+	}
+	return strings.Contains(haystack, needle)
 }
 
 func graphAttendees(values []string) []map[string]any {

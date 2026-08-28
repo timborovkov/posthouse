@@ -532,12 +532,12 @@ func (s *Server) registerTools() {
 		})
 
 	if s.profile != policy.MCPProfileReadonly {
-		mcp.AddTool(s.mcp, &mcp.Tool{Name: "event_create_prepare", Title: "Prepare event create", Description: "Prepare creation of one event in an exact writable calendar connection (CalDAV, Gmail, or Microsoft). CalDAV needs a collection; native Gmail and Microsoft write the primary calendar. Gmail does not serialize period-form recurrence. Microsoft Graph does not serialize recurrence or event status other than confirmed. No event is written until operation_execute.", Annotations: readOnly},
+		mcp.AddTool(s.mcp, &mcp.Tool{Name: "event_create_prepare", Title: "Prepare event create", Description: "Prepare creation of one event in an exact writable calendar connection (CalDAV, Gmail, or Microsoft). CalDAV needs a collection; native Gmail and Microsoft write the primary calendar. Gmail does not serialize period-form recurrence. Microsoft Graph does not serialize recurrence or event status other than confirmed, and writes with attendees send invitations. No event is written until operation_execute.", Annotations: readOnly},
 			func(ctx context.Context, _ *mcp.CallToolRequest, input eventMutationInput) (*mcp.CallToolResult, model.PreparedOperation, error) {
 				prepared, err := s.service.PrepareCalendarWrite(ctx, input.Connection, "calendar.create", input.Event)
 				return nil, prepared, err
 			})
-		mcp.AddTool(s.mcp, &mcp.Tool{Name: "event_update_prepare", Title: "Prepare event update", Description: "Prepare an ETag-guarded update to one CalDAV, Gmail, or Microsoft calendar event. Native writes do not support occurrence overrides; refresh and edit the series master. Microsoft Graph does not serialize recurrence. No event is written until operation_execute.", Annotations: readOnly},
+		mcp.AddTool(s.mcp, &mcp.Tool{Name: "event_update_prepare", Title: "Prepare event update", Description: "Prepare an ETag-guarded update to one CalDAV, Gmail, or Microsoft calendar event. Native writes do not support occurrence overrides; refresh and edit the series master from events_list. Microsoft Graph does not serialize recurrence, and updates with attendees send invitations. No event is written until operation_execute.", Annotations: readOnly},
 			func(ctx context.Context, _ *mcp.CallToolRequest, input eventMutationInput) (*mcp.CallToolResult, model.PreparedOperation, error) {
 				prepared, err := s.service.PrepareCalendarWrite(ctx, input.Connection, "calendar.update", input.Event)
 				return nil, prepared, err

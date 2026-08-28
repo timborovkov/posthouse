@@ -715,13 +715,19 @@ func DeleteKeychainSecret(name string) error {
 	if err := validateSecretName(name); err != nil {
 		return err
 	}
-	if err := keyringDelete(keyringService, name); err != nil && !errors.Is(err, keyring.ErrNotFound) {
-		// Servers often have no OS keychain; the on-disk fallback is enough.
+	keyringErr := keyringDelete(keyringService, name)
+	fallbackErr := os.Remove(fallbackSecretPath(name))
+	fallbackRemoved := fallbackErr == nil
+	if fallbackErr != nil && !errors.Is(fallbackErr, os.ErrNotExist) {
+		return fmt.Errorf("delete keychain secret %q: %w", name, fallbackErr)
 	}
-	if err := os.Remove(fallbackSecretPath(name)); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("delete keychain secret %q: %w", name, err)
+	if keyringErr == nil || errors.Is(keyringErr, keyring.ErrNotFound) {
+		return nil
 	}
-	return nil
+	if fallbackRemoved {
+		return nil
+	}
+	return fmt.Errorf("delete keychain secret %q: %w", name, keyringErr)
 }
 
 func validateSecretName(name string) error {

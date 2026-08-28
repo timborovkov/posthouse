@@ -10,6 +10,7 @@ import (
 	"mime"
 	"mime/multipart"
 	"net/http"
+	stdmail "net/mail"
 	"net/textproto"
 	"net/url"
 	"strconv"
@@ -378,6 +379,38 @@ func ListEvents(ctx context.Context, connection model.Connection, start, end tim
 	if err != nil {
 		return nil, err
 	}
+	events, masterIDs, err := listCalendarEvents(ctx, client, connection.ID, start, end, query, true)
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[string]bool, len(events))
+	for _, event := range events {
+		if event.Href != "" {
+			seen[event.Href] = true
+		}
+	}
+	for _, id := range masterIDs {
+		if seen[id] {
+			continue
+		}
+		var item calendarEvent
+		if err := doJSON(ctx, client, http.MethodGet, CalendarAPIBase+"/calendars/primary/events/"+url.PathEscape(id), nil, &item); err != nil {
+			if isGmailNotFound(err) {
+				continue
+			}
+			return nil, err
+		}
+		master := item.model(connection.ID)
+		if master.Href == "" || seen[master.Href] {
+			continue
+		}
+		seen[master.Href] = true
+		events = append(events, master)
+	}
+	return events, nil
+}
+
+func listCalendarEvents(ctx context.Context, client *http.Client, connectionID string, start, end time.Time, query string, singleEvents bool) ([]model.Event, []string, error) {
 	values := url.Values{}
 	if !start.IsZero() {
 		values.Set("timeMin", start.UTC().Format(time.RFC3339))
@@ -388,9 +421,13 @@ func ListEvents(ctx context.Context, connection model.Connection, start, end tim
 	if query != "" {
 		values.Set("q", query)
 	}
-	values.Set("singleEvents", "true")
+	if singleEvents {
+		values.Set("singleEvents", "true")
+	}
 	values.Set("maxResults", "2500")
 	events := make([]model.Event, 0)
+	masters := make([]string, 0)
+	seenMaster := map[string]bool{}
 	pageToken := ""
 	for page := 0; page < maxEventPages; page++ {
 		if pageToken != "" {
@@ -403,17 +440,21 @@ func ListEvents(ctx context.Context, connection model.Connection, start, end tim
 			NextPageToken string          `json:"nextPageToken"`
 		}
 		if err := doJSON(ctx, client, http.MethodGet, CalendarAPIBase+"/calendars/primary/events?"+values.Encode(), nil, &listed); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		for _, item := range listed.Items {
-			events = append(events, item.model(connection.ID))
+			events = append(events, item.model(connectionID))
+			if id := strings.TrimSpace(item.RecurringEventID); id != "" && !seenMaster[id] {
+				seenMaster[id] = true
+				masters = append(masters, id)
+			}
 		}
 		if listed.NextPageToken == "" {
-			return events, nil
+			return events, masters, nil
 		}
 		pageToken = listed.NextPageToken
 	}
-	return nil, fmt.Errorf("gmail calendar listing exceeded %d pages", maxEventPages)
+	return nil, nil, fmt.Errorf("gmail calendar listing exceeded %d pages", maxEventPages)
 }
 
 func PutEvent(ctx context.Context, connection model.Connection, event model.Event, create bool) (model.Event, error) {
@@ -424,25 +465,13 @@ func PutEvent(ctx context.Context, connection model.Connection, event model.Even
 	if err != nil {
 		return model.Event{}, err
 	}
-	payload := calendarEvent{
-		Summary:     event.Title,
-		Description: event.Description,
-		Location:    event.Location,
-		Status:      event.Status,
-		Attendees:   calendarAttendees(event.Attendees),
-		Recurrence:  calendarRecurrence(event),
-	}
-	if event.AllDay {
-		payload.Start = calendarTime{Date: civilDate(event.Start)}
-		payload.End = calendarTime{Date: civilDate(event.End)}
-	} else {
-		payload.Start = calendarTime{DateTime: event.Start.UTC().Format(time.RFC3339)}
-		payload.End = calendarTime{DateTime: event.End.UTC().Format(time.RFC3339)}
-	}
+	payload := calendarMutationPayload(event, create)
 	method, path := http.MethodPost, CalendarAPIBase+"/calendars/primary/events"
 	var headers http.Header
 	if create {
-		payload.ICalUID = event.ID
+		if event.ID != "" {
+			payload["iCalUID"] = event.ID
+		}
 	} else {
 		id := event.Href
 		if id == "" {
@@ -522,6 +551,35 @@ func (item calendarEvent) model(connectionID string) model.Event {
 		event.RecurrenceRule = rule
 	}
 	return event
+}
+
+func calendarMutationPayload(event model.Event, create bool) map[string]any {
+	payload := map[string]any{
+		"summary":     event.Title,
+		"description": event.Description,
+		"location":    event.Location,
+	}
+	if event.AllDay {
+		payload["start"] = map[string]string{"date": civilDate(event.Start)}
+		payload["end"] = map[string]string{"date": civilDate(event.End)}
+	} else {
+		payload["start"] = map[string]string{"dateTime": event.Start.UTC().Format(time.RFC3339)}
+		payload["end"] = map[string]string{"dateTime": event.End.UTC().Format(time.RFC3339)}
+	}
+	if event.Status != "" {
+		payload["status"] = event.Status
+	}
+	attendees := calendarAttendees(event.Attendees)
+	if !create || len(attendees) > 0 {
+		if attendees == nil {
+			attendees = []calendarAttendee{}
+		}
+		payload["attendees"] = attendees
+	}
+	if rec := calendarRecurrence(event); len(rec) > 0 {
+		payload["recurrence"] = rec
+	}
+	return payload
 }
 
 func calendarAttendees(values []string) []calendarAttendee {
@@ -752,9 +810,9 @@ func messageFromRaw(connectionID string, payload rawMessage) model.Message {
 			case "message-id":
 				message.MessageID = header.Value
 			case "from":
-				message.From = []model.Address{{Email: header.Value}}
+				message.From = parseMailboxHeader(header.Value)
 			case "to":
-				message.To = []model.Address{{Email: header.Value}}
+				message.To = parseMailboxHeader(header.Value)
 			case "date":
 				if parsed, err := time.Parse(time.RFC1123Z, header.Value); err == nil {
 					message.Date = parsed.UTC()
@@ -785,8 +843,8 @@ func payloadHasAttachment(payload *gmailPayload) bool {
 
 func searchQuery(options postmail.SearchOptions) string {
 	parts := make([]string, 0, 4)
-	if options.Query != "" {
-		parts = append(parts, options.Query)
+	if phrase := quoteGmailPhrase(options.Query); phrase != "" {
+		parts = append(parts, phrase)
 	}
 	if options.Unread {
 		parts = append(parts, "is:unread")
@@ -856,19 +914,77 @@ func unreadLabel(folder string) string {
 }
 
 func folderFromLabels(labels []string) string {
+	has := map[string]bool{}
+	var custom []string
 	for _, label := range labels {
 		switch label {
-		case "INBOX":
-			return "INBOX"
-		case "SENT":
-			return "SENT"
-		case "DRAFT":
-			return "DRAFTS"
-		case "TRASH":
-			return "TRASH"
+		case "INBOX", "SENT", "DRAFT", "TRASH", "SPAM":
+			has[label] = true
+		default:
+			if !gmailSystemLabel(label) {
+				custom = append(custom, label)
+			}
 		}
 	}
-	return "INBOX"
+	switch {
+	case has["TRASH"]:
+		return "TRASH"
+	case has["SPAM"]:
+		return "SPAM"
+	case has["SENT"]:
+		return "SENT"
+	case has["DRAFT"]:
+		return "DRAFTS"
+	case has["INBOX"]:
+		return "INBOX"
+	case len(custom) > 0:
+		return custom[0]
+	default:
+		return "ARCHIVE"
+	}
+}
+
+func gmailSystemLabel(label string) bool {
+	switch label {
+	case "INBOX", "SENT", "DRAFT", "TRASH", "SPAM", "STARRED", "UNREAD", "IMPORTANT", "CHAT",
+		"YELLOW_STAR", "BLUE_STAR", "RED_STAR", "ORANGE_STAR", "GREEN_STAR", "PURPLE_STAR",
+		"RED_BANG", "ORANGE_GUILLEMET", "YELLOW_BANG", "GREEN_CHECK", "BLUE_INFO", "PURPLE_QUESTION":
+		return true
+	}
+	return strings.HasPrefix(label, "CATEGORY_")
+}
+
+func quoteGmailPhrase(query string) string {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return ""
+	}
+	return `"` + strings.ReplaceAll(query, `"`, ` `) + `"`
+}
+
+func parseMailboxHeader(value string) []model.Address {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	list, err := stdmail.ParseAddressList(value)
+	if err != nil {
+		if parsed, parseErr := stdmail.ParseAddress(value); parseErr == nil {
+			return []model.Address{{Name: parsed.Name, Email: parsed.Address}}
+		}
+		return []model.Address{{Email: value}}
+	}
+	out := make([]model.Address, 0, len(list))
+	for _, addr := range list {
+		if addr == nil || strings.TrimSpace(addr.Address) == "" {
+			continue
+		}
+		out = append(out, model.Address{Name: addr.Name, Email: addr.Address})
+	}
+	if len(out) == 0 {
+		return []model.Address{{Email: value}}
+	}
+	return out
 }
 
 func containsLabel(labels []string, want string) bool {

@@ -576,3 +576,35 @@ func TestListEventsNormalizesHTMLBodyAndMarksOccurrences(t *testing.T) {
 		t.Fatalf("HTML body was not normalized: %q", events[0].Description)
 	}
 }
+
+func TestGraphMessageModelSetsDate(t *testing.T) {
+	message := graphMessage{ID: "AAMk", Subject: "Hello", ReceivedDateTime: "2026-08-17T12:00:00Z"}.model("ms", "INBOX")
+	if message.Date.IsZero() || !message.Date.Equal(message.ReceivedAt) || message.ReceivedAt.UTC().Format(time.RFC3339) != "2026-08-17T12:00:00Z" {
+		t.Fatalf("graph message dates = date=%v received=%v", message.Date, message.ReceivedAt)
+	}
+}
+
+func TestListEventsMatchesLocationQuery(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/token" {
+			writer.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(writer).Encode(map[string]any{"access_token": "graph-access", "token_type": "Bearer", "expires_in": 3600})
+			return
+		}
+		_ = json.NewEncoder(writer).Encode(map[string]any{"value": []map[string]any{{
+			"id": "loc-1", "iCalUId": "uid-loc", "subject": "Standup",
+			"location": map[string]string{"displayName": "Room 12"},
+			"start":    map[string]string{"dateTime": "2026-08-17T09:00:00", "timeZone": "UTC"},
+			"end":      map[string]string{"dateTime": "2026-08-17T09:30:00", "timeZone": "UTC"},
+		}}})
+	}))
+	defer server.Close()
+	t.Setenv("POSTHOUSE_MICROSOFT_CLIENT_ID", "public-client")
+	origBase, origToken := APIBase, TokenURL
+	APIBase, TokenURL = server.URL, server.URL+"/token"
+	defer func() { APIBase, TokenURL = origBase, origToken }()
+	events, err := ListEvents(context.Background(), model.Connection{ID: "ms", Calendar: &model.CalendarConfig{Kind: "microsoft", ResolvedSecret: "refresh-ms"}}, time.Date(2026, 8, 17, 0, 0, 0, 0, time.UTC), time.Date(2026, 8, 18, 0, 0, 0, 0, time.UTC), "Room 12")
+	if err != nil || len(events) != 1 || events[0].Location != "Room 12" {
+		t.Fatalf("location query = %#v, %v", events, err)
+	}
+}

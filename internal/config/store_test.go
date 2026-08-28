@@ -339,3 +339,18 @@ func TestSetKeychainSecretFallsBackNextToConfig(t *testing.T) {
 		t.Fatalf("deleted secret still present: %v", err)
 	}
 }
+
+func TestDeleteKeychainSecretReportsDesktopKeyringErrors(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := New(filepath.Join(dir, "config.json")); err != nil {
+		t.Fatal(err)
+	}
+	originalDelete, originalDir := keyringDelete, defaultSecretsDir
+	keyringDelete = func(string, string) error { return fmt.Errorf("keyring locked") }
+	defer func() {
+		keyringDelete, defaultSecretsDir = originalDelete, originalDir
+	}()
+	if err := DeleteKeychainSecret("posthouse-gmail-work"); err == nil || !strings.Contains(err.Error(), "keyring locked") {
+		t.Fatalf("DeleteKeychainSecret locked = %v", err)
+	}
+}

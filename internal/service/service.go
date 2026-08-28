@@ -820,7 +820,7 @@ func (s *Service) prepareSendWithConnection(ctx context.Context, connection mode
 		"subject":         message.Subject, "text": message.Text, "html": message.HTML, "reply_to": message.ReplyTo,
 		"in_reply_to": message.InReplyTo, "references": message.References,
 		"attachments":  attachmentPreviews(message.Attachments),
-		"side_effects": []string{"send SMTP message", sentCopyEffect(connection)},
+		"side_effects": []string{sendSideEffect(connection), sentCopyEffect(connection)},
 	})
 }
 
@@ -982,7 +982,7 @@ func (s *Service) PrepareForwardVerbatim(ctx context.Context, connectionID strin
 		"source":          map[string]any{"id": loc.ID, "folder": loc.Folder, "uid": loc.UID, "attachment_count": len(attachments)},
 		"comment":         strings.TrimSpace(comment),
 		"attachments":     attachmentPreviews(attachments),
-		"side_effects":    []string{"send SMTP message", sentCopyEffect(connection)},
+		"side_effects":    []string{sendSideEffect(connection), sentCopyEffect(connection)},
 	})
 }
 
@@ -1328,7 +1328,7 @@ func (s *Service) PrepareCalendarWrite(ctx context.Context, connectionID, kind s
 	return s.prepare(ctx, kind, connection, payload, map[string]any{
 		"acting_identity": connection.Identity, "calendar": event.CollectionID, "title": event.Title,
 		"start": event.Start, "end": event.End, "attendees": event.Attendees, "changed_fields": event,
-		"side_effects": []string{"write one calendar event"},
+		"side_effects": calendarWriteEffects(connection, event),
 	})
 }
 
@@ -2336,7 +2336,22 @@ func validateOutboundAttachmentInputs(attachments []model.AttachmentInput) error
 }
 
 func digestResolvedConnection(connection model.Connection) (string, error) {
-	data, err := json.Marshal(connection)
+	snapshot := connection
+	if snapshot.Mail != nil {
+		mail := *snapshot.Mail
+		if config.NativeMail(snapshot) {
+			mail.ResolvedSecret = ""
+		}
+		snapshot.Mail = &mail
+	}
+	if snapshot.Calendar != nil {
+		calendar := *snapshot.Calendar
+		if config.NativeCalendar(connection) {
+			calendar.ResolvedSecret = ""
+		}
+		snapshot.Calendar = &calendar
+	}
+	data, err := json.Marshal(snapshot)
 	if err != nil {
 		return "", fmt.Errorf("encode connection precondition: %w", err)
 	}
@@ -2349,7 +2364,7 @@ func digestResolvedConnection(connection model.Connection) (string, error) {
 		_, _ = digest.Write([]byte("\x00" + label + "\x00" + value))
 		return nil
 	}
-	if connection.Mail != nil {
+	if connection.Mail != nil && !config.NativeMail(connection) {
 		if err := writeSecret("mail.secret", connection.Mail.ResolvedSecret); err != nil {
 			return "", err
 		}
@@ -2358,7 +2373,7 @@ func digestResolvedConnection(connection model.Connection) (string, error) {
 		if err := writeSecret("calendar.url", connection.Calendar.ResolvedURL); err != nil {
 			return "", err
 		}
-		if connection.Calendar.Kind == "caldav" || config.NativeCalendar(connection) {
+		if connection.Calendar.Kind == "caldav" {
 			if err := writeSecret("calendar.secret", connection.Calendar.ResolvedSecret); err != nil {
 				return "", err
 			}
@@ -2500,6 +2515,32 @@ func sentCopyEffect(connection model.Connection) string {
 	}
 }
 
+func sendSideEffect(connection model.Connection) string {
+	switch config.MailKind(connection.Mail) {
+	case config.MailKindGmail:
+		return "send one Gmail API message"
+	case config.MailKindMicrosoft:
+		return "send one Microsoft Graph message"
+	default:
+		return "send SMTP message"
+	}
+}
+
+func calendarWriteEffects(connection model.Connection, event model.Event) []string {
+	effects := []string{"write one calendar event"}
+	if config.CalendarKind(connection.Calendar) == config.CalendarKindMicrosoft && len(event.Attendees) > 0 {
+		effects = append(effects, "send attendee invitations")
+	}
+	return effects
+}
+
+func triageDate(message model.Message) time.Time {
+	if !message.Date.IsZero() {
+		return message.Date
+	}
+	return message.ReceivedAt
+}
+
 func decodeCacheKey(encoded string) ([]byte, error) {
 	encoded = strings.TrimSpace(encoded)
 	for _, encoding := range []*base64.Encoding{base64.RawURLEncoding, base64.StdEncoding, base64.RawStdEncoding} {
@@ -2637,7 +2678,7 @@ func (s *Service) TriageMessages(ctx context.Context, selection model.Selector, 
 			UID:            message.UID,
 			From:           message.From,
 			Subject:        message.Subject,
-			Date:           message.Date,
+			Date:           triageDate(message),
 			Unread:         message.Unread,
 			Flagged:        message.Flagged,
 			HasAttachments: message.HasAttachments,

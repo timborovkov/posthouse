@@ -518,10 +518,21 @@ func TestPutEventRejectsRecurrencePeriods(t *testing.T) {
 }
 
 func TestListEventsMarksExpandedOccurrences(t *testing.T) {
+	var listedMasters bool
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.URL.Path == "/token" {
 			writer.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(writer).Encode(map[string]any{"access_token": "ya29.access", "token_type": "Bearer", "expires_in": 3600})
+			return
+		}
+		if strings.HasSuffix(request.URL.Path, "/events/evt-1") {
+			listedMasters = true
+			_ = json.NewEncoder(writer).Encode(map[string]any{
+				"id": "evt-1", "iCalUID": "uid-series", "summary": "Standup", "etag": `"master"`,
+				"recurrence": []string{"RRULE:FREQ=WEEKLY"},
+				"start":      map[string]string{"dateTime": "2026-08-17T09:00:00Z"},
+				"end":        map[string]string{"dateTime": "2026-08-17T09:30:00Z"},
+			})
 			return
 		}
 		_ = json.NewEncoder(writer).Encode(map[string]any{"items": []map[string]any{{
@@ -538,8 +549,22 @@ func TestListEventsMarksExpandedOccurrences(t *testing.T) {
 	CalendarAPIBase, TokenURL = server.URL+"/calendar/v3", server.URL+"/token"
 	defer func() { CalendarAPIBase, TokenURL = origCal, origToken }()
 	events, err := ListEvents(context.Background(), model.Connection{ID: "gmail-work", Mail: &model.MailConfig{Kind: "gmail", ResolvedSecret: "refresh"}}, time.Time{}, time.Time{}, "")
-	if err != nil || len(events) != 1 || events[0].RecurrenceID != "2026-08-17T09:00:00Z" || events[0].SeriesID != "uid-series" {
-		t.Fatalf("ListEvents occurrence = %#v, %v", events, err)
+	if err != nil || !listedMasters || len(events) != 2 {
+		t.Fatalf("ListEvents occurrence+master = %#v listedMasters=%v err=%v", events, listedMasters, err)
+	}
+	var occurrence, master model.Event
+	for _, event := range events {
+		if event.RecurrenceID != "" {
+			occurrence = event
+		} else {
+			master = event
+		}
+	}
+	if occurrence.RecurrenceID != "2026-08-17T09:00:00Z" || occurrence.Href != "evt-1_20260817T090000Z" {
+		t.Fatalf("occurrence = %#v", occurrence)
+	}
+	if master.Href != "evt-1" || master.RecurrenceID != "" || master.RecurrenceRule != "FREQ=WEEKLY" || master.ETag != `"master"` {
+		t.Fatalf("master = %#v", master)
 	}
 }
 
@@ -572,5 +597,77 @@ func TestSearchSkipsMessagesDeletedDuringMetadata(t *testing.T) {
 	result, err := Search(context.Background(), model.Connection{ID: "gmail-work", Mail: &model.MailConfig{Kind: "gmail", ResolvedSecret: "refresh"}}, postmail.SearchOptions{Limit: 10})
 	if err != nil || len(result.Messages) != 1 || result.Messages[0].ID != "kept" {
 		t.Fatalf("Search skipped deleted = %#v, %v", result, err)
+	}
+}
+
+func TestSearchQueryQuotesGenericText(t *testing.T) {
+	query := searchQuery(postmail.SearchOptions{Query: "is:unread from:alice", Folder: "INBOX"})
+	if !strings.Contains(query, `"is:unread from:alice"`) || strings.Contains(query, " is:unread ") {
+		t.Fatalf("searchQuery leaked Gmail operators: %q", query)
+	}
+}
+
+func TestPutEventUpdateSendsEmptyDescription(t *testing.T) {
+	var body map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/token" {
+			writer.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(writer).Encode(map[string]any{"access_token": "ya29.access", "token_type": "Bearer", "expires_in": 3600})
+			return
+		}
+		_ = json.NewDecoder(request.Body).Decode(&body)
+		_ = json.NewEncoder(writer).Encode(map[string]any{
+			"id": "evt-1", "iCalUID": "uid-1", "summary": "Updated",
+			"start": map[string]string{"dateTime": "2026-08-17T09:00:00Z"}, "end": map[string]string{"dateTime": "2026-08-17T10:00:00Z"},
+		})
+	}))
+	defer server.Close()
+	t.Setenv("POSTHOUSE_GOOGLE_CLIENT_ID", "desktop.apps.googleusercontent.com")
+	origCal, origToken := CalendarAPIBase, TokenURL
+	CalendarAPIBase, TokenURL = server.URL+"/calendar/v3", server.URL+"/token"
+	defer func() { CalendarAPIBase, TokenURL = origCal, origToken }()
+	start := time.Date(2026, 8, 17, 9, 0, 0, 0, time.UTC)
+	_, err := PutEvent(context.Background(), model.Connection{ID: "gmail-work", Mail: &model.MailConfig{Kind: "gmail", ResolvedSecret: "refresh"}}, model.Event{
+		Href: "evt-1", Title: "Updated", Start: start, End: start.Add(time.Hour), Description: "", Location: "",
+	}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := body["description"]; !ok || body["description"] != "" {
+		t.Fatalf("update omitted empty description: %#v", body)
+	}
+	if _, ok := body["location"]; !ok || body["location"] != "" {
+		t.Fatalf("update omitted empty location: %#v", body)
+	}
+}
+
+func TestFolderFromLabelsMapsSpamAndCustom(t *testing.T) {
+	if got := folderFromLabels([]string{"UNREAD", "SPAM"}); got != "SPAM" {
+		t.Fatalf("spam folder = %q", got)
+	}
+	if got := folderFromLabels([]string{"UNREAD", "Label_42"}); got != "Label_42" {
+		t.Fatalf("custom folder = %q", got)
+	}
+	if got := folderFromLabels([]string{"UNREAD", "STARRED"}); got != "ARCHIVE" {
+		t.Fatalf("archived folder = %q", got)
+	}
+}
+
+func TestMessageFromRawParsesMailboxHeaders(t *testing.T) {
+	message := messageFromRaw("gmail-work", rawMessage{
+		ID: "msg-1",
+		Payload: &gmailPayload{Headers: []struct {
+			Name  string `json:"name"`
+			Value string `json:"value"`
+		}{
+			{Name: "From", Value: "Sender Name <sender@example.com>"},
+			{Name: "To", Value: "Alice <alice@example.com>, bob@example.com"},
+		}},
+	})
+	if len(message.From) != 1 || message.From[0].Email != "sender@example.com" || message.From[0].Name != "Sender Name" {
+		t.Fatalf("from = %#v", message.From)
+	}
+	if len(message.To) != 2 || message.To[0].Email != "alice@example.com" || message.To[1].Email != "bob@example.com" {
+		t.Fatalf("to = %#v", message.To)
 	}
 }
